@@ -265,10 +265,19 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 @keyframes overlayIn { from { opacity: 0; } }
 @keyframes overlayOut { to { opacity: 0; } }
 .settings-dialog {
+  position: relative;
   width: min(960px, 94vw); height: min(660px, 92vh); background: var(--panel);
   border-radius: 12px; display: flex; overflow: hidden;
   animation: dialogIn .2s cubic-bezier(.2, .7, .3, 1);
 }
+.settings-close {
+  position: absolute; top: 12px; right: 14px; z-index: 10;
+  width: 30px; height: 30px; border-radius: 50%;
+  font-size: 19px; line-height: 1; color: var(--muted);
+  display: flex; align-items: center; justify-content: center;
+  transition: background .12s, color .12s, transform .12s;
+}
+.settings-close:hover { background: var(--panel-2); color: var(--text); transform: rotate(90deg); }
 #settings-overlay.closing .settings-dialog { animation: dialogOut .15s ease forwards; }
 @keyframes dialogIn { from { opacity: 0; transform: translateY(14px) scale(.985); } }
 @keyframes dialogOut { to { opacity: 0; transform: translateY(8px) scale(.99); } }

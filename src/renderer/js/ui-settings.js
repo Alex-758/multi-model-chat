@@ -559,7 +559,14 @@ window.MM = window.MM || {};
   function bind() {
     U.$('#btn-settings').addEventListener('click', open);
     U.$('#btn-settings-close').addEventListener('click', close);
+    U.$('#btn-settings-x').addEventListener('click', close);
     U.$('#settings-overlay').addEventListener('click', e => { if (e.target.id === 'settings-overlay') close(); });
+    // Esc 关闭设置页
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && !U.$('#settings-overlay').classList.contains('hidden')) {
+        close();
+      }
+    });
     for (const nav of U.$$('.settings-nav')) {
       nav.addEventListener('click', () => {
         for (const n of U.$$('.settings-nav')) n.classList.remove('active');
