@@ -6,9 +6,13 @@ window.MM = window.MM || {};
   const U = MM.util;
   let editingId = null; // 当前编辑的服务商 id
 
+  let closeTimer = null; // 关闭动画定时器（防快速开/关互相打架）
+
   // ---------- 打开 / 关闭 ----------
   function open() {
-    U.$('#settings-overlay').classList.remove('hidden');
+    if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+    const overlay = U.$('#settings-overlay');
+    overlay.classList.remove('closing', 'hidden');
     renderModels();
     renderSearch();
     renderSynth();
@@ -22,7 +26,14 @@ window.MM = window.MM || {};
     }).catch(() => {});
   }
   function close() {
-    U.$('#settings-overlay').classList.add('hidden');
+    const overlay = U.$('#settings-overlay');
+    overlay.classList.add('closing'); // 播放淡出动画
+    if (closeTimer) clearTimeout(closeTimer);
+    closeTimer = setTimeout(() => {
+      overlay.classList.add('hidden');
+      overlay.classList.remove('closing');
+      closeTimer = null;
+    }, 150);
     // 行内编辑自动保存，并同步聊天页的模型选择器
     MM.save();
     if (MM.chat.renderChips) MM.chat.renderChips();

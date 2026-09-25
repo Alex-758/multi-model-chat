@@ -101,7 +101,12 @@ window.MM = window.MM || {};
     const list = U.$('#session-list');
     list.innerHTML = '';
     const items = sorted();
+    let prev = null;
     for (const s of items) {
+      // 置顶会话与普通会话之间加细分隔线
+      if (prev && prev.pinned && !s.pinned) {
+        list.appendChild(U.el('div', { class: 'session-divider' }));
+      }
       const roundCount = s.messages.filter(m => m.role === 'user').length;
       const item = U.el('div', {
         class: 'session-item' + (s.id === MM.state.currentId ? ' active' : ''),
@@ -121,6 +126,7 @@ window.MM = window.MM || {};
         )
       );
       list.appendChild(item);
+      prev = s;
     }
   }
 

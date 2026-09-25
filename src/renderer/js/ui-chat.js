@@ -14,9 +14,15 @@ window.MM = window.MM || {};
 
   function setSendBtn(on) {
     const b = U.$('#btn-send');
+    const inp = U.$('#input');
+    inp.readOnly = on; // 生成中禁改（内容保留可复制）
     b.classList.toggle('stop', on);
     b.textContent = on ? '■' : '➤';
     b.title = on ? '停止生成' : '发送';
+    b.classList.toggle('ready', on || inp.value.trim().length > 0);
+    U.$('.input-row').classList.toggle('off', on);
+    if (on) inp.placeholder = '生成中，请稍候…';
+    else inp.placeholder = '输入消息…  Enter 发送，Shift+Enter 换行';
   }
 
   function selectedModels() {
@@ -224,7 +230,7 @@ window.MM = window.MM || {};
         i++;
       }
     }
-    wrap.scrollTop = wrap.scrollHeight;
+    scrollBottom(true);
   }
 
   function renderUser(msg) {
@@ -258,7 +264,7 @@ window.MM = window.MM || {};
     const es = wrap.querySelector('.empty-state');
     if (es) es.remove();
     wrap.appendChild(renderUser(userMsg));
-    wrap.scrollTop = wrap.scrollHeight;
+    scrollBottom(true);
     input.value = '';
     autoResize();
 
@@ -304,7 +310,7 @@ window.MM = window.MM || {};
     for (const r of assistantMsg.results) grid.appendChild(answerCard(r, true));
     if (appendUserDom) { /* user DOM 已在 send() 中追加 */ }
     wrap.appendChild(grid);
-    wrap.scrollTop = wrap.scrollHeight;
+    scrollBottom(true);
 
     pending.set(reqId, { session: s, assistantMsg: assistantMsg, grid: grid, userMsg: userMsg });
     try {
@@ -344,7 +350,7 @@ window.MM = window.MM || {};
       else if (ev.type === 'delta') {
         ctx.mergeMsg.content += ev.text;
         body.textContent = ctx.mergeMsg.content;
-        wrap.scrollTop = wrap.scrollHeight;
+        scrollBottom();
       }
       else if (ev.type === 'error') {
         ctx.mergeMsg.content += '\n\n（综合失败：' + ev.message + '）';
@@ -365,7 +371,7 @@ window.MM = window.MM || {};
     } else if (ev.type === 'delta') {
       res.content += ev.text;
       body.textContent = res.content;
-      wrap.scrollTop = wrap.scrollHeight;
+      scrollBottom();
     } else if (ev.type === 'reasoning') {
       res.reasoning = (res.reasoning || '') + ev.text;
       let det = card.querySelector('details.reasoning');
@@ -451,7 +457,7 @@ window.MM = window.MM || {};
     if (oldTools) oldTools.remove();
     const card = mergeCard(mergeMsg, true);
     wrap.appendChild(card);
-    wrap.scrollTop = wrap.scrollHeight;
+    scrollBottom(true);
 
     if (mode === 'frontend') {
       mergeMsg.content = MM.merge.frontend(okResults);
@@ -511,11 +517,21 @@ window.MM = window.MM || {};
     }
   }
 
-  // ---------- 输入框自适应 ----------
+  // ---------- 滚动：贴底检测 + 智能跟随 ----------
+  function nearBottom() {
+    const w = U.$('#messages');
+    return w.scrollHeight - w.scrollTop - w.clientHeight < 140;
+  }
+  function scrollBottom(force) {
+    const w = U.$('#messages');
+    if (force || nearBottom()) w.scrollTop = w.scrollHeight;
+  }
+
   function autoResize() {
     const ta = U.$('#input');
     ta.style.height = 'auto';
     ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+    U.$('#btn-send').classList.toggle('ready', !!U.$('#btn-send').classList.contains('stop') || ta.value.trim().length > 0);
   }
 
   // ---------- 绑定 ----------
@@ -547,6 +563,16 @@ window.MM = window.MM || {};
     U.$('#tgl-auto').addEventListener('change', function () {
       MM.state.config.synthesis.autoMerge = this.checked;
       MM.save();
+    });
+    // 回到底部悬浮按钮：离开底部较远时出现
+    const wrap = U.$('#messages');
+    const sb = U.$('#btn-scroll-bottom');
+    wrap.addEventListener('scroll', function () {
+      const away = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight > 240;
+      sb.classList.toggle('show', away);
+    });
+    sb.addEventListener('click', function () {
+      wrap.scrollTo({ top: wrap.scrollHeight, behavior: 'smooth' });
     });
     U.$('#session-title').addEventListener('dblclick', function () {
       const s = MM.sessions.current();
