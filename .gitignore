@@ -1,0 +1,15 @@
+# 依赖与产物
+node_modules/
+dist/
+*.log
+
+# 运行时数据（含 API Key，绝不入库）
+store.json
+catalog.json
+*.local.json
+
+# 编辑器/系统
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

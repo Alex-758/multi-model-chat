@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self';">
+  <title>Multi-Model Chat</title>
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 左侧：会话栏 -->
+    <aside id="sidebar">
+      <div class="side-head">
+        <div class="logo">
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <rect x="1.5" y="1.5" width="21" height="21" rx="6" fill="#4f5bef"/>
+            <path d="M6 8.5A2.5 2.5 0 0 1 8.5 6h7A2.5 2.5 0 0 1 18 8.5v4A2.5 2.5 0 0 1 15.5 15H11l-3.2 3v-3.1A2.5 2.5 0 0 1 6 12.5z" fill="#fff"/>
+          </svg>
+          <span>Multi-Model Chat</span>
+        </div>
+        <button id="btn-new-chat" class="btn-primary">新建会话</button>
+      </div>
+      <div id="session-list"></div>
+      <div class="side-foot">
+        <button id="btn-theme" class="btn-ghost" title="切换主题">主题</button>
+        <button id="btn-settings" class="btn-ghost" title="设置">设置</button>
+      </div>
+    </aside>
+
+    <!-- 右侧：主区 -->
+    <main id="main">
+      <header id="topbar">
+        <div id="session-title" title="双击重命名">新会话</div>
+        <div class="topbar-actions">
+          <label class="toggle" title="优先使用各服务商原生联网能力，并可在设置中配置通用搜索 API 注入结果">
+            <input type="checkbox" id="tgl-search"><span>联网搜索</span>
+          </label>
+          <label class="toggle" title="所有模型回答完成后，自动按默认模式生成综合回答">
+            <input type="checkbox" id="tgl-auto"><span>自动综合</span>
+          </label>
+        </div>
+      </header>
+
+      <div id="messages"></div>
+
+      <footer id="composer">
+        <div id="model-chips" title="选择要同时调用的模型（可多选）"></div>
+        <div class="input-row">
+          <textarea id="input" rows="1"
+            placeholder="输入消息…  Enter 发送，Shift+Enter 换行"></textarea>
+          <button id="btn-send" class="btn-send" title="发送">➤</button>
+        </div>
+      </footer>
+    </main>
+  </div>
+
+  <!-- 设置页 -->
+  <div id="settings-overlay" class="hidden">
+    <div class="settings-dialog">
+      <div class="settings-side">
+        <div class="settings-title">设置</div>
+        <button class="settings-nav active" data-pane="models">模型配置</button>
+        <button class="settings-nav" data-pane="search">联网搜索</button>
+        <button class="settings-nav" data-pane="synth">综合回答</button>
+        <button class="settings-nav" data-pane="data">数据管理</button>
+        <div class="settings-spacer"></div>
+        <button id="btn-settings-close" class="btn-ghost">关闭</button>
+      </div>
+      <div class="settings-main">
+        <div id="pane-models" class="settings-pane active"></div>
+        <div id="pane-search" class="settings-pane"></div>
+        <div id="pane-synth" class="settings-pane"></div>
+        <div id="pane-data" class="settings-pane"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+
+  <script src="js/util.js"></script>
+  <script src="js/model-info.js"></script>
+  <script src="js/markdown.js"></script>
+  <script src="js/merge.js"></script>
+  <script src="js/ui-sessions.js"></script>
+  <script src="js/ui-settings.js"></script>
+  <script src="js/ui-chat.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
