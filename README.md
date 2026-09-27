@@ -2,7 +2,9 @@
 
 同时调用多个大模型、并行对比回答、一键合并综合的本地桌面应用（Electron）。
 
-![平台](https://img.shields.io/badge/platform-Windows-blue) ![框架](https://img.shields.io/badge/framework-Electron%2044-47848f)
+![平台](https://img.shields.io/badge/platform-Windows-blue)
+
+![框架](https://img.shields.io/badge/framework-Electron%2044-47848f)
 
 ## 功能特性
 
