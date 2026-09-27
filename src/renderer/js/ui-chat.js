@@ -417,8 +417,10 @@ window.MM = window.MM || {};
     if (!userMsg || userMsg.role !== 'user') return;
     const models = selectedModels();
     if (!models.length) { U.toast('请先选择模型', true); return; }
-    // 移除旧的助手/综合消息
-    s.messages.splice(idx, s.messages.length - idx);
+    // 仅移除该轮的助手回答及其后的综合消息（遇到下一条用户消息即停，不能波及更后面的轮次）
+    let end = idx;
+    while (end < s.messages.length && s.messages[end].role !== 'user') end++;
+    s.messages.splice(idx, end - idx);
     s.updatedAt = Date.now();
     MM.save();
     renderAll();

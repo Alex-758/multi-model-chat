@@ -73,7 +73,14 @@ async function streamChat(m, messages, opts) {
     if (signal.aborted) throw new Error('已停止');
     signal.addEventListener('abort', onAbort, { once: true });
   }
-  const timeout = setTimeout(() => ctrl.abort(), 60000); // 首字节超时 60s
+  // 空闲超时：连接建立后每收到数据就重置；连续 120 秒无任何数据则中断
+  let idleTimer = null;
+  let abortedByTimeout = false;
+  const bumpIdle = () => {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { abortedByTimeout = true; ctrl.abort(); }, 120000);
+  };
+  bumpIdle();
   let content = '', reasoning = '';
   try {
     let res;
@@ -85,10 +92,11 @@ async function streamChat(m, messages, opts) {
         signal: ctrl.signal
       });
     } catch (e) {
+      if (abortedByTimeout) throw new Error('连接超时：服务器 120 秒未响应');
       if (signal && signal.aborted) throw new Error('已停止');
       throw new Error('网络请求失败：' + (e.cause && e.cause.message || e.message));
     }
-    clearTimeout(timeout);
+    bumpIdle();
     if (!res.ok) throw new Error(await readError(res));
 
     const reader = res.body.getReader();
@@ -97,6 +105,7 @@ async function streamChat(m, messages, opts) {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      bumpIdle(); // 收到数据，重置空闲计时
       buf += dec.decode(value, { stream: true });
       let idx;
       while ((idx = buf.indexOf('\n')) >= 0) {
@@ -128,12 +137,13 @@ async function streamChat(m, messages, opts) {
     }
     return { content, reasoning };
   } catch (e) {
+    if (abortedByTimeout) throw new Error('连接超时：服务器超过 120 秒没有返回数据，已中断');
     if ((signal && signal.aborted) || /abort/i.test(String(e && e.name))) {
       const err = new Error('已停止'); err.stopped = true; throw err;
     }
     throw e;
   } finally {
-    clearTimeout(timeout);
+    if (idleTimer) clearTimeout(idleTimer);
     if (signal) signal.removeEventListener('abort', onAbort);
   }
 }
