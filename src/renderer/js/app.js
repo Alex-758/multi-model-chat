@@ -117,6 +117,46 @@ MM.defaults = {
     }
   }
 
+  // 旧数据迁移：
+  // 1) 旧格式的独立 merge 消息折叠进其所属轮次的 assistant 消息（am.merge）
+  // 2) 为没有版本历史的轮次生成首份快照，使版本切换/回滚可用
+  MM.migrateSessions = function (sessions) {
+    let changed = false;
+    for (const s of (sessions || [])) {
+      if (!Array.isArray(s.messages)) continue;
+      const keep = [];
+      for (const m of s.messages) {
+        if (m.role === 'merge') {
+          const am = keep.slice().reverse().find(x => x.role === 'assistant' && x.roundId === m.roundId);
+          if (am) {
+            am.merge = { content: m.content || '', mode: m.mode || 'frontend', createdAt: m.createdAt || Date.now() };
+            changed = true;
+            continue; // 独立 merge 消息不再保留
+          }
+        }
+        keep.push(m);
+      }
+      s.messages = keep;
+      // 版本快照种子
+      for (const am of s.messages) {
+        if (am.role !== 'assistant' || !Array.isArray(am.results) || !am.results.length) continue;
+        if (!Array.isArray(am.versions) || !am.versions.length) {
+          am.versions = [{
+            results: JSON.parse(JSON.stringify(am.results)),
+            merge: am.merge ? JSON.parse(JSON.stringify(am.merge)) : null,
+            at: am.createdAt || Date.now()
+          }];
+          am.active = 0;
+          changed = true;
+        }
+        if (typeof am.active !== 'number' || am.active < 0) {
+          am.active = am.versions.length - 1;
+        }
+      }
+    }
+    return changed;
+  };
+
   async function init() {
     MM.state = {
       config: JSON.parse(JSON.stringify(MM.defaults.DEFAULT_CONFIG)),
@@ -158,6 +198,8 @@ MM.defaults = {
       MM.state.config.providers = JSON.parse(JSON.stringify(MM.defaults.PRESET_PROVIDERS));
     }
     if (!MM.state.sessions.length) MM.sessions.createSilent();
+    // 旧格式会话迁移（merge 折叠 + 版本快照种子）
+    if (MM.migrateSessions(MM.state.sessions)) MM.save();
     MM.state.currentId = MM.state.sessions[0] ? MM.state.sessions[0].id : null;
 
     // 恢复主题

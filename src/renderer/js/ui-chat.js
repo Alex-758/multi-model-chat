@@ -192,11 +192,57 @@ window.MM = window.MM || {};
     return card;
   }
 
-  function roundTools(roundId, hasAnswers) {
-    return U.el('div', { class: 'round-tools', 'data-round': roundId },
-      U.el('button', { class: 'tool-btn', onclick: function () { retryRound(roundId); } }, '↻ 重新生成'),
-      hasAnswers ? U.el('button', { class: 'tool-btn', onclick: function () { doMerge(roundId); } }, '综合回答') : null
-    );
+  // ---------- 版本历史 ----------
+  // 每轮回答的快照：{ results, merge, at }；am.active 指向当前显示的版本
+  function snapshotOf(am) {
+    return {
+      results: JSON.parse(JSON.stringify(am.results || [])),
+      merge: am.merge ? JSON.parse(JSON.stringify(am.merge)) : null,
+      at: Date.now()
+    };
+  }
+  function inheritVersionsOf(am) {
+    const versions = Array.isArray(am.versions) ? am.versions.map(v => JSON.parse(JSON.stringify(v))) : [];
+    const cur = snapshotOf(am);
+    const last = versions[versions.length - 1];
+    // 当前显示若与最后一份快照不同（或池为空），把当前显示也存入版本池
+    if (!last || JSON.stringify(last.results) !== JSON.stringify(cur.results) || JSON.stringify(last.merge || null) !== JSON.stringify(cur.merge || null)) {
+      versions.push(cur);
+    }
+    return versions;
+  }
+  function setVersion(am, i) {
+    if (!am.versions || !am.versions.length) return;
+    const idx = Math.max(0, Math.min(am.versions.length - 1, i));
+    if (idx === am.active) return;
+    am.active = idx;
+    am.results = JSON.parse(JSON.stringify(am.versions[idx].results));
+    am.merge = am.versions[idx].merge ? JSON.parse(JSON.stringify(am.versions[idx].merge)) : null;
+    MM.save();
+    renderAll();
+  }
+
+  function roundTools(am) {
+    const hasMerge = !!(am.merge && am.merge.content);
+    const tools = U.el('div', { class: 'round-tools', 'data-round': am.roundId });
+    if (am.versions && am.versions.length > 1) {
+      const idx = typeof am.active === 'number' ? am.active : am.versions.length - 1;
+      tools.appendChild(U.el('button', {
+        class: 'tool-btn', title: '上一版本', onclick: function () { setVersion(am, idx - 1); },
+        disabled: idx <= 0
+      }, '‹'));
+      tools.appendChild(U.el('span', { class: 'ver-label' },
+        '版本 ' + (idx + 1) + '/' + am.versions.length + (idx === am.versions.length - 1 ? '（最新）' : '')));
+      tools.appendChild(U.el('button', {
+        class: 'tool-btn', title: '下一版本', onclick: function () { setVersion(am, idx + 1); },
+        disabled: idx >= am.versions.length - 1
+      }, '›'));
+    }
+    tools.appendChild(U.el('button', { class: 'tool-btn', onclick: function () { retryRound(am.roundId); } }, '↻ 重新生成'));
+    if (!hasMerge) {
+      tools.appendChild(U.el('button', { class: 'tool-btn', onclick: function () { doMerge(am.roundId); } }, '综合回答'));
+    }
+    return tools;
   }
 
   function renderAll() {
@@ -214,18 +260,17 @@ window.MM = window.MM || {};
       if (m.role === 'user') {
         wrap.appendChild(renderUser(m));
         i++;
-        // 收集该轮的 assistant / merge
-        let am = null, mg = null;
+        // 收集该轮的 assistant（兼容旧格式：独立 merge 消息在迁移时已折叠，此处兜底忽略）
+        let am = null;
         while (i < s.messages.length && s.messages[i].role !== 'user') {
           if (s.messages[i].role === 'assistant') am = s.messages[i];
-          else if (s.messages[i].role === 'merge') mg = s.messages[i];
           i++;
         }
         if (am) {
           wrap.appendChild(answersGrid(am));
-          wrap.appendChild(roundTools(am.roundId, !mg));
+          if (am.merge && am.merge.content) wrap.appendChild(mergeCard(am.merge, false));
+          wrap.appendChild(roundTools(am));
         }
-        if (mg) wrap.appendChild(mergeCard(mg, false));
       } else {
         i++;
       }
@@ -271,8 +316,8 @@ window.MM = window.MM || {};
     dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, true);
   }
 
-  // 发起一轮多模型请求并渲染占位卡片
-  async function dispatchRound(s, userMsg, models, searchOn, appendUserDom) {
+  // 发起一轮多模型请求并渲染占位卡片（inheritVersions：重试时继承的历史版本池）
+  async function dispatchRound(s, userMsg, models, searchOn, appendUserDom, inheritVersions) {
     let searchResults = userMsg.sources || null;
     if (searchOn && !searchResults) {
       try {
@@ -296,6 +341,8 @@ window.MM = window.MM || {};
 
     const assistantMsg = {
       id: U.uid(), role: 'assistant', roundId: roundId, createdAt: Date.now(),
+      versions: Array.isArray(inheritVersions) ? inheritVersions : [],
+      active: Array.isArray(inheritVersions) ? inheritVersions.length - 1 : -1,
       results: models.map(m => ({ modelId: m.id, name: m.name || m.modelId, status: 'streaming', content: '', reasoning: '' }))
     };
     s.messages.push(assistantMsg);
@@ -333,14 +380,27 @@ window.MM = window.MM || {};
       pending.delete(ev.requestId);
       if (!pending.size) { streaming = false; setSendBtn(false); }
       if (ctx.mergeMsg) {
-        // 综合请求结束
+        // 综合请求结束：同步到当前版本的快照
+        const am = ctx.am;
+        if (am && Array.isArray(am.versions) && am.versions.length) {
+          am.versions[am.active >= 0 ? am.active : am.versions.length - 1].merge =
+            am.merge ? JSON.parse(JSON.stringify(am.merge)) : null;
+        }
         finalizeMergeCard(ctx);
         MM.save();
         return;
       }
+      // 回答轮结束：保存本版本快照
+      const am = ctx.assistantMsg;
+      am.versions = am.versions || [];
+      const snap = snapshotOf(am);
+      if (!am.versions.length || JSON.stringify(am.versions[am.versions.length - 1].results) !== JSON.stringify(snap.results)) {
+        am.versions.push(snap);
+      }
+      am.active = am.versions.length - 1;
       MM.save();
       MM.sessions.render();
-      if (U.$('#tgl-auto').checked) doMerge(ctx.assistantMsg.roundId);
+      if (U.$('#tgl-auto').checked) doMerge(am.roundId);
       return;
     }
 
@@ -413,10 +473,13 @@ window.MM = window.MM || {};
     if (!s) return;
     const idx = s.messages.findIndex(m => m.role === 'assistant' && m.roundId === roundId);
     if (idx < 0) return;
+    const am = s.messages[idx];
     const userMsg = s.messages[idx - 1];
     if (!userMsg || userMsg.role !== 'user') return;
     const models = selectedModels();
     if (!models.length) { U.toast('请先选择模型', true); return; }
+    // 当前显示版本存入历史版本池，由新一轮继承（不删除，可随时切换/回滚）
+    const versions = inheritVersionsOf(am);
     // 仅移除该轮的助手回答及其后的综合消息（遇到下一条用户消息即停，不能波及更后面的轮次）
     let end = idx;
     while (end < s.messages.length && s.messages[end].role !== 'user') end++;
@@ -424,7 +487,7 @@ window.MM = window.MM || {};
     s.updatedAt = Date.now();
     MM.save();
     renderAll();
-    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, false);
+    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, false, versions);
   }
 
   // ---------- 综合回答 ----------
@@ -437,8 +500,8 @@ window.MM = window.MM || {};
     const am = s.messages[idx];
     const userMsg = s.messages[idx - 1];
     if (!userMsg) return;
-    if (s.messages.some(m => m.role === 'merge' && m.roundId === roundId)) {
-      U.toast('该轮已有综合回答', true); return;
+    if (am.merge && am.merge.content) {
+      U.toast('该轮已有综合回答（重新生成会产生新版本）', true); return;
     }
     const okResults = am.results
       .filter(r => (r.status === 'done' || r.status === 'stopped') && r.content)
@@ -448,26 +511,24 @@ window.MM = window.MM || {};
     const cfg = MM.state.config.synthesis || {};
     const mode = cfg.mode || 'frontend';
 
-    const mergeMsg = { id: U.uid(), role: 'merge', roundId: roundId, mode: mode, content: '', createdAt: Date.now() };
-    s.messages.push(mergeMsg);
+    // 综合回答挂在轮次上（不再作为独立消息），并同步进当前版本快照
+    am.merge = { content: '', mode: mode, createdAt: Date.now() };
     s.updatedAt = Date.now();
     MM.save();
 
     // 渲染实时卡片
     const wrap = U.$('#messages');
     const oldTools = wrap.querySelector('.round-tools[data-round="' + roundId + '"]');
-    if (oldTools) oldTools.remove();
-    const card = mergeCard(mergeMsg, true);
+    if (oldTools) oldTools.replaceWith(roundTools(am));
+    const card = mergeCard(am.merge, true);
     wrap.appendChild(card);
     scrollBottom(true);
 
     if (mode === 'frontend') {
-      mergeMsg.content = MM.merge.frontend(okResults);
-      finalizeMergeCard({ mergeMsg: mergeMsg, mergeBody: card.querySelector('.ac-body'), mergeStatus: card.querySelector('.ac-status'), session: s });
+      am.merge.content = MM.merge.frontend(okResults);
+      syncMergeToVersion(am);
+      finalizeMergeCard({ mergeMsg: am.merge, mergeBody: card.querySelector('.ac-body'), mergeStatus: card.querySelector('.ac-status'), am: am, roundId: roundId });
       MM.save();
-      // 恢复工具栏
-      const tools = roundTools(roundId, false);
-      card.before(tools);
       return;
     }
 
@@ -476,8 +537,9 @@ window.MM = window.MM || {};
     let model = flats.find(m => m.id === cfg.modelKey);
     if (!model) model = flats[0];
     if (!model) {
-      mergeMsg.content = '（未找到可用的综合模型，请在设置中配置）';
-      finalizeMergeCard({ mergeMsg: mergeMsg, mergeBody: card.querySelector('.ac-body'), mergeStatus: card.querySelector('.ac-status'), session: s });
+      am.merge.content = '（未找到可用的综合模型，请在设置中配置）';
+      syncMergeToVersion(am);
+      finalizeMergeCard({ mergeMsg: am.merge, mergeBody: card.querySelector('.ac-body'), mergeStatus: card.querySelector('.ac-status'), am: am, roundId: roundId });
       MM.save();
       return;
     }
@@ -487,10 +549,11 @@ window.MM = window.MM || {};
     const reqId = 'syn' + (++seq);
     const prompt = MM.merge.synthesisPrompt(userMsg.content, okResults);
     pending.set(reqId, {
-      mergeMsg: mergeMsg,
+      mergeMsg: am.merge,
       mergeBody: card.querySelector('.ac-body'),
       mergeStatus: card.querySelector('.ac-status'),
       session: s,
+      am: am,
       roundId: roundId
     });
     try {
@@ -503,20 +566,26 @@ window.MM = window.MM || {};
     }
   }
 
+  // 把综合回答同步进当前版本快照
+  function syncMergeToVersion(am) {
+    if (am && Array.isArray(am.versions) && am.versions.length) {
+      const i = am.active >= 0 ? am.active : am.versions.length - 1;
+      am.versions[i].merge = am.merge ? JSON.parse(JSON.stringify(am.merge)) : null;
+    }
+  }
+
   function finalizeMergeCard(ctx) {
     const body = ctx.mergeBody, status = ctx.mergeStatus;
     body.classList.remove('streaming');
     body.classList.add('md');
     body.innerHTML = MM.md.render(ctx.mergeMsg.content || '（空）');
     status.textContent = ctx.mergeMsg.mode === 'model' ? '✓ 完成' : '✓ 已合并';
-    // 恢复工具栏
+    // 恢复工具栏（综合回答入口随 am.merge 状态更新）
     const wrap = U.$('#messages');
-    const mergeEl = wrap.querySelector('.merge-card');
-    if (ctx.roundId && !wrap.querySelector('.round-tools[data-round="' + ctx.roundId + '"]')) {
-      // 找到该轮 grid 位置插入工具栏
-      const grid = wrap.querySelector('.answers[data-round="' + ctx.roundId + '"]');
-      if (grid) grid.after(roundTools(ctx.roundId, false));
-    }
+    const grid = wrap.querySelector('.answers[data-round="' + ctx.roundId + '"]');
+    const oldTools = wrap.querySelector('.round-tools[data-round="' + ctx.roundId + '"]');
+    if (oldTools) oldTools.remove();
+    if (grid && ctx.am) grid.after(roundTools(ctx.am));
   }
 
   // ---------- 滚动：贴底检测 + 智能跟随 ----------

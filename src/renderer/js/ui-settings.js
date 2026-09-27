@@ -534,6 +534,7 @@ window.MM = window.MM || {};
         if (!data.config || (!Array.isArray(data.sessions) && !Array.isArray(data.config.providers))) { U.toast('文件格式不正确', true); return; }
         MM.state.config = data.config;
         MM.state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+        MM.migrateSessions(MM.state.sessions);
         MM.state.currentId = MM.state.sessions[0] ? MM.state.sessions[0].id : null;
         MM.save();
         MM.chat.renderAll(); MM.sessions.render(); MM.chat.renderChips();
