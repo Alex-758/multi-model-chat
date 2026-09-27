@@ -7,6 +7,8 @@ window.MM = window.MM || {};
   let editingId = null; // 当前编辑的服务商 id
 
   let closeTimer = null; // 关闭动画定时器（防快速开/关互相打架）
+  // 行内编辑防抖自动落盘：应用崩溃/强杀时最多丢失 600ms 内的编辑
+  const saveSoon = U.debounce(() => { MM.save(); MM.chat.renderChips(); }, 600);
 
   // ---------- 打开 / 关闭 ----------
   function open() {
@@ -202,6 +204,7 @@ window.MM = window.MM || {};
       mo.maxTokens = outInput.value ? parseInt(outInput.value, 10) : undefined;
       mo.multimodal = meta.multimodal != null ? meta.multimodal : mo.multimodal;
       MM.chat.renderChips(); // 模型 ID 变化后同步聊天页选择器
+      saveSoon();
       const ctxVal = mo.contextTokens || meta.contextTokens;
       infoHint.textContent = '多模态：' + (mo.multimodal === true ? '支持' : mo.multimodal === false ? '不支持' : '未知') +
         ' · 上下文：' + (ctxVal ? MM.modelInfo.fmtTokens(ctxVal) : '未知') +
@@ -251,11 +254,12 @@ window.MM = window.MM || {};
       setTimeout(() => dropPanel.classList.add('hidden'), 180);
       applyInfo(true);
     });
-    nameInput.addEventListener('input', () => { mo.name = nameInput.value.trim(); });
-    ctxInput.addEventListener('change', () => { mo.contextTokens = ctxInput.value ? parseInt(ctxInput.value, 10) : undefined; });
-    outInput.addEventListener('change', () => { mo.maxTokens = outInput.value ? parseInt(outInput.value, 10) : undefined; });
+    nameInput.addEventListener('input', () => { mo.name = nameInput.value.trim(); saveSoon(); });
+    ctxInput.addEventListener('change', () => { mo.contextTokens = ctxInput.value ? parseInt(ctxInput.value, 10) : undefined; saveSoon(); });
+    outInput.addEventListener('change', () => { mo.maxTokens = outInput.value ? parseInt(outInput.value, 10) : undefined; saveSoon(); });
     enCheck.addEventListener('change', () => {
       mo.enabled = enCheck.checked;
+      saveSoon();
       MM.chat.renderChips(); // 启用状态实时反映到聊天页模型选择器
     });
     delBtn.addEventListener('click', () => {
@@ -311,11 +315,11 @@ window.MM = window.MM || {};
     eye.addEventListener('click', () => { keyInput.type = keyInput.type === 'password' ? 'text' : 'password'; });
     wrap.appendChild(field('API 密钥', U.el('div', { class: 'field-row' }, keyInput, eye)));
 
-    // 连接设置实时写回
-    fmtSel.addEventListener('change', () => { p.apiFormat = fmtSel.value; });
-    urlInput.addEventListener('change', () => { p.baseUrl = urlInput.value.trim(); });
-    fullUrlCheck.addEventListener('change', () => { p.fullUrl = fullUrlCheck.checked; });
-    keyInput.addEventListener('change', () => { p.apiKey = keyInput.value.trim(); });
+    // 连接设置实时写回 + 防抖落盘
+    fmtSel.addEventListener('change', () => { p.apiFormat = fmtSel.value; saveSoon(); });
+    urlInput.addEventListener('change', () => { p.baseUrl = urlInput.value.trim(); saveSoon(); });
+    fullUrlCheck.addEventListener('change', () => { p.fullUrl = fullUrlCheck.checked; saveSoon(); });
+    keyInput.addEventListener('change', () => { p.apiKey = keyInput.value.trim(); saveSoon(); });
 
     // 测试连接（用第一个启用模型的 ID）
     const result = U.el('div', { class: 'test-result' });

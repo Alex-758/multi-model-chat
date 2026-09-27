@@ -212,6 +212,7 @@ window.MM = window.MM || {};
     return versions;
   }
   function setVersion(am, i) {
+    if (streaming) { U.toast('请等待当前任务完成', true); return; } // 综合生成中切换会错乱版本快照
     if (!am.versions || !am.versions.length) return;
     const idx = Math.max(0, Math.min(am.versions.length - 1, i));
     if (idx === am.active) return;
@@ -398,6 +399,10 @@ window.MM = window.MM || {};
         am.versions.push(snap);
       }
       am.active = am.versions.length - 1;
+      // 重建轮次工具栏（版本导航 / 重新生成 / 综合回答入口）
+      const oldTools = wrap.querySelector('.round-tools[data-round="' + am.roundId + '"]');
+      if (oldTools) oldTools.remove();
+      if (ctx.grid) ctx.grid.after(roundTools(am));
       MM.save();
       MM.sessions.render();
       if (U.$('#tgl-auto').checked) doMerge(am.roundId);
@@ -413,8 +418,15 @@ window.MM = window.MM || {};
         scrollBottom();
       }
       else if (ev.type === 'error') {
+        // 综合失败：回滚 merge 状态，允许用户再次点击“综合回答”
         ctx.mergeMsg.content += '\n\n（综合失败：' + ev.message + '）';
         status.innerHTML = '<span style="color:var(--danger)">✗</span>';
+        if (ctx.am) {
+          ctx.am.merge = null;
+          syncMergeToVersion(ctx.am);
+          const oldTools = wrap.querySelector('.round-tools[data-round="' + ctx.roundId + '"]');
+          if (oldTools) oldTools.replaceWith(roundTools(ctx.am));
+        }
       }
       return;
     }
@@ -563,6 +575,16 @@ window.MM = window.MM || {};
       streaming = false;
       setSendBtn(false);
       U.toast('综合失败：' + e.message, true);
+      // 回滚 merge 状态并恢复工具栏，允许再次综合
+      if (am) {
+        am.merge = null;
+        syncMergeToVersion(am);
+      }
+      const oldTools = wrap.querySelector('.round-tools[data-round="' + roundId + '"]');
+      if (oldTools) oldTools.replaceWith(roundTools(am));
+      const body = card && card.querySelector('.ac-body'), st = card && card.querySelector('.ac-status');
+      if (body) { body.classList.remove('streaming'); body.innerHTML = '<div class="ac-error">✗ ' + U.esc(e.message) + '</div>'; }
+      if (st) st.innerHTML = '<span style="color:var(--danger)">✗</span>';
     }
   }
 
