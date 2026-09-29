@@ -485,8 +485,8 @@ window.MM = window.MM || {};
     pane.appendChild(U.el('div', { class: 'pane-sub' }, '每轮回答完成后，可将多个模型的回答合并为一份综合回答。'));
 
     const modeSel = U.el('select', { id: 'y-mode' },
-      U.el('option', { value: 'frontend', selected: cfg.mode !== 'model' }, '前端智能合并（本地提取要点，不消耗 token）'),
-      U.el('option', { value: 'model', selected: cfg.mode === 'model' }, '指定模型二次综合（更全面，消耗一次请求）')
+      U.el('option', { value: 'frontend', selected: cfg.mode !== 'model' }, '前端智能合并（本地重组为完整回答，不消耗 token）'),
+      U.el('option', { value: 'model', selected: cfg.mode === 'model' }, '指定模型二次综合（更连贯全面，消耗一次请求）')
     );
     const modelSel = U.el('select', { id: 'y-model', style: 'width:100%' });
     const flats = allFlatModels();

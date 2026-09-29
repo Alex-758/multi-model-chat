@@ -54,7 +54,7 @@
     return na && nb ? dot / Math.sqrt(na * nb) : 0;
   }
 
-  // ---------- 聚类合并 ----------
+  // ---------- 聚类重组：输出一份完整、连贯的回答 ----------
   function frontend(results) {
     // results: [{modelId, name, content}]
     const points = [];
@@ -65,6 +65,7 @@
     }
     if (!points.length) return '_（未能从各模型回答中提取到可合并的要点）_';
 
+    // 相似要点聚类（同一信息多个模型都说了 → 合并为一条）
     const clusters = [];
     for (const pt of points) {
       let best = null, bestSim = 0;
@@ -74,49 +75,27 @@
       }
       if (best && bestSim >= 0.34) {
         best.members.push(pt);
-        best.centroid = new Map([...best.centroid].map(([k, v]) => [k, v]));
         for (const [k, v] of pt.v) best.centroid.set(k, (best.centroid.get(k) || 0) + v);
       } else {
         clusters.push({ members: [pt], centroid: new Map(pt.v) });
       }
     }
 
-    const consensus = clusters.filter(c => new Set(c.members.map(m => m.model)).size >= 2);
-    const extras = clusters.filter(c => new Set(c.members.map(m => m.model)).size === 1);
-
+    // 排序：多数模型都提到的要点排前面（更可能是核心答案），独有补充靠后
     const rank = c => {
       const models = new Set(c.members.map(m => m.model)).size;
       const longest = Math.max(...c.members.map(m => m.text.length));
       return models * 1000 + longest;
     };
-    consensus.sort((a, b) => rank(b) - rank(a));
-    extras.sort((a, b) => rank(b) - rank(a));
+    clusters.sort((a, b) => rank(b) - rank(a));
 
-    let md = '';
-    if (consensus.length) {
-      md += '### 🤝 各模型共识\n\n';
-      for (const c of consensus.slice(0, 8)) {
-        const best = c.members.reduce((a, b) => a.text.length >= b.text.length ? a : b);
-        const srcs = [...new Set(c.members.map(m => m.model))].join('、');
-        md += '- ' + best.text + '　`' + srcs + '`\n';
-      }
-      md += '\n';
-    }
-    const byModel = new Map();
-    for (const c of extras) {
-      const m = c.members[0];
-      if (!byModel.has(m.model)) byModel.set(m.model, []);
-      byModel.get(m.model).push(c.members.reduce((a, b) => a.text.length >= b.text.length ? a : b).text);
-    }
-    if (byModel.size) {
-      md += '### ✨ 各模型独特补充\n\n';
-      for (const [name, items] of byModel) {
-        md += '**' + name + '**\n';
-        for (const it of items.slice(0, 4)) md += '- ' + it + '\n';
-        md += '\n';
-      }
-    }
-    return md.trim();
+    // 每个聚类取表述最完整的一条原句，重组为编号列表——
+    // 不标注来源、不分“共识/补充”，输出即一份可直接阅读的回答
+    const lines = clusters.map(c => {
+      const rep = c.members.reduce((a, b) => a.text.length >= b.text.length ? a : b);
+      return (rep.text.endsWith('。') || rep.text.endsWith('？') ? rep.text : rep.text + '。');
+    });
+    return lines.map((t, i) => (i + 1) + '. ' + t).join('\n\n');
   }
 
   // ---------- 模型二次综合提示词 ----------
