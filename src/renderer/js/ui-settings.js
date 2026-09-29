@@ -204,7 +204,7 @@ window.MM = window.MM || {};
       mo.contextTokens = ctxInput.value ? parseInt(ctxInput.value, 10) : undefined;
       mo.maxTokens = outInput.value ? parseInt(outInput.value, 10) : undefined;
       mo.multimodal = meta.multimodal != null ? meta.multimodal : mo.multimodal;
-      MM.chat.renderChips(); // 模型 ID 变化后同步聊天页选择器
+      saveSoon(); // 落盘时同步聊天页选择器，避免逐条目重建
       saveSoon();
       const ctxVal = mo.contextTokens || meta.contextTokens;
       infoHint.textContent = '多模态：' + (mo.multimodal === true ? '支持' : mo.multimodal === false ? '不支持' : '未知') +

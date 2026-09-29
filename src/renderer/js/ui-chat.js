@@ -40,12 +40,13 @@ window.MM = window.MM || {};
       box.appendChild(U.el('div', { style: 'color:var(--muted);font-size:12.5px;padding:6px' }, '暂无可用模型，请在「设置 → 模型配置」中添加'));
       return;
     }
+    const frag = document.createDocumentFragment();
     for (const m of models) {
       const bits = [m.providerName + ' · ' + m.modelId];
       if (m.contextTokens) bits.push(MM.modelInfo.fmtTokens(m.contextTokens) + ' 上下文');
       if (m.multimodal) bits.push('多模态');
       if (!m.hasKey) bits.push('API Key 未设置，请在设置中填写');
-      box.appendChild(U.el('div', {
+      frag.appendChild(U.el('div', {
         class: 'chip on',
         'data-model-id': m.id,
         title: bits.join(' · '),
@@ -54,6 +55,7 @@ window.MM = window.MM || {};
         U.el('span', {}, m.name || m.modelId)
       ));
     }
+    box.appendChild(frag);
   }
 
   // ---------- 历史 ----------
@@ -274,10 +276,12 @@ window.MM = window.MM || {};
       return;
     }
     let i = 0;
+    // 统一在文档片段中构建，最后一次挂载（整列表只触发一次重排）
+    const frag = document.createDocumentFragment();
     while (i < s.messages.length) {
       const m = s.messages[i];
       if (m.role === 'user') {
-        wrap.appendChild(renderUser(m));
+        frag.appendChild(renderUser(m));
         i++;
         // 收集该轮的 assistant（兼容旧格式：独立 merge 消息在迁移时已折叠，此处兜底忽略）
         let am = null;
@@ -291,33 +295,29 @@ window.MM = window.MM || {};
           let grid;
           if (live && live.type === 'round') {
             grid = U.el('div', { class: 'answers', 'data-round': am.roundId });
-            for (const r of am.results) grid.appendChild(answerCard(r, true));
+            // 已完成的模型按渲染态显示，仍在生成的才显示流式样式
+            for (const r of am.results) grid.appendChild(answerCard(r, r.status === 'streaming'));
             live.ctx.grid = grid;
           } else {
             grid = answersGrid(am);
           }
-          wrap.appendChild(grid);
-          if (am.merge && am.merge.content) {
-            if (live && live.type === 'merge') {
-              const card = mergeCard(am.merge, true);
-              wrap.appendChild(card);
+          frag.appendChild(grid);
+          const liveMerge = live && live.type === 'merge';
+          if (liveMerge || (am.merge && am.merge.content)) {
+            const card = mergeCard(am.merge, !!liveMerge);
+            frag.appendChild(card);
+            if (liveMerge) {
               live.ctx.mergeBody = card.querySelector('.ac-body');
               live.ctx.mergeStatus = card.querySelector('.ac-status');
-            } else {
-              wrap.appendChild(mergeCard(am.merge, false));
             }
-          } else if (live && live.type === 'merge') {
-            const card = mergeCard(am.merge, true);
-            wrap.appendChild(card);
-            live.ctx.mergeBody = card.querySelector('.ac-body');
-            live.ctx.mergeStatus = card.querySelector('.ac-status');
           }
-          wrap.appendChild(roundTools(am));
+          frag.appendChild(roundTools(am));
         }
       } else {
         i++;
       }
     }
+    wrap.appendChild(frag);
     scrollBottom(true);
   }
 
@@ -439,7 +439,7 @@ window.MM = window.MM || {};
         MM.save();
         return;
       }
-      // 回答轮结束：保存本版本快照（全部模型都失败时不入版本池）
+      // 回答轮结束：保存本版本快照（全部模型都失败时不入版本池；每轮最多保留 10 版）
       const am = ctx.assistantMsg;
       if (hasUsefulResults(am.results)) {
         am.versions = am.versions || [];
@@ -447,6 +447,7 @@ window.MM = window.MM || {};
         if (!am.versions.length || JSON.stringify(am.versions[am.versions.length - 1].results) !== JSON.stringify(snap.results)) {
           am.versions.push(snap);
         }
+        if (am.versions.length > 10) am.versions.splice(0, am.versions.length - 10); // 只保留最近 10 版
         am.active = am.versions.length - 1;
       } else if (typeof am.active !== 'number' || am.active < 0) {
         am.active = Array.isArray(am.versions) ? am.versions.length - 1 : -1;
@@ -466,8 +467,7 @@ window.MM = window.MM || {};
       if (ev.type === 'start') { status.innerHTML = '<span class="spinner"></span> 生成中…'; }
       else if (ev.type === 'delta') {
         ctx.mergeMsg.content += ev.text;
-        body.textContent = ctx.mergeMsg.content;
-        scrollBottom();
+        scheduleStreamPaint(body, function () { body.textContent = ctx.mergeMsg.content; });
       }
       else if (ev.type === 'error') {
         // 综合失败：回滚 merge 状态，允许用户再次点击“综合回答”
@@ -494,8 +494,7 @@ window.MM = window.MM || {};
       status.innerHTML = '<span class="spinner"></span> 生成中…';
     } else if (ev.type === 'delta') {
       res.content += ev.text;
-      body.textContent = res.content;
-      scrollBottom();
+      scheduleStreamPaint(body, function () { body.textContent = res.content; });
     } else if (ev.type === 'reasoning') {
       res.reasoning = (res.reasoning || '') + ev.text;
       let det = card.querySelector('details.reasoning');
@@ -679,6 +678,17 @@ window.MM = window.MM || {};
     if (force || nearBottom()) w.scrollTop = w.scrollHeight;
   }
 
+  // 流式渲染按帧合帧：同一帧内到达的多个 delta 只写一次 DOM、做一次布局读取
+  // （scrollHeight/scrollTop 读取会强制重排，4 模型并发时每秒可达数十次 delta）
+  function scheduleStreamPaint(el, paint) {
+    if (el._paintRaf) return;
+    el._paintRaf = requestAnimationFrame(function () {
+      el._paintRaf = null;
+      paint();
+      scrollBottom();
+    });
+  }
+
   function autoResize() {
     const ta = U.$('#input');
     ta.style.height = 'auto';
@@ -722,7 +732,7 @@ window.MM = window.MM || {};
     wrap.addEventListener('scroll', function () {
       const away = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight > 240;
       sb.classList.toggle('show', away);
-    });
+    }, { passive: true });
     sb.addEventListener('click', function () {
       wrap.scrollTo({ top: wrap.scrollHeight, behavior: 'smooth' });
     });
