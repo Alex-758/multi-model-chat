@@ -6,17 +6,34 @@
 (function () {
 
   // ---------- 要点拆分 ----------
+  // 剥掉要点开头残留的多层列表标记（如 "2. - " "• "），避免与输出编号叠加
+  function stripListPrefix(s) {
+    let t = String(s).replace(/[*`#]/g, '').trim();
+    while (/^([-*•]|\d{1,3}[.、)])\s*/.test(t)) t = t.replace(/^([-*•]|\d{1,3}[.、)])\s*/, '').trim();
+    return t;
+  }
+
   function splitPoints(text) {
-    const lines = String(text).split('\n').map(s => s.trim());
-    const bullets = lines.filter(l => /^([-*•]|\d+[.、)])\s+/.test(l) && l.replace(/^([-*•]|\d+[.、)])\s+/, '').length > 8);
+    // 1. 表格块优先提取：连续以 | 开头的行整块保留，绝不逐行拆散
+    const tables = [];
+    text = String(text).replace(/(?:^[ \t]*\|[^\n]*\|[ \t]*\n?)+/gm, m => {
+      const t = m.trim();
+      if (t.split('\n').length >= 2) tables.push(t);
+      return '\n';
+    });
+
+    // 2. 常规要点拆分
+    const lines = text.split('\n').map(s => stripListPrefix(s));
+    const bullets = lines.filter(l => l.length > 8);
     let pts;
     if (bullets.length >= 3) {
-      pts = bullets.map(l => l.replace(/^([-*•]|\d+[.、)])\s+/, '').replace(/[*`#]/g, '').trim());
+      pts = bullets;
     } else {
       pts = [];
-      for (const para of String(text).split(/\n{2,}/)) {
-        const p = para.trim().replace(/^#+\s*/, '').replace(/[*`]/g, '').trim();
+      for (const para of text.split(/\n{2,}/)) {
+        let p = para.trim().replace(/^#+\s*/, '').trim();
         if (!p) continue;
+        p = stripListPrefix(p);
         if (p.length <= 130) { pts.push(p); continue; }
         const sents = p.match(/[^。！？!?.;；]+[。！？!?.;；]?/g) || [p];
         let cur = '';
@@ -34,7 +51,12 @@
       .filter(p => !/欢迎(继续)?(提问|咨询)|如有(其他|任何)|希望(这|对你|以上|能)|还能(帮|问我)|祝你/.test(p))
       // 过滤纯标题行（短、以冒号结尾，可带 emoji 前缀），它们不是要点
       .filter(p => !/^[📌💡⚡✨🔔ℹ️🌟📝\s]*[^。，！？\s]{1,14}[：:]$/.test(p.trim()))
-      .slice(0, 14);
+      // 剥掉“补充：”“注：”等标签前缀
+      .map(p => p.replace(/^(补充说明|补充|注|注意|另外|此外|说明)[：:]\s*/, ''))
+      .filter(p => p.length >= 6)
+      .slice(0, 14)
+      // 表格块追加为独立要点（frontend 中单独输出，不参与编号）
+      .concat(tables);
   }
 
   // ---------- 分词与相似度 ----------
@@ -61,13 +83,22 @@
   // ---------- 聚类重组：输出一份完整、连贯的回答 ----------
   function frontend(results) {
     // results: [{modelId, name, content}]
-    const points = [];
+    const points = [];   // 文本要点（参与聚类）
+    const tables = [];   // 表格块（不拆散、不聚类，去重后原文附后）
     for (const r of results) {
       for (const p of splitPoints(r.content)) {
-        points.push({ model: r.name, modelId: r.modelId, text: p, v: vecOf(p) });
+        if (p.startsWith('|')) tables.push(p);
+        else points.push({ model: r.name, modelId: r.modelId, text: p, v: vecOf(p) });
       }
     }
-    if (!points.length) return '_（未能从各模型回答中提取到可合并的要点）_';
+    if (!points.length && !tables.length) return '_（未能从各模型回答中提取到可合并的要点）_';
+
+    // 表格去重（多模型的时间线表格往往高度雷同）
+    const norm = s => String(s).replace(/\s+/g, '');
+    const uniqTables = [];
+    for (const t of tables) {
+      if (!uniqTables.some(u => norm(u) === norm(t))) uniqTables.push(t);
+    }
 
     // 相似要点聚类（同一信息多个模型都说了 → 合并为一条）
     const clusters = [];
@@ -100,7 +131,10 @@
       const rep = c.members.reduce((a, b) => a.text.length >= b.text.length ? a : b);
       return (rep.text.endsWith('。') || rep.text.endsWith('？') ? rep.text : rep.text + '。');
     });
-    return lines.map((t, i) => (i + 1) + '. ' + t).join('\n');
+    let out = lines.map((t, i) => (i + 1) + '. ' + t).join('\n');
+    // 表格作为补充信息附在末尾（原文完整保留）
+    for (const t of uniqTables) out += '\n\n' + t + '\n';
+    return out.trim();
   }
 
   // ---------- 模型二次综合提示词 ----------
