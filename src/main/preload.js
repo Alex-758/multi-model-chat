@@ -16,8 +16,6 @@ contextBridge.exposeInMainWorld('api', {
   // 搜索
   search: (query, count) => ipcRenderer.invoke('search:query', { query, count }),
   testSearch: (cfg) => ipcRenderer.invoke('search:test', cfg),
-  // 剪贴板：同时写入渲染后的 HTML（Word 粘贴保留粗体等格式）与纯文本（无 Markdown 标记）
-  writeRichClipboard: (payload) => ipcRenderer.invoke('clipboard:writeRich', payload),
   // 数据
   exportData: (d) => ipcRenderer.invoke('data:export', d),
   importData: () => ipcRenderer.invoke('data:import'),

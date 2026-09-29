@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const store = require('./store');
@@ -179,15 +179,6 @@ ipcMain.handle('search:query', (e, { query, count }) => {
   return search.webSearch((db.config && db.config.search) || {}, query, count);
 });
 ipcMain.handle('search:test', (e, cfg) => search.webSearch(cfg, '今日科技新闻', 3));
-
-// ---------- IPC：剪贴板（富文本 + 纯文本双写） ----------
-ipcMain.handle('clipboard:writeRich', (e, { html, text }) => {
-  const payload = {};
-  if (text) payload.text = text;
-  if (html) payload.html = html;
-  clipboard.write(payload);
-  return true;
-});
 
 // ---------- IPC：数据导入导出 ----------
 ipcMain.handle('data:export', async (e, data) => {
