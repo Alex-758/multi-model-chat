@@ -482,33 +482,36 @@ window.MM = window.MM || {};
     pane.innerHTML = '';
     const cfg = MM.state.config.synthesis;
     pane.appendChild(U.el('div', { class: 'pane-title' }, '综合回答'));
-    pane.appendChild(U.el('div', { class: 'pane-sub' }, '每轮回答完成后，可将多个模型的回答合并为一份综合回答。'));
+    pane.appendChild(U.el('div', { class: 'pane-sub' }, '选择每轮回答完成后，用什么方式把多个模型的回答合并为一份综合回答。'));
 
-    const modeSel = U.el('select', { id: 'y-mode' },
-      U.el('option', { value: 'frontend', selected: cfg.mode !== 'model' }, '前端智能合并（本地重组为完整回答，不消耗 token）'),
-      U.el('option', { value: 'model', selected: cfg.mode === 'model' }, '指定模型二次综合（更连贯全面，消耗一次请求）')
-    );
-    const modelSel = U.el('select', { id: 'y-model', style: 'width:100%' });
-    const flats = allFlatModels();
-    if (!flats.length) modelSel.appendChild(U.el('option', { value: '' }, '（暂无可用模型）'));
+    // 单一“综合方式”选择：第一项前端合并，其余每项一个模型（避免“选了模型但模式没切”的错配）
+    const sourceSel = U.el('select', { id: 'y-source', style: 'width:100%' });
+    sourceSel.appendChild(U.el('option',
+      { value: 'frontend', selected: (cfg.synthSource || 'frontend') === 'frontend' },
+      '前端智能合并（本地重组，不消耗 token）'));
+    const flats = MM.settings.allFlatModels();
+    if (!flats.length) {
+      sourceSel.appendChild(U.el('option', { value: 'frontend', disabled: '' }, '（暂无可用模型，添加后可选择模型综合）'));
+    }
     for (const f of flats) {
-      modelSel.appendChild(U.el('option', { value: f.id, selected: cfg.modelKey === f.id }, f.providerName + ' · ' + f.name));
+      sourceSel.appendChild(U.el('option',
+        { value: f.id, selected: cfg.synthSource === f.id },
+        '模型综合：' + f.providerName + ' · ' + f.name));
     }
 
     const autoCheck = U.el('input', { type: 'checkbox', id: 'y-auto', ...(cfg.autoMerge ? { checked: '' } : {}) });
 
     const saveBtn = U.el('button', { class: 'btn-primary', style: 'margin-top:16px' }, '保存');
     saveBtn.addEventListener('click', () => {
-      cfg.mode = modeSel.value;
-      cfg.modelKey = modelSel.value;
+      cfg.synthSource = sourceSel.value;
       cfg.autoMerge = autoCheck.checked;
       MM.save();
       U.$('#tgl-auto').checked = cfg.autoMerge;
       U.toast('综合设置已保存');
     });
 
-    pane.appendChild(field('默认合并模式', modeSel));
-    pane.appendChild(field('二次综合使用的模型', modelSel, '选择「模型二次综合」时默认使用的模型。'));
+    pane.appendChild(field('综合方式', sourceSel,
+      '“模型综合”会由所选模型把各回答重写为一份完整的最终回答（更连贯，每轮多消耗一次请求）；前端合并在本地完成，不消耗 token。'));
     pane.appendChild(U.el('div', { class: 'field' },
       U.el('label', { class: 'inline-check' }, autoCheck, '回答完成后自动执行综合（顶栏「自动综合」开关）')));
     pane.appendChild(saveBtn);

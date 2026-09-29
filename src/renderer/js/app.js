@@ -50,7 +50,7 @@ MM.defaults = {
   DEFAULT_CONFIG: {
     providers: [],
     search: { provider: 'bing', apiKey: '' },
-    synthesis: { mode: 'frontend', modelKey: '', autoMerge: true }
+    synthesis: { synthSource: 'frontend', autoMerge: true }
   }
 };
 
@@ -171,25 +171,30 @@ MM.defaults = {
       // 新结构
       MM.state.config.providers = saved.config.providers;
       MM.state.config.search = Object.assign({ provider: 'bing', apiKey: '' }, saved.config.search || {});
-      MM.state.config.synthesis = Object.assign({ mode: 'frontend', modelKey: '', autoMerge: true }, saved.config.synthesis || {});
+      MM.state.config.synthesis = Object.assign({ synthSource: 'frontend', autoMerge: true }, saved.config.synthesis || {});
       fillPresetDefaults(MM.state.config.providers, false);
-      // 旧字段兼容：synthesis.modelId → modelKey
-      if (!MM.state.config.synthesis.modelKey && saved.config.synthesis && saved.config.synthesis.modelId) {
+      // 旧字段迁移：mode/modelKey/synthesis.modelId → synthSource
+      if (!MM.state.config.synthesis.synthSource) {
+        const legacyKey = MM.state.config.synthesis.modelKey;
+        MM.state.config.synthesis.synthSource =
+          (saved.config.synthesis.mode === 'model' && legacyKey) ? legacyKey : 'frontend';
+      } else if (saved.config.synthesis && saved.config.synthesis.modelId) {
+        // 更旧：仅存 modelId
         for (const p of MM.state.config.providers) {
           const hit = (p.models || []).find(mo => mo.modelId === saved.config.synthesis.modelId);
-          if (hit) { MM.state.config.synthesis.modelKey = p.id + '::' + hit.modelId; break; }
+          if (hit) { MM.state.config.synthesis.synthSource = p.id + '::' + hit.modelId; break; }
         }
       }
     } else if (saved && saved.config && Array.isArray(saved.config.models) && saved.config.models.length) {
       // 旧结构迁移
       MM.state.config.providers = migrateFlatModels(saved.config.models);
       MM.state.config.search = Object.assign({ provider: 'bing', apiKey: '' }, saved.config.search || {});
-      MM.state.config.synthesis = Object.assign({ mode: 'frontend', modelKey: '', autoMerge: true }, saved.config.synthesis || {});
-      // 旧综合模型引用 modelId → modelKey
+      MM.state.config.synthesis = Object.assign({ synthSource: 'frontend', autoMerge: true }, saved.config.synthesis || {});
+      // 旧综合模型引用 modelId → synthSource
       if (saved.config.synthesis && saved.config.synthesis.modelId) {
         for (const p of MM.state.config.providers) {
           const hit = p.models.find(mo => mo.modelId === saved.config.synthesis.modelId);
-          if (hit) { MM.state.config.synthesis.modelKey = p.id + '::' + hit.modelId; break; }
+          if (hit) { MM.state.config.synthesis.synthSource = p.id + '::' + hit.modelId; break; }
         }
       }
       fillPresetDefaults(MM.state.config.providers, true);

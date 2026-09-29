@@ -60,9 +60,9 @@ window.MM = window.MM || {};
     if (!am || !am.results) return null;
     const done = am.results.filter(r => r.status === 'done' && r.content);
     if (!done.length) return null;
-    const synthKey = MM.state.config.synthesis && MM.state.config.synthesis.modelKey;
-    const pref = synthKey && done.find(r => r.modelId === synthKey);
-    return (pref || done[0]).content;
+    // 多轮上下文优先取综合回答（若存在），其次取当前显示版本的回答
+    if (am.merge && am.merge.content) return am.merge.content;
+    return done[0].content;
   }
 
   // 粗略 token 估算：CJK 字符按 1 token，其他按 4 字符 1 token
@@ -521,10 +521,10 @@ window.MM = window.MM || {};
     if (!okResults.length) { U.toast('没有可合并的成功回答', true); return; }
 
     const cfg = MM.state.config.synthesis || {};
-    const mode = cfg.mode || 'frontend';
+    const source = cfg.synthSource || 'frontend';
 
     // 综合回答挂在轮次上（不再作为独立消息），并同步进当前版本快照
-    am.merge = { content: '', mode: mode, createdAt: Date.now() };
+    am.merge = { content: '', mode: source === 'frontend' ? 'frontend' : 'model', createdAt: Date.now() };
     s.updatedAt = Date.now();
     MM.save();
 
@@ -536,7 +536,7 @@ window.MM = window.MM || {};
     wrap.appendChild(card);
     scrollBottom(true);
 
-    if (mode === 'frontend') {
+    if (source === 'frontend') {
       am.merge.content = MM.merge.frontend(okResults);
       syncMergeToVersion(am);
       finalizeMergeCard({ mergeMsg: am.merge, mergeBody: card.querySelector('.ac-body'), mergeStatus: card.querySelector('.ac-status'), am: am, roundId: roundId });
@@ -546,7 +546,7 @@ window.MM = window.MM || {};
 
     // 模型二次综合
     const flats = MM.settings.allFlatModels();
-    let model = flats.find(m => m.id === cfg.modelKey);
+    let model = flats.find(m => m.id === source);
     if (!model) model = flats[0];
     if (!model) {
       am.merge.content = '（未找到可用的综合模型，请在设置中配置）';
