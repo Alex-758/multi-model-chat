@@ -109,8 +109,8 @@ window.MM = window.MM || {};
         onclick: () => { editingId = p.id; renderModels(); }
       },
         U.el('span', { class: 'ac-dot', style: 'background:' + dotColor(p.id) }),
-        U.el('span', {}, p.name || p.id),
-        U.el('span', { class: 'tag' }, (p.preset ? '预置' : '自定义') + ' · ' + on + '/' + total + ' 启用')
+        U.el('span', { class: 'p-name', title: p.name || p.id }, p.name || p.id),
+        U.el('span', { class: 'tag', title: (p.preset ? '预置' : '自定义') + ' · ' + on + '/' + total + ' 启用' }, (p.preset ? '预置' : '自定义') + ' ' + on + '/' + total)
       ));
     }
     list.appendChild(U.el('div', { style: 'border-top:1px solid var(--border);margin:8px 0' }));
@@ -311,13 +311,28 @@ window.MM = window.MM || {};
         U.el('label', { class: 'inline-check' }, fullUrlCheck, '完整 URL（关闭时自动补全 /chat/completions 或 /v1/messages）')),
       '兼容 OpenAI API 的服务端点地址，不要以斜杠结尾。'));
 
-    // 密钥只写入主进程保管：输入框不回显已存密钥
+    // 密钥只写入主进程保管：输入框不回显已存密钥；"清除"内联在同行
     const keyInput = U.el('input', {
       type: 'password', id: 'p-key', value: '',
       placeholder: p.hasKey ? '已保存密钥——输入新值可覆盖' : '请输入 API Key'
     });
-    wrap.appendChild(field('API 密钥', U.el('div', { class: 'field-row' }, keyInput),
-      p.hasKey ? '已保存密钥（不在本界面显示）。输入新密钥并保存可覆盖；下方“清除”可删除。' : null));
+    const clearKeyBtn = U.el('button', {
+      class: 'btn-secondary', style: 'flex:none;padding:8px 10px;font-size:12px',
+      ...(p.hasKey ? {} : { disabled: '', style: 'flex:none;padding:8px 10px;font-size:12px;opacity:.5' })
+    }, '清除');
+    clearKeyBtn.addEventListener('click', async () => {
+      if (!p.hasKey) return;
+      if (!window.confirm('确定清除已保存的 API 密钥？')) return;
+      await api.clearSecret(p.id);
+      p.hasKey = false;
+      keyInput.placeholder = '请输入 API Key';
+      clearKeyBtn.disabled = true;
+      clearKeyBtn.style.opacity = .5;
+      U.toast('密钥已清除');
+      MM.chat.renderChips();
+    });
+    wrap.appendChild(field('API 密钥', U.el('div', { class: 'field-row' }, keyInput, clearKeyBtn),
+      p.hasKey ? '已保存密钥不在本界面显示；输入新值并保存可覆盖，点“清除”删除。' : '密钥仅保存在本机。'));
 
     async function commitKeyIfTyped() {
       const k = keyInput.value.trim();
@@ -333,22 +348,6 @@ window.MM = window.MM || {};
     urlInput.addEventListener('change', () => { p.baseUrl = urlInput.value.trim(); saveSoon(); });
     fullUrlCheck.addEventListener('change', () => { p.fullUrl = fullUrlCheck.checked; saveSoon(); });
     keyInput.addEventListener('change', () => { commitKeyIfTyped(); });
-
-    // 清除已存密钥
-    const clearKeyBtn = U.el('button', {
-      class: 'btn-secondary', style: 'flex:none;padding:8px 10px;font-size:12px',
-      ...(p.hasKey ? {} : { disabled: '', style: 'flex:none;padding:8px 10px;font-size:12px;opacity:.5' })
-    }, '清除');
-    clearKeyBtn.addEventListener('click', async () => {
-      if (!p.hasKey) return;
-      if (!window.confirm('确定清除已保存的 API 密钥？')) return;
-      await api.clearSecret(p.id);
-      p.hasKey = false;
-      keyInput.placeholder = '请输入 API Key';
-      U.toast('密钥已清除');
-      MM.chat.renderChips();
-    });
-    wrap.appendChild(field('API 密钥操作', U.el('div', { class: 'field-row' }, clearKeyBtn), null));
 
     // 测试连接（用第一个启用模型的 ID）
     const result = U.el('div', { class: 'test-result' });

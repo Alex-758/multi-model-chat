@@ -303,19 +303,20 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .model-row { padding: 8px 10px; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
 .model-row:hover { background: var(--panel-2); }
 .model-row.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.model-row .tag { margin-left: auto; font-size: 10.5px; color: var(--muted); font-weight: 400; }
+.model-row .p-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.model-row .tag { margin-left: auto; flex-shrink: 0; font-size: 10.5px; color: var(--muted); font-weight: 400; white-space: nowrap; }
 .model-row .off { opacity: .45; }
 .model-form { flex: 1; min-width: 0; }
 
 /* 服务商下的模型条目（行内编辑） */
-#model-entries { display: flex; flex-direction: column; gap: 8px; }
-.m-entry { border: 1px solid var(--border); border-radius: var(--radius); padding: 9px 11px; background: var(--panel); }
+#model-entries { display: flex; flex-direction: column; gap: 7px; }
+.m-entry { border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 10px; background: var(--panel); }
 .m-row { display: flex; gap: 8px; align-items: center; }
-.m-row + .m-row { margin-top: 7px; }
+.m-row + .m-row { margin-top: 5px; }
 .m-row .mid-wrap { flex: 1.3; }
 .m-row > input[type=text] { flex: 1; min-width: 0; }
-.m-row input[type=number] { flex-shrink: 0; width: 100px; }
-.m-entry .hint { margin-top: 5px; }
+.m-row input[type=number] { flex-shrink: 0; width: 92px; }
+.m-entry .hint { margin-top: 2px; font-size: 11px; }
 .field { margin-bottom: 13px; }
 .field label { display: block; font-size: 12.5px; font-weight: 600; margin-bottom: 5px; }
 .field label .req { color: var(--danger); }
