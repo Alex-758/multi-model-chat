@@ -9,7 +9,8 @@ window.MM = window.MM || {};
   const pending = new Map(); // requestId -> 请求上下文
 
   function stripModel(m) {
-    return { id: m.id, name: m.name, provider: m.provider, apiFormat: m.apiFormat, baseUrl: m.baseUrl, modelId: m.modelId, apiKey: m.apiKey, fullUrl: m.fullUrl, maxTokens: m.maxTokens };
+    // 不携带 apiKey：密钥由主进程按 providerId 保管并在请求时解析
+    return { id: m.id, providerId: m.providerId, name: m.name, provider: m.provider, apiFormat: m.apiFormat, baseUrl: m.baseUrl, modelId: m.modelId, fullUrl: m.fullUrl, maxTokens: m.maxTokens };
   }
 
   function setSendBtn(on) {
@@ -43,7 +44,7 @@ window.MM = window.MM || {};
       const bits = [m.providerName + ' · ' + m.modelId];
       if (m.contextTokens) bits.push(MM.modelInfo.fmtTokens(m.contextTokens) + ' 上下文');
       if (m.multimodal) bits.push('多模态');
-      if (!m.apiKey) bits.push('API Key 未设置，请在设置中填写');
+      if (!m.hasKey) bits.push('API Key 未设置，请在设置中填写');
       box.appendChild(U.el('div', {
         class: 'chip on',
         'data-model-id': m.id,
@@ -201,13 +202,21 @@ window.MM = window.MM || {};
       at: Date.now()
     };
   }
+  function hasUsefulResults(results) {
+    return (results || []).some(r => (r.status === 'done' || r.status === 'stopped') && r.content);
+  }
   function inheritVersionsOf(am) {
-    const versions = Array.isArray(am.versions) ? am.versions.map(v => JSON.parse(JSON.stringify(v))) : [];
-    const cur = snapshotOf(am);
-    const last = versions[versions.length - 1];
-    // 当前显示若与最后一份快照不同（或池为空），把当前显示也存入版本池
-    if (!last || JSON.stringify(last.results) !== JSON.stringify(cur.results) || JSON.stringify(last.merge || null) !== JSON.stringify(cur.merge || null)) {
-      versions.push(cur);
+    // 仅继承含有效回答的版本；当前显示全失败时不入池
+    const versions = (Array.isArray(am.versions) ? am.versions : [])
+      .filter(v => hasUsefulResults(v.results))
+      .map(v => JSON.parse(JSON.stringify(v)));
+    if (hasUsefulResults(am.results)) {
+      const cur = snapshotOf(am);
+      const last = versions[versions.length - 1];
+      // 当前显示若与最后一份快照不同（或池为空），把当前显示也存入版本池
+      if (!last || JSON.stringify(last.results) !== JSON.stringify(cur.results) || JSON.stringify(last.merge || null) !== JSON.stringify(cur.merge || null)) {
+        versions.push(cur);
+      }
     }
     return versions;
   }
@@ -246,6 +255,15 @@ window.MM = window.MM || {};
     return tools;
   }
 
+  // 查找该轮正在进行中的流式请求上下文（用于切换会话后重建事件绑定）
+  function liveCtxFor(am) {
+    for (const ctx of pending.values()) {
+      if (ctx.assistantMsg === am) return { type: 'round', ctx };
+      if (ctx.am === am && ctx.mergeMsg) return { type: 'merge', ctx };
+    }
+    return null;
+  }
+
   function renderAll() {
     const wrap = U.$('#messages');
     wrap.innerHTML = '';
@@ -268,8 +286,32 @@ window.MM = window.MM || {};
           i++;
         }
         if (am) {
-          wrap.appendChild(answersGrid(am));
-          if (am.merge && am.merge.content) wrap.appendChild(mergeCard(am.merge, false));
+          // 该轮若有进行中的流式请求：以流式样式重建卡片，并把事件绑定切到新 DOM
+          const live = liveCtxFor(am);
+          let grid;
+          if (live && live.type === 'round') {
+            grid = U.el('div', { class: 'answers', 'data-round': am.roundId });
+            for (const r of am.results) grid.appendChild(answerCard(r, true));
+            live.ctx.grid = grid;
+          } else {
+            grid = answersGrid(am);
+          }
+          wrap.appendChild(grid);
+          if (am.merge && am.merge.content) {
+            if (live && live.type === 'merge') {
+              const card = mergeCard(am.merge, true);
+              wrap.appendChild(card);
+              live.ctx.mergeBody = card.querySelector('.ac-body');
+              live.ctx.mergeStatus = card.querySelector('.ac-status');
+            } else {
+              wrap.appendChild(mergeCard(am.merge, false));
+            }
+          } else if (live && live.type === 'merge') {
+            const card = mergeCard(am.merge, true);
+            wrap.appendChild(card);
+            live.ctx.mergeBody = card.querySelector('.ac-body');
+            live.ctx.mergeStatus = card.querySelector('.ac-status');
+          }
           wrap.appendChild(roundTools(am));
         }
       } else {
@@ -314,7 +356,11 @@ window.MM = window.MM || {};
     input.value = '';
     autoResize();
 
-    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, true);
+    // 立即锁定状态：联网搜索 await 期间不允许再次发送/重试（防竞态）
+    streaming = true;
+    setSendBtn(true);
+    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, true)
+      .catch(e => { streaming = false; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
   }
 
   // 发起一轮多模型请求并渲染占位卡片（inheritVersions：重试时继承的历史版本池）
@@ -330,6 +376,8 @@ window.MM = window.MM || {};
       }
       if (searchResults && searchResults.length) userMsg.sources = searchResults;
     }
+    // 搜索期间用户点了停止：放弃本轮（此时助手消息尚未入列，干净退出）
+    if (!streaming) { U.toast('已取消'); return; }
 
     const roundId = U.uid();
     const reqId = 'req' + (++seq);
@@ -391,14 +439,18 @@ window.MM = window.MM || {};
         MM.save();
         return;
       }
-      // 回答轮结束：保存本版本快照
+      // 回答轮结束：保存本版本快照（全部模型都失败时不入版本池）
       const am = ctx.assistantMsg;
-      am.versions = am.versions || [];
-      const snap = snapshotOf(am);
-      if (!am.versions.length || JSON.stringify(am.versions[am.versions.length - 1].results) !== JSON.stringify(snap.results)) {
-        am.versions.push(snap);
+      if (hasUsefulResults(am.results)) {
+        am.versions = am.versions || [];
+        const snap = snapshotOf(am);
+        if (!am.versions.length || JSON.stringify(am.versions[am.versions.length - 1].results) !== JSON.stringify(snap.results)) {
+          am.versions.push(snap);
+        }
+        am.active = am.versions.length - 1;
+      } else if (typeof am.active !== 'number' || am.active < 0) {
+        am.active = Array.isArray(am.versions) ? am.versions.length - 1 : -1;
       }
-      am.active = am.versions.length - 1;
       // 重建轮次工具栏（版本导航 / 重新生成 / 综合回答入口）
       const oldTools = wrap.querySelector('.round-tools[data-round="' + am.roundId + '"]');
       if (oldTools) oldTools.remove();
@@ -476,6 +528,9 @@ window.MM = window.MM || {};
 
   function stopAll() {
     for (const id of Array.from(pending.keys())) api.stop(id);
+    // 搜索阶段尚无 pending 可中止：立即复位，dispatchRound 在搜索返回后检测到取消即退出
+    streaming = false;
+    setSendBtn(false);
   }
 
   // ---------- 重新生成 ----------
@@ -499,7 +554,11 @@ window.MM = window.MM || {};
     s.updatedAt = Date.now();
     MM.save();
     renderAll();
-    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, false, versions);
+    // 立即锁定状态（防搜索 await 期间重复触发）
+    streaming = true;
+    setSendBtn(true);
+    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, false, versions)
+      .catch(e => { streaming = false; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
   }
 
   // ---------- 综合回答 ----------

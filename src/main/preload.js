@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld('api', {
   // 搜索
   search: (query, count) => ipcRenderer.invoke('search:query', { query, count }),
   testSearch: (cfg) => ipcRenderer.invoke('search:test', cfg),
+  // 密钥保管（渲染层不持有密钥，只写入/清除）
+  setSecret: (id, key) => ipcRenderer.invoke('secrets:set', { id, key }),
+  clearSecret: (id) => ipcRenderer.invoke('secrets:clear', { id }),
   // 数据
   exportData: (d) => ipcRenderer.invoke('data:export', d),
   importData: () => ipcRenderer.invoke('data:import'),

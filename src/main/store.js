@@ -29,8 +29,10 @@ function load() {
 
 function save(data) {
   // 并发检测：磁盘上的 mtime 与本进程记录不一致 => 被其他实例/进程改过
+  let conflict = false;
   const cur = currentMtime();
   if (lastMtime && cur && cur !== lastMtime) {
+    conflict = true;
     try {
       fs.copyFileSync(file(), file() + '.bak');
       console.warn('[store] 检测到 store.json 被其他实例修改，旧数据已备份为 store.json.bak');
@@ -41,6 +43,7 @@ function save(data) {
   fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
   fs.renameSync(tmp, f);
   lastMtime = currentMtime();
+  return { conflict };
 }
 
 module.exports = { init, load, save, dir };

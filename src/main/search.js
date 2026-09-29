@@ -3,10 +3,29 @@
 const BING_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
 async function bingSearch(query, count) {
+  // 双端点兜底：www 失败或解析不到结果时换 cn 端点再试一次
+  const endpoints = [
+    'https://www.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=zh-CN&count=' + Math.max(count + 4, 10),
+    'https://cn.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=zh-CN&count=' + Math.max(count + 4, 10)
+  ];
+  let lastErr = null;
+  for (const url of endpoints) {
+    try {
+      const out = await bingAttempt(url, count);
+      if (out.length) return out;
+      lastErr = new Error('必应搜索未解析到结果（可能被临时限流），可稍后重试或配置 Tavily/博查');
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error('必应搜索失败');
+}
+
+async function bingAttempt(url, count) {
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), 15000);
   try {
-    const res = await fetch('https://www.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=zh-CN&count=' + Math.max(count + 4, 10), {
+    const res = await fetch(url, {
       headers: { 'User-Agent': BING_UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
       signal: ctrl.signal
     });
@@ -17,13 +36,12 @@ async function bingSearch(query, count) {
     let m;
     while ((m = re.exec(t)) && out.length < count) {
       const title = (m[2] || '').replace(/<[^>]+>/g, '').trim();
-      let url = String(m[1] || '');
-      if (url.startsWith('/')) url = 'https://www.bing.com' + url;
+      let u = String(m[1] || '');
+      if (u.startsWith('/')) u = 'https://www.bing.com' + u;
       const snippet = (m[3] || '').replace(/<[^>]+>/g, '').trim().slice(0, 300);
-      if (!title || !/^https?:\/\//.test(url)) continue;
-      out.push({ title, url, snippet });
+      if (!title || !/^https?:\/\//.test(u)) continue;
+      out.push({ title, url: u, snippet });
     }
-    if (!out.length) throw new Error('必应搜索未解析到结果（可能被临时限流），可稍后重试或配置 Tavily/博查');
     return out;
   } finally { clearTimeout(timeout); }
 }

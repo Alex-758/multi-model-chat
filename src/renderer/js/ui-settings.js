@@ -57,6 +57,7 @@ window.MM = window.MM || {};
   }
 
   // 服务商连接信息的扁平化模型对象（发请求 / 聊天芯片使用）
+  // 注意：apiKey 只存在于主进程；这里只带 hasKey 标记
   function flatten(p, mo) {
     return {
       id: p.id + '::' + mo.modelId,
@@ -65,7 +66,7 @@ window.MM = window.MM || {};
       provider: p.provider || p.id,
       apiFormat: p.apiFormat,
       baseUrl: p.baseUrl,
-      apiKey: p.apiKey,
+      hasKey: p.hasKey === true,
       fullUrl: p.fullUrl,
       modelId: mo.modelId,
       name: mo.name || mo.modelId,
@@ -159,10 +160,10 @@ window.MM = window.MM || {};
   }
 
   async function fetchList(p, btn) {
-    if (!p.baseUrl || !p.apiKey) { U.toast('请先填写请求地址和 API 密钥', true); return null; }
+    if (!p.baseUrl || !p.hasKey) { U.toast('请先填写请求地址和 API 密钥', true); return null; }
     if (btn) { btn.disabled = true; btn.textContent = '获取中…'; }
     try {
-      const list = await api.listModels({ apiFormat: p.apiFormat, baseUrl: p.baseUrl, apiKey: p.apiKey, fullUrl: p.fullUrl, provider: p.provider || p.id });
+      const list = await api.listModels({ apiFormat: p.apiFormat, baseUrl: p.baseUrl, fullUrl: p.fullUrl, providerId: p.id, provider: p.provider || p.id });
       getCache()[p.id] = list;
       MM.save();
       return list;
@@ -310,16 +311,44 @@ window.MM = window.MM || {};
         U.el('label', { class: 'inline-check' }, fullUrlCheck, '完整 URL（关闭时自动补全 /chat/completions 或 /v1/messages）')),
       '兼容 OpenAI API 的服务端点地址，不要以斜杠结尾。'));
 
-    const keyInput = U.el('input', { type: 'password', id: 'p-key', placeholder: '请输入 API Key', value: p.apiKey || '' });
-    const eye = U.el('button', { class: 'btn-secondary', style: 'flex:none;padding:8px 10px' }, '👁');
-    eye.addEventListener('click', () => { keyInput.type = keyInput.type === 'password' ? 'text' : 'password'; });
-    wrap.appendChild(field('API 密钥', U.el('div', { class: 'field-row' }, keyInput, eye)));
+    // 密钥只写入主进程保管：输入框不回显已存密钥
+    const keyInput = U.el('input', {
+      type: 'password', id: 'p-key', value: '',
+      placeholder: p.hasKey ? '已保存密钥——输入新值可覆盖' : '请输入 API Key'
+    });
+    wrap.appendChild(field('API 密钥', U.el('div', { class: 'field-row' }, keyInput),
+      p.hasKey ? '已保存密钥（不在本界面显示）。输入新密钥并保存可覆盖；下方“清除”可删除。' : null));
+
+    async function commitKeyIfTyped() {
+      const k = keyInput.value.trim();
+      if (!k) return;
+      await api.setSecret(p.id, k);
+      p.hasKey = true;
+      keyInput.value = '';
+      keyInput.placeholder = '已保存密钥——输入新值可覆盖';
+    }
 
     // 连接设置实时写回 + 防抖落盘
     fmtSel.addEventListener('change', () => { p.apiFormat = fmtSel.value; saveSoon(); });
     urlInput.addEventListener('change', () => { p.baseUrl = urlInput.value.trim(); saveSoon(); });
     fullUrlCheck.addEventListener('change', () => { p.fullUrl = fullUrlCheck.checked; saveSoon(); });
-    keyInput.addEventListener('change', () => { p.apiKey = keyInput.value.trim(); saveSoon(); });
+    keyInput.addEventListener('change', () => { commitKeyIfTyped(); });
+
+    // 清除已存密钥
+    const clearKeyBtn = U.el('button', {
+      class: 'btn-secondary', style: 'flex:none;padding:8px 10px;font-size:12px',
+      ...(p.hasKey ? {} : { disabled: '', style: 'flex:none;padding:8px 10px;font-size:12px;opacity:.5' })
+    }, '清除');
+    clearKeyBtn.addEventListener('click', async () => {
+      if (!p.hasKey) return;
+      if (!window.confirm('确定清除已保存的 API 密钥？')) return;
+      await api.clearSecret(p.id);
+      p.hasKey = false;
+      keyInput.placeholder = '请输入 API Key';
+      U.toast('密钥已清除');
+      MM.chat.renderChips();
+    });
+    wrap.appendChild(field('API 密钥操作', U.el('div', { class: 'field-row' }, clearKeyBtn), null));
 
     // 测试连接（用第一个启用模型的 ID）
     const result = U.el('div', { class: 'test-result' });
@@ -330,7 +359,8 @@ window.MM = window.MM || {};
       testBtn.disabled = true; testBtn.textContent = '测试中…';
       result.className = 'test-result';
       try {
-        const reply = await api.testModel({ apiFormat: p.apiFormat, baseUrl: p.baseUrl, apiKey: p.apiKey, fullUrl: p.fullUrl, modelId: mo.modelId, provider: p.provider || p.id });
+        await commitKeyIfTyped(); // 输入了新密钥先保存
+        const reply = await api.testModel({ apiFormat: p.apiFormat, baseUrl: p.baseUrl, fullUrl: p.fullUrl, modelId: mo.modelId, providerId: p.id, provider: p.provider || p.id });
         result.className = 'test-result ok';
         result.textContent = '✓ 连接成功（' + mo.modelId + '），回复：' + String(reply).slice(0, 100);
       } catch (e) {
@@ -366,7 +396,7 @@ window.MM = window.MM || {};
             class: 'btn-secondary', style: 'font-size:12px;padding:5px 10px',
             onclick: async (e) => {
               p.baseUrl = U.$('#p-url').value.trim();
-              p.apiKey = U.$('#p-key').value.trim();
+              await commitKeyIfTyped(); // 输入了新密钥先保存
               const list = await fetchList(p, e.currentTarget);
               if (list) { U.toast('获取到 ' + list.length + ' 个模型'); renderModelEntries(); }
             }
@@ -403,8 +433,6 @@ window.MM = window.MM || {};
     const pane = U.$('#pane-search');
     pane.innerHTML = '';
     const cfg = MM.state.config.search;
-    // 兼容升级：填了密钥但服务商还是"不使用"的老配置 → 自动切到必应（免费）
-    if ((!cfg.provider || cfg.provider === 'none') && (cfg.apiKey || '').trim()) cfg.provider = 'bing';
     pane.appendChild(U.el('div', { class: 'pane-title' }, '联网搜索'));
     pane.appendChild(U.el('div', { class: 'pane-sub' }, '聊天页开启「联网搜索」开关后：'));
     const tips = U.el('ul', { class: 'pane-sub', style: 'padding-left:20px;line-height:2' });
@@ -423,11 +451,19 @@ window.MM = window.MM || {};
       U.el('option', { value: 'none', selected: cfg.provider === 'none' }, '不使用搜索')
     );
     const keyRow = U.el('div', {});
-    const keyInput = U.el('input', { type: 'password', id: 's-key', placeholder: '搜索 API Key', value: cfg.apiKey || '', style: 'width:100%' });
+    const keyInput = U.el('input', {
+      type: 'password', id: 's-key', style: 'width:100%',
+      placeholder: cfg.hasKey ? '已保存密钥——输入新值可覆盖' : '搜索 API Key'
+    });
     const keyHint = U.el('div', { class: 'hint' });
     keyRow.appendChild(keyInput);
     keyRow.appendChild(keyHint);
     const result = U.el('div', { class: 'test-result' });
+
+    async function commitSearchKeyIfTyped() {
+      const k = keyInput.value.trim();
+      if (k) { await api.setSecret('search', k); cfg.hasKey = true; keyInput.value = ''; keyInput.placeholder = '已保存密钥——输入新值可覆盖'; }
+    }
 
     function syncKeyVisible() {
       const pv = provSel.value;
@@ -441,27 +477,27 @@ window.MM = window.MM || {};
     syncKeyVisible();
 
     const saveBtn = U.el('button', { class: 'btn-primary' }, '保存');
-    saveBtn.addEventListener('click', () => {
+    saveBtn.addEventListener('click', async () => {
       const pv = provSel.value;
-      const key = keyInput.value.trim();
-      if ((pv === 'tavily' || pv === 'bocha') && !key) {
+      if ((pv === 'tavily' || pv === 'bocha') && !keyInput.value.trim() && !cfg.hasKey) {
         result.className = 'test-result err';
         result.textContent = '✗ 所选搜索服务商需要 API 密钥，请填写后再保存';
         return;
       }
-      cfg.provider = pv; cfg.apiKey = key;
+      await commitSearchKeyIfTyped();
+      cfg.provider = pv;
       MM.save(); U.toast('搜索设置已保存');
     });
     const testBtn = U.el('button', { class: 'btn-secondary' }, '测试搜索');
     testBtn.addEventListener('click', async () => {
       const pv = provSel.value;
-      const key = keyInput.value.trim();
       result.className = 'test-result';
       if (pv === 'none') { result.className = 'test-result err'; result.textContent = '当前为「不使用搜索」，请先选择搜索引擎'; return; }
-      if ((pv === 'tavily' || pv === 'bocha') && !key) { result.className = 'test-result err'; result.textContent = '✗ 请先填写 API 密钥'; return; }
+      if ((pv === 'tavily' || pv === 'bocha') && !keyInput.value.trim() && !cfg.hasKey) { result.className = 'test-result err'; result.textContent = '✗ 请先填写 API 密钥'; return; }
       testBtn.disabled = true; testBtn.textContent = '搜索中…';
       try {
-        const rs = await api.testSearch({ provider: pv, apiKey: key });
+        await commitSearchKeyIfTyped();
+        const rs = await api.testSearch({ provider: pv });
         if (!rs || !rs.length) { result.className = 'test-result err'; result.textContent = '✗ 未返回结果'; }
         else { result.className = 'test-result ok'; result.textContent = '✓ 返回 ' + rs.length + ' 条结果：' + rs[0].title; }
       } catch (e) {
