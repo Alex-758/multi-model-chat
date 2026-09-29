@@ -51,6 +51,15 @@ MM.util = {
     });
   },
 
+  // 富文本复制：同时写入渲染后的 HTML（Word 粘贴保留粗体/列表等格式）
+  // 与纯文本（inner 提取，无 Markdown 星号标记）
+  copyRich(el) {
+    if (!el) return Promise.resolve();
+    const payload = { text: el.innerText || '' };
+    if (el.innerHTML) payload.html = el.innerHTML;
+    return api.writeRichClipboard(payload).catch(() => navigator.clipboard.writeText(payload.text));
+  },
+
   toast(msg, isErr) {
     const t = MM.util.$('#toast');
     t.textContent = msg;

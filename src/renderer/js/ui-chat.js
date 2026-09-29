@@ -153,7 +153,7 @@ window.MM = window.MM || {};
     card.appendChild(body);
     card.appendChild(U.el('div', { style: 'padding:6px 12px 8px;display:flex;gap:6px;justify-content:flex-end' },
       U.el('button', {
-        class: 'ac-copy', onclick: function () { U.copyText(res.content || ''); U.toast('已复制'); }
+        class: 'ac-copy', onclick: function () { U.copyRich(body); U.toast('已复制'); }
       }, '复制')));
     MM.md.bindCopy(card);
     return card;
@@ -187,7 +187,7 @@ window.MM = window.MM || {};
     else body.innerHTML = MM.md.render(msg.content || '');
     card.appendChild(body);
     card.appendChild(U.el('div', { style: 'padding:6px 12px 8px;display:flex;gap:6px;justify-content:flex-end' },
-      U.el('button', { class: 'ac-copy', onclick: function () { U.copyText(msg.content || ''); U.toast('已复制'); } }, '复制')));
+      U.el('button', { class: 'ac-copy', onclick: function () { U.copyRich(body); U.toast('已复制'); } }, '复制')));
     MM.md.bindCopy(card);
     return card;
   }
