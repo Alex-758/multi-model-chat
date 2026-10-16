@@ -107,17 +107,19 @@ window.MM = window.MM || {};
       if (prev && prev.pinned && !s.pinned) {
         list.appendChild(U.el('div', { class: 'session-divider' }));
       }
-      const roundCount = s.messages.filter(m => m.role === 'user').length;
+      const roundCount = (s.messages || []).filter(m => m.role === 'user').length;
+      const timeLabel = U.fmtTime(s.updatedAt || s.createdAt);
       const item = U.el('div', {
         class: 'session-item' + (s.id === MM.state.currentId ? ' active' : ''),
         'data-id': s.id,
+        title: s.title, // 标题被操作按钮挤窄时会截断，悬停看全名
         onclick: () => switchTo(s.id)
       },
         U.el('div', { class: 's-info' },
           U.el('div', { class: 's-title' },
             s.pinned ? U.el('span', { class: 'pin-dot', title: '已置顶' }) : null,
             s.title),
-          U.el('div', { class: 's-time' }, U.fmtTime(s.updatedAt || s.createdAt) + ' · ' + roundCount + ' 轮')
+          U.el('div', { class: 's-time' }, (timeLabel ? timeLabel + ' · ' : '') + roundCount + ' 轮')
         ),
         U.el('div', { class: 's-actions' },
           U.el('button', { title: s.pinned ? '取消置顶' : '置顶', onclick: e => { e.stopPropagation(); togglePin(s.id); } }, s.pinned ? '已顶' : '置顶'),
@@ -130,5 +132,5 @@ window.MM = window.MM || {};
     }
   }
 
-  MM.sessions = { create, createSilent, current, switchTo, renameInline, togglePin, remove, render };
+  MM.sessions = { create, createSilent, current, switchTo, renameInline, togglePin, remove, render, sorted };
 })();

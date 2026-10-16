@@ -117,6 +117,66 @@ MM.defaults = {
     }
   }
 
+  // 旧综合设置迁移：1.0/1.1 的 mode='model'+modelKey、更旧的 modelId → synthSource
+  function normalizeSynth(rawSyn, providers) {
+    const syn = Object.assign({ synthSource: 'frontend', autoMerge: true }, rawSyn || {});
+    if (rawSyn && !rawSyn.synthSource) {
+      if (rawSyn.mode === 'model' && rawSyn.modelKey) {
+        syn.synthSource = rawSyn.modelKey;
+      } else if (rawSyn.modelId) {
+        // 更旧：只存了 modelId，按模型 ID 反查所属服务商
+        for (const p of providers) {
+          const hit = (p.models || []).find(mo => mo.modelId === rawSyn.modelId);
+          if (hit) { syn.synthSource = p.id + '::' + hit.modelId; break; }
+        }
+      }
+    }
+    return syn;
+  }
+
+  // 把任意来源的配置（磁盘数据 / 导入备份 / 全新安装）统一为当前结构。
+  // 启动加载与「导入数据」共用这一条迁移路径，避免两边行为不一致。
+  // 注意：1.0 备份迁移后 providers 上仍带明文密钥，调用方落盘后需用 stripSecrets 剥离。
+  MM.normalizeConfig = function (raw) {
+    const cfg = JSON.parse(JSON.stringify(raw || {}));
+    let providers;
+    if (Array.isArray(cfg.providers) && cfg.providers.length) {
+      providers = cfg.providers;
+      fillPresetDefaults(providers, false);
+    } else if (Array.isArray(cfg.models) && cfg.models.length) {
+      // 1.0 平铺结构迁移
+      providers = migrateFlatModels(cfg.models);
+      fillPresetDefaults(providers, true);
+    } else {
+      // 全新安装：预置服务商（Key 为空，等用户填写）
+      providers = JSON.parse(JSON.stringify(MM.defaults.PRESET_PROVIDERS));
+    }
+    delete cfg.models;
+    for (const p of providers) {
+      if (typeof p.hasKey !== 'boolean') p.hasKey = !!(p.apiKey || '').trim();
+    }
+    // 保留 modelLists 等其余字段（此前启动时被整体丢弃，导致模型列表缓存永远无法跨重启生效）
+    return Object.assign({}, cfg, {
+      providers,
+      // 不注入 apiKey 占位：渲染层状态里不该出现密钥字段（hasKey 才是渲染层可见的标记）
+      search: Object.assign({ provider: 'bing' }, cfg.search || {}),
+      synthesis: normalizeSynth(cfg.synthesis, providers)
+    });
+  };
+
+  // 渲染层不持有密钥：主进程接管保存后，把明文密钥从渲染层状态中剥离
+  MM.stripSecrets = function (cfg) {
+    for (const p of (cfg.providers || [])) {
+      p.hasKey = !!(p.apiKey || '').trim();
+      delete p.apiKey;
+    }
+    if (cfg.search) {
+      cfg.search.hasKey = !!(cfg.search.apiKey || '').trim();
+      delete cfg.search.apiKey;
+    }
+    return cfg;
+  };
+
   // 旧数据迁移：
   // 1) 旧格式的独立 merge 消息折叠进其所属轮次的 assistant 消息（am.merge）
   // 2) 为没有版本历史的轮次生成首份快照，使版本切换/回滚可用
@@ -167,45 +227,19 @@ MM.defaults = {
 
     let saved = null;
     try { saved = await api.getAll(); } catch (e) { saved = null; }
-    if (saved && saved.config && Array.isArray(saved.config.providers) && saved.config.providers.length) {
-      // 新结构
-      MM.state.config.providers = saved.config.providers;
-      MM.state.config.search = Object.assign({ provider: 'bing', apiKey: '' }, saved.config.search || {});
-      MM.state.config.synthesis = Object.assign({ synthSource: 'frontend', autoMerge: true }, saved.config.synthesis || {});
-      fillPresetDefaults(MM.state.config.providers, false);
-      // 旧字段迁移：mode/modelKey/synthesis.modelId → synthSource
-      if (!MM.state.config.synthesis.synthSource) {
-        const legacyKey = MM.state.config.synthesis.modelKey;
-        MM.state.config.synthesis.synthSource =
-          (saved.config.synthesis.mode === 'model' && legacyKey) ? legacyKey : 'frontend';
-      } else if (saved.config.synthesis && saved.config.synthesis.modelId) {
-        // 更旧：仅存 modelId
-        for (const p of MM.state.config.providers) {
-          const hit = (p.models || []).find(mo => mo.modelId === saved.config.synthesis.modelId);
-          if (hit) { MM.state.config.synthesis.synthSource = p.id + '::' + hit.modelId; break; }
-        }
-      }
-    } else if (saved && saved.config && Array.isArray(saved.config.models) && saved.config.models.length) {
-      // 旧结构迁移
-      MM.state.config.providers = migrateFlatModels(saved.config.models);
-      MM.state.config.search = Object.assign({ provider: 'bing', apiKey: '' }, saved.config.search || {});
-      MM.state.config.synthesis = Object.assign({ synthSource: 'frontend', autoMerge: true }, saved.config.synthesis || {});
-      // 旧综合模型引用 modelId → synthSource
-      if (saved.config.synthesis && saved.config.synthesis.modelId) {
-        for (const p of MM.state.config.providers) {
-          const hit = p.models.find(mo => mo.modelId === saved.config.synthesis.modelId);
-          if (hit) { MM.state.config.synthesis.synthSource = p.id + '::' + hit.modelId; break; }
-        }
-      }
-      fillPresetDefaults(MM.state.config.providers, true);
-    } else {
-      // 全新安装：预置服务商（Key 为空，等用户填写）
-      MM.state.config.providers = JSON.parse(JSON.stringify(MM.defaults.PRESET_PROVIDERS));
-    }
+    if (saved && saved.config) MM.state.config = MM.normalizeConfig(saved.config);
+    // 恢复历史会话：缺了这一步会以空会话覆盖磁盘上的全部记录
+    if (saved && Array.isArray(saved.sessions)) MM.state.sessions = saved.sessions;
     if (!MM.state.sessions.length) MM.sessions.createSilent();
     // 旧格式会话迁移（merge 折叠 + 版本快照种子）
     if (MM.migrateSessions(MM.state.sessions)) MM.save();
-    MM.state.currentId = MM.state.sessions[0] ? MM.state.sessions[0].id : null;
+    // 打开侧栏排在最前的那条会话（与列表展示顺序一致）
+    const topSession = MM.sessions.sorted()[0];
+    MM.state.currentId = topSession ? topSession.id : null;
+    // 1.0 结构迁移后渲染层可能持有明文密钥：先交给主进程保管，再从状态中剥离
+    if (MM.state.config.providers.some(p => p.apiKey)) {
+      MM.save().then(function (ok) { if (ok) MM.stripSecrets(MM.state.config); });
+    }
 
     // 恢复主题
     try {
@@ -225,7 +259,10 @@ MM.defaults = {
   const U = MM.util;
 
   MM.save = function () {
-    api.saveAll({ config: MM.state.config, sessions: MM.state.sessions }).catch(function () { });
+    // 返回是否落盘成功：调用方据此判断能否安全丢弃本地明文密钥等临时状态
+    return api.saveAll({ config: MM.state.config, sessions: MM.state.sessions })
+      .then(function () { return true; })
+      .catch(function () { return false; });
   };
 
   document.addEventListener('DOMContentLoaded', function () {

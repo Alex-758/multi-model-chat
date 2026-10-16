@@ -118,18 +118,20 @@ window.MM = window.MM || {};
 
   function lookupCatalog(catalog, provider, id) {
     if (!catalog) return null;
+    // 主进程返回 { byId, byProvider }；兼容只拿到平表 byId 的旧缓存
+    const byId = catalog.byId || catalog;
+    const byProvider = catalog.byProvider || null;
     const full = String(id).toLowerCase();
     const bare = full.split('/').pop();
     // 1. 所属服务商的分桶（避免跨服务商同名模型互相覆盖）
     const pk = PROVIDER_ALIAS[provider] || provider;
-    const bucket = catalog.byProvider && catalog.byProvider[String(pk || '').toLowerCase()];
+    const bucket = byProvider && byProvider[String(pk || '').toLowerCase()];
     if (bucket) {
       const c = bucket[full] || bucket[bare];
       if (c) return c;
     }
     // 2. 全局查找
-    const c = catalog.byId && (catalog.byId[full] || catalog.byId[bare]);
-    return c || null;
+    return byId[full] || byId[bare] || null;
   }
 
   /**

@@ -209,10 +209,12 @@ ipcMain.handle('models:test', (e, { model }) => providers.chatOnce(resolveModel(
 ipcMain.handle('catalog:get', async (e, force) => {
   const file = path.join(store.dir(), 'catalog.json');
   const TTL = 7 * 24 * 3600 * 1000;
+  // 渲染层需要 byProvider 做服务商精确匹配（同名模型跨服务商时避免误判），故两者都返回
+  const expose = c => (c && c.byId ? { byId: c.byId, byProvider: c.byProvider || {} } : null);
   let cached = null;
   try { cached = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (err) { /* ignore */ }
   const stale = !cached || !cached.byId || !cached.byProvider; // 旧版缓存无 byProvider，视为过期
-  if (!force && !stale && Date.now() - (cached.fetchedAt || 0) < TTL) return cached.byId;
+  if (!force && !stale && Date.now() - (cached.fetchedAt || 0) < TTL) return expose(cached);
   try {
     const ctrl = new AbortController();
     const timeout = setTimeout(() => ctrl.abort(), 12000);
@@ -240,9 +242,9 @@ ipcMain.handle('catalog:get', async (e, force) => {
     }
     const catalog = { byId, byProvider, fetchedAt: Date.now() };
     fs.writeFileSync(file, JSON.stringify(catalog), 'utf8');
-    return byId;
+    return expose(catalog);
   } catch (err) {
-    return cached ? cached.byId : null; // 离线/失败时用旧缓存
+    return expose(cached); // 离线/失败时用旧缓存
   }
 });
 

@@ -34,6 +34,11 @@ window.MM = window.MM || {};
   // ---------- 模型芯片 ----------
   function renderChips() {
     const box = U.$('#model-chips');
+    // 重建前记录当前勾选状态：设置页关闭/配置变更会频繁触发本函数，不能重置用户的选择
+    const prev = new Map();
+    for (const c of box.querySelectorAll('.chip')) {
+      prev.set(c.getAttribute('data-model-id'), c.classList.contains('on'));
+    }
     box.innerHTML = '';
     const models = MM.settings.allFlatModels();
     if (!models.length) {
@@ -46,8 +51,9 @@ window.MM = window.MM || {};
       if (m.contextTokens) bits.push(MM.modelInfo.fmtTokens(m.contextTokens) + ' 上下文');
       if (m.multimodal) bits.push('多模态');
       if (!m.hasKey) bits.push('API Key 未设置，请在设置中填写');
+      const on = prev.has(m.id) ? prev.get(m.id) : true; // 新增的模型默认选中
       frag.appendChild(U.el('div', {
-        class: 'chip on',
+        class: 'chip' + (on ? ' on' : ''),
         'data-model-id': m.id,
         title: bits.join(' · '),
         onclick: function () { this.classList.toggle('on'); }
@@ -154,7 +160,7 @@ window.MM = window.MM || {};
     else if (res.status === 'error' && res.error) body.innerHTML = '<div class="ac-error">✗ ' + U.esc(res.error) + '</div>';
     else body.innerHTML = MM.md.render(res.content || '');
     card.appendChild(body);
-    card.appendChild(U.el('div', { style: 'padding:6px 12px 8px;display:flex;gap:6px;justify-content:flex-end' },
+    card.appendChild(U.el('div', { class: 'card-foot' },
       U.el('button', {
         class: 'ac-copy', onclick: function () { U.copyTextFrom(body); U.toast('已复制'); }
       }, '复制')));
@@ -171,13 +177,14 @@ window.MM = window.MM || {};
   }
 
   function answersGrid(am) {
-    const grid = U.el('div', { class: 'answers' });
+    // 必须带 data-round：综合回答结束后要按它定位网格插回工具栏
+    const grid = U.el('div', { class: 'answers', 'data-round': am.roundId });
     for (const r of am.results) grid.appendChild(answerCard(r, false));
     return grid;
   }
 
-  function mergeCard(msg, live) {
-    const card = U.el('div', { class: 'merge-card', 'data-role': 'merge' });
+  function mergeCard(msg, live, roundId) {
+    const card = U.el('div', { class: 'merge-card', 'data-role': 'merge', 'data-round': roundId || '' });
     const label = msg.mode === 'model' ? '综合回答 · 模型二次综合' : '综合回答';
     const mStatus = U.el('span', { class: 'ac-status' });
     mStatus.innerHTML = live ? '<span class="spinner"></span>' : '';
@@ -189,7 +196,7 @@ window.MM = window.MM || {};
     if (live) body.textContent = msg.content || '';
     else body.innerHTML = MM.md.render(msg.content || '');
     card.appendChild(body);
-    card.appendChild(U.el('div', { style: 'padding:6px 12px 8px;display:flex;gap:6px;justify-content:flex-end' },
+    card.appendChild(U.el('div', { class: 'card-foot' },
       U.el('button', { class: 'ac-copy', onclick: function () { U.copyTextFrom(body); U.toast('已复制'); } }, '复制')));
     MM.md.bindCopy(card);
     return card;
@@ -250,7 +257,8 @@ window.MM = window.MM || {};
         disabled: idx >= am.versions.length - 1
       }, '›'));
     }
-    tools.appendChild(U.el('button', { class: 'tool-btn', onclick: function () { retryRound(am.roundId); } }, '↻ 重新生成'));
+    tools.appendChild(U.el('button', { class: 'tool-btn', onclick: function () { retryRound(am.roundId); } },
+      U.el('span', { class: 'ico' }, '↻'), '重新生成'));
     if (!hasMerge) {
       tools.appendChild(U.el('button', { class: 'tool-btn', onclick: function () { doMerge(am.roundId); } }, '综合回答'));
     }
@@ -304,7 +312,7 @@ window.MM = window.MM || {};
           frag.appendChild(grid);
           const liveMerge = live && live.type === 'merge';
           if (liveMerge || (am.merge && am.merge.content)) {
-            const card = mergeCard(am.merge, !!liveMerge);
+            const card = mergeCard(am.merge, !!liveMerge, am.roundId);
             frag.appendChild(card);
             if (liveMerge) {
               live.ctx.mergeBody = card.querySelector('.ac-body');
@@ -405,10 +413,14 @@ window.MM = window.MM || {};
     const grid = U.el('div', { class: 'answers', 'data-round': roundId });
     for (const r of assistantMsg.results) grid.appendChild(answerCard(r, true));
     if (appendUserDom) { /* user DOM 已在 send() 中追加 */ }
-    wrap.appendChild(grid);
-    scrollBottom(true);
-
     pending.set(reqId, { session: s, assistantMsg: assistantMsg, grid: grid, userMsg: userMsg });
+    // 前面 await 过联网搜索：这期间用户可能已切到别的会话，
+    // 此时不能把卡片挂到当前视图上（否则会串进别的会话界面）。
+    // 数据照常更新，切回本会话时 renderAll 会把进行中的流式卡片重画出来。
+    if (MM.sessions.current() === s) {
+      wrap.appendChild(grid);
+      scrollBottom(true);
+    }
     try {
       await api.send({ requestId: reqId, targets: targets, searchOn: !!(searchResults || searchOn) });
     } catch (e) {
@@ -435,7 +447,7 @@ window.MM = window.MM || {};
           am.versions[am.active >= 0 ? am.active : am.versions.length - 1].merge =
             am.merge ? JSON.parse(JSON.stringify(am.merge)) : null;
         }
-        finalizeMergeCard(ctx);
+        finalizeMergeCard(ctx, !!ctx.mergeFailed);
         MM.save();
         return;
       }
@@ -471,6 +483,7 @@ window.MM = window.MM || {};
       }
       else if (ev.type === 'error') {
         // 综合失败：回滚 merge 状态，允许用户再次点击“综合回答”
+        ctx.mergeFailed = true; // 标记失败，随后的 all-done 不能把状态改回“完成”
         ctx.mergeMsg.content += '\n\n（综合失败：' + ev.message + '）';
         status.innerHTML = '<span style="color:var(--danger)">✗</span>';
         if (ctx.am) {
@@ -586,11 +599,12 @@ window.MM = window.MM || {};
     s.updatedAt = Date.now();
     MM.save();
 
-    // 渲染实时卡片
+    // 渲染实时卡片（先清掉该轮此前失败留下的综合卡片，避免重复堆叠）
     const wrap = U.$('#messages');
+    for (const stale of Array.from(wrap.querySelectorAll('.merge-card[data-round="' + roundId + '"]'))) stale.remove();
     const oldTools = wrap.querySelector('.round-tools[data-round="' + roundId + '"]');
     if (oldTools) oldTools.replaceWith(roundTools(am));
-    const card = mergeCard(am.merge, true);
+    const card = mergeCard(am.merge, true, roundId);
     wrap.appendChild(card);
     scrollBottom(true);
 
@@ -654,12 +668,14 @@ window.MM = window.MM || {};
     }
   }
 
-  function finalizeMergeCard(ctx) {
+  function finalizeMergeCard(ctx, failed) {
     const body = ctx.mergeBody, status = ctx.mergeStatus;
     body.classList.remove('streaming');
     body.classList.add('md');
     body.innerHTML = MM.md.render(ctx.mergeMsg.content || '（空）');
-    status.textContent = ctx.mergeMsg.mode === 'model' ? '✓ 完成' : '✓ 已合并';
+    // 失败/已停止时保留失败标记，不能被覆盖成完成状态
+    if (failed) status.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>';
+    else status.textContent = ctx.mergeMsg.mode === 'model' ? '✓ 完成' : '✓ 已合并';
     // 恢复工具栏（综合回答入口随 am.merge 状态更新）
     const wrap = U.$('#messages');
     const grid = wrap.querySelector('.answers[data-round="' + ctx.roundId + '"]');

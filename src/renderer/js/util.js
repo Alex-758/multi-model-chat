@@ -29,7 +29,8 @@ MM.util = {
   uid() { return 'id' + Date.now().toString(36) + Math.random().toString(36).slice(2, 9); },
 
   fmtTime(ts) {
-    const d = new Date(ts);
+    const d = new Date(Number(ts));
+    if (isNaN(d.getTime())) return ''; // 时间戳缺失或非法时不显示 NaN
     const now = new Date();
     const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
     if (d.toDateString() === now.toDateString()) return hm;
