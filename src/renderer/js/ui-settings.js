@@ -5,6 +5,7 @@ window.MM = window.MM || {};
 (function () {
   const U = MM.util;
   let editingId = null; // 当前编辑的服务商 id
+  let modelCountEl = null; // 模型卡片标题里的数量（增删模型后局部更新，不整页重建）
 
   let closeTimer = null; // 关闭动画定时器（防快速开/关互相打架）
   // 行内编辑防抖自动落盘：应用崩溃/强杀时最多丢失 600ms 内的编辑
@@ -96,8 +97,20 @@ window.MM = window.MM || {};
   function renderModels() {
     const pane = U.$('#pane-models');
     pane.innerHTML = '';
-    pane.appendChild(U.el('div', { class: 'pane-title' }, '模型配置'));
-    pane.appendChild(U.el('div', { class: 'pane-sub' }, '每个服务商（共享地址与密钥）可配置多个模型；启用后出现在聊天输入框上方，可同时多选并发调用。'));
+    modelCountEl = null;
+    const cur = findProvider(editingId) || providers()[0];
+    if (cur) editingId = cur.id;
+
+    // 常驻标题行：服务商名 + 操作按钮（滚动模型条目时始终可见）
+    const ops = U.el('div', { class: 'pm-head-ops' });
+    pane.appendChild(U.el('div', { class: 'pm-head' },
+      U.el('div', { class: 'pm-head-name' },
+        U.el('span', { class: 'pm-name', title: cur ? (cur.name || cur.id) : '' }, cur ? (cur.name || cur.id) : '模型配置'),
+        cur ? U.el('span', { class: 'tag' }, cur.preset ? '预置服务商' : '自定义服务商') : null),
+      ops));
+
+    const body = U.el('div', { class: 'pm-body' });
+    pane.appendChild(body);
 
     const layout = U.el('div', { class: 'model-layout' });
     const list = U.el('div', { class: 'model-list' });
@@ -136,17 +149,17 @@ window.MM = window.MM || {};
     }, '恢复预置服务商'));
 
     const form = U.el('div', { class: 'model-form' });
-    const cur = findProvider(editingId) || providers()[0];
     if (cur) {
-      editingId = cur.id;
-      form.appendChild(providerForm(cur));
+      form.appendChild(providerForm(cur, ops));
     } else {
       form.appendChild(U.el('div', { class: 'pane-sub' }, '点击左侧服务商进行编辑，或添加自定义服务商。'));
     }
 
     layout.appendChild(list);
     layout.appendChild(form);
-    pane.appendChild(layout);
+    body.appendChild(U.el('div', { class: 'pane-sub', style: 'margin-bottom:14px' },
+      '每个服务商（共享地址与密钥）可配置多个模型；启用后出现在聊天输入框上方，可同时多选并发调用。'));
+    body.appendChild(layout);
   }
 
   function getCache() {
@@ -207,7 +220,6 @@ window.MM = window.MM || {};
       mo.maxTokens = outInput.value ? parseInt(outInput.value, 10) : undefined;
       mo.multimodal = meta.multimodal != null ? meta.multimodal : mo.multimodal;
       saveSoon(); // 落盘时同步聊天页选择器，避免逐条目重建
-      saveSoon();
       const ctxVal = mo.contextTokens || meta.contextTokens;
       infoHint.textContent = '多模态：' + (mo.multimodal === true ? '支持' : mo.multimodal === false ? '不支持' : '未知') +
         ' · 上下文：' + (ctxVal ? MM.modelInfo.fmtTokens(ctxVal) : '未知') +
@@ -272,16 +284,12 @@ window.MM = window.MM || {};
     });
 
     const row = U.el('div', { class: 'm-entry' },
-      U.el('div', { class: 'm-row' }, idWrap, nameInput),
+      U.el('div', { class: 'm-row' }, idWrap, nameInput,
+        U.el('label', { class: 'inline-check', title: '启用' }, enCheck, '启用'), delBtn),
       U.el('div', { class: 'm-row m-row2' },
-        U.el('span', { class: 'mini-label' }, '上下文'),
-        ctxInput,
-        U.el('span', { class: 'mini-label' }, '最大输出'),
-        outInput,
-        U.el('label', { class: 'inline-check', style: 'margin-left:auto' }, enCheck, '启用'),
-        delBtn),
-      infoHint
-    );
+        U.el('span', { class: 'mini-label' }, '上下文'), ctxInput,
+        U.el('span', { class: 'mini-label' }, '最大输出'), outInput,
+        infoHint));
     // 挂载后回填识别信息（只补空字段）
     setTimeout(() => applyInfo(false), 0);
     return row;
@@ -293,33 +301,22 @@ window.MM = window.MM || {};
     if (!box) return;
     const p = findProvider(editingId);
     if (!p) return;
+    if (modelCountEl) modelCountEl.textContent = '📦 模型（' + (p.models || []).length + '）';
     box.innerHTML = '';
     const listCache = getCache();
     for (const mo of (p.models || [])) box.appendChild(modelEntryRow(p, mo, listCache));
   }
 
-  function providerForm(p) {
+  function providerForm(p, ops) {
     const wrap = U.el('div', {});
-    // 表单头用服务商名称（与左侧列表呼应），类型标签降级为小字，避免和面板标题抢层级
-    wrap.appendChild(U.el('div', { class: 'form-head' },
-      U.el('span', { class: 'form-title', title: p.name || p.id }, p.name || p.id),
-      U.el('span', { class: 'tag' }, p.preset ? '预置服务商' : '自定义服务商')));
 
-    const fmtSel = U.el('select', { id: 'p-format', style: 'width:100%' },
+    // ---- 连接卡片：地址与密钥（该服务商下所有模型共用） ----
+    const fmtSel = U.el('select', { id: 'p-format' },
       U.el('option', { value: 'openai', selected: p.apiFormat !== 'anthropic' }, 'OpenAI Chat Completions 格式'),
       U.el('option', { value: 'anthropic', selected: p.apiFormat === 'anthropic' }, 'Anthropic Messages 格式')
     );
-    wrap.appendChild(field('API 格式', fmtSel));
-
     const urlInput = U.el('input', { type: 'text', id: 'p-url', placeholder: '例如 https://api.openai.com/v1', value: p.baseUrl || '' });
     const fullUrlCheck = U.el('input', { type: 'checkbox', id: 'p-fullurl', ...(p.fullUrl ? { checked: '' } : {}) });
-    // 提示紧跟输入框，复选框另起一行，避免提示挂到复选框下面造成归属歧义
-    wrap.appendChild(field('请求地址',
-      urlInput,
-      '兼容 OpenAI API 的服务端点地址，不要以斜杠结尾。',
-      U.el('div', { class: 'field-row', style: 'margin-top:8px;flex:none' },
-        U.el('label', { class: 'inline-check' }, fullUrlCheck, '完整 URL（关闭时自动补全 /chat/completions 或 /v1/messages）'))));
-
     // 密钥只写入主进程保管：输入框不回显已存密钥；"清除"内联在同行
     const keyInput = U.el('input', {
       type: 'password', id: 'p-key', value: '',
@@ -339,8 +336,25 @@ window.MM = window.MM || {};
       U.toast('密钥已清除');
       MM.chat.renderChips();
     });
-    wrap.appendChild(field('API 密钥', U.el('div', { class: 'field-row' }, keyInput, clearKeyBtn),
-      p.hasKey ? '已保存密钥不在本界面显示；输入新值并保存可覆盖，点“清除”删除。' : '密钥仅保存在本机。'));
+
+    // 连接设置实时写回 + 防抖落盘
+    fmtSel.addEventListener('change', () => { p.apiFormat = fmtSel.value; saveSoon(); });
+    urlInput.addEventListener('change', () => { p.baseUrl = urlInput.value.trim(); saveSoon(); });
+    fullUrlCheck.addEventListener('change', () => { p.fullUrl = fullUrlCheck.checked; saveSoon(); });
+    keyInput.addEventListener('change', () => { commitKeyIfTyped(); });
+
+    const result = U.el('div', { class: 'test-result' });
+    wrap.appendChild(U.el('div', { class: 'p-card' },
+      U.el('div', { class: 'p-card-h' },
+        U.el('span', {}, '🔌 连接'),
+        U.el('span', { class: 'p-card-note' }, '该服务商下所有模型共用')),
+      U.el('div', { class: 'p-card-b' },
+        hrow('API 格式', fmtSel),
+        hrow('请求地址', urlInput, U.el('label', { class: 'inline-check', title: '勾选后不再自动补全路径' }, fullUrlCheck, '完整 URL')),
+        U.el('div', { class: 'hint h-indent' }, '兼容 OpenAI API 的服务端点地址，不要以斜杠结尾；不勾选「完整 URL」时自动补全 /chat/completions 或 /v1/messages。'),
+        hrow('API 密钥', keyInput, clearKeyBtn),
+        U.el('div', { class: 'hint h-indent' }, p.hasKey ? '已保存密钥不在本界面显示；输入新值并保存可覆盖，点“清除”删除。密钥仅保存在本机。' : '密钥仅保存在本机。'),
+        result)));
 
     async function commitKeyIfTyped() {
       const k = keyInput.value.trim();
@@ -351,18 +365,41 @@ window.MM = window.MM || {};
       keyInput.placeholder = '已保存密钥——输入新值可覆盖';
     }
 
-    // 连接设置实时写回 + 防抖落盘
-    fmtSel.addEventListener('change', () => { p.apiFormat = fmtSel.value; saveSoon(); });
-    urlInput.addEventListener('change', () => { p.baseUrl = urlInput.value.trim(); saveSoon(); });
-    fullUrlCheck.addEventListener('change', () => { p.fullUrl = fullUrlCheck.checked; saveSoon(); });
-    keyInput.addEventListener('change', () => { commitKeyIfTyped(); });
+    // ---- 模型卡片：该服务商下的模型列表 ----
+    const getListBtn = U.el('button', {
+      class: 'btn-secondary',
+      onclick: async (e) => {
+        p.baseUrl = U.$('#p-url').value.trim();
+        await commitKeyIfTyped(); // 输入了新密钥先保存
+        const list = await fetchList(p, e.currentTarget);
+        if (list) { U.toast('获取到 ' + list.length + ' 个模型'); renderModelEntries(); }
+      }
+    }, '获取模型列表');
+    const addModelBtn = U.el('button', {
+      class: 'btn-secondary',
+      onclick: () => {
+        p.models = p.models || [];
+        p.models.push({ modelId: '', name: '', enabled: true });
+        renderModelEntries();
+      }
+    }, U.el('span', { class: 'ico' }, '＋'), '添加模型');
 
-    // 测试连接（用第一个启用模型的 ID）
-    const result = U.el('div', { class: 'test-result' });
+    modelCountEl = U.el('span', {}, '📦 模型（' + (p.models || []).length + '）');
+    const modelCard = U.el('div', { class: 'p-card' },
+      U.el('div', { class: 'p-card-h' }, modelCountEl, U.el('div', { class: 'ops' }, getListBtn, addModelBtn)));
+    const entries = U.el('div', { id: 'model-entries' });
+    const listCache = getCache();
+    for (const mo of (p.models || [])) entries.appendChild(modelEntryRow(p, mo, listCache));
+    modelCard.appendChild(U.el('div', { class: 'p-card-b' },
+      entries,
+      U.el('div', { class: 'hint' }, '模型 ID 可手动输入，或点 ▾ 从已获取的列表中选择；上下文/最大输出/多模态由模型 ID 自动识别，可手动修改。')));
+    wrap.appendChild(modelCard);
+
+    // ---- 常驻标题行按钮：删除（仅自定义）/ 测试连接 / 保存 ----
     const testBtn = U.el('button', { class: 'btn-secondary' }, '测试连接');
     testBtn.addEventListener('click', async () => {
       const mo = (p.models || []).find(x => x.modelId && x.enabled !== false) || (p.models || [])[0];
-      if (!mo || !mo.modelId) { result.className = 'test-result err'; result.textContent = '✗ 请先在下方添加模型 ID'; return; }
+      if (!mo || !mo.modelId) { result.className = 'test-result err'; result.textContent = '✗ 请先在模型卡片中添加模型 ID'; return; }
       testBtn.disabled = true; testBtn.textContent = '测试中…';
       result.className = 'test-result';
       try {
@@ -378,52 +415,24 @@ window.MM = window.MM || {};
     });
 
     const saveBtn = U.el('button', { class: 'btn-primary' }, '保存');
-    saveBtn.addEventListener('click', () => {
+    saveBtn.addEventListener('click', async () => {
+      await commitKeyIfTyped(); // 输入了新密钥先写入主进程保管
       MM.save(); MM.chat.renderChips();
       U.toast('已保存「' + p.name + '」');
     });
 
-    const delBtn = U.el('button', { class: 'btn-danger' }, '删除');
-    delBtn.addEventListener('click', () => {
-      if (!window.confirm('确定删除服务商「' + p.name + '」及其全部模型？')) return;
-      MM.state.config.providers = providers().filter(x => x.id !== p.id);
-      editingId = null;
-      MM.save(); renderModels(); MM.chat.renderChips();
-    });
-
-    wrap.appendChild(U.el('div', { class: 'form-actions' }, saveBtn, testBtn, p.preset ? null : delBtn));
-    wrap.appendChild(result);
-
-    // 模型列表
-    wrap.appendChild(U.el('div', { class: 'field', style: 'margin-top:20px' },
-      U.el('div', { class: 'field-row', style: 'justify-content:space-between' },
-        U.el('label', { style: 'font-size:13px;font-weight:600;margin:0' }, '该服务商下的模型'),
-        U.el('div', { class: 'field-row' },
-          U.el('button', {
-            class: 'btn-secondary', style: 'font-size:12px;min-height:30px;padding:0 12px',
-            onclick: async (e) => {
-              p.baseUrl = U.$('#p-url').value.trim();
-              await commitKeyIfTyped(); // 输入了新密钥先保存
-              const list = await fetchList(p, e.currentTarget);
-              if (list) { U.toast('获取到 ' + list.length + ' 个模型'); renderModelEntries(); }
-            }
-          }, '获取模型列表'),
-          U.el('button', {
-            class: 'btn-secondary', style: 'font-size:12px;min-height:30px;padding:0 12px',
-            onclick: () => {
-              p.models = p.models || [];
-              p.models.push({ modelId: '', name: '', enabled: true });
-              renderModelEntries();
-            }
-          }, U.el('span', { class: 'ico' }, '＋'), '添加模型')
-        )
-      )));
-    const entries = U.el('div', { id: 'model-entries' });
-    const listCache = getCache();
-    for (const mo of (p.models || [])) entries.appendChild(modelEntryRow(p, mo, listCache));
-    wrap.appendChild(entries);
-    wrap.appendChild(U.el('div', { class: 'hint' },
-      '模型 ID 可手动输入，或点 ▾ 从已获取的列表中选择；上下文/最大输出/多模态由模型 ID 自动识别，可手动修改。'));
+    if (!p.preset) {
+      const delBtn = U.el('button', { class: 'btn-danger' }, '删除');
+      delBtn.addEventListener('click', () => {
+        if (!window.confirm('确定删除服务商「' + p.name + '」及其全部模型？')) return;
+        MM.state.config.providers = providers().filter(x => x.id !== p.id);
+        editingId = null;
+        MM.save(); renderModels(); MM.chat.renderChips();
+      });
+      ops.appendChild(delBtn);
+    }
+    ops.appendChild(testBtn);
+    ops.appendChild(saveBtn);
 
     return wrap;
   }
@@ -434,6 +443,13 @@ window.MM = window.MM || {};
       U.el('label', {}, label),
       input,
       ...hints.filter(Boolean).map(h => typeof h === 'string' ? U.el('div', { class: 'hint' }, h) : h));
+  }
+
+  // 水平字段行：标签固定宽度在左、控件在右（连接卡片用，比上下堆叠更紧凑）
+  function hrow(label, ...controls) {
+    return U.el('div', { class: 'hrow' },
+      U.el('label', {}, label),
+      U.el('div', { class: 'hctl' }, ...controls));
   }
 
   // ---------- 联网搜索 ----------
