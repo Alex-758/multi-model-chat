@@ -98,10 +98,36 @@ async function streamChat(m, messages, opts) {
     }
     bumpIdle();
     if (!res.ok) throw new Error(await readError(res));
+    if (!res.body) throw new Error('服务端返回了空响应（无响应体）');
 
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
+    // 单行 SSE 处理；抽成函数是为了流结束时能处理最后一行（可能没有换行结尾）
+    const handleLine = (line) => {
+      if (!line.startsWith('data:')) return;
+      const data = line.slice(5).trim();
+      if (!data || data === '[DONE]') return;
+      let j;
+      try { j = JSON.parse(data); } catch (e) { return; }
+
+      if (m.apiFormat === 'anthropic') {
+        if (j.type === 'content_block_delta') {
+          const d = j.delta || {};
+          if (d.type === 'text_delta' && d.text) { content += d.text; onEvent({ type: 'delta', text: d.text }); }
+          else if (d.type === 'thinking_delta' && d.thinking) { reasoning += d.thinking; onEvent({ type: 'reasoning', text: d.thinking }); }
+        } else if (j.type === 'error') {
+          throw new Error(j.error && j.error.message || '流式返回错误');
+        }
+      } else {
+        const ch = j.choices && j.choices[0];
+        if (!ch) return;
+        const d = ch.delta || {};
+        if (d.content) { content += d.content; onEvent({ type: 'delta', text: d.content }); }
+        const r = d.reasoning_content != null ? d.reasoning_content : d.reasoning;
+        if (r) { reasoning += r; onEvent({ type: 'reasoning', text: r }); }
+      }
+    };
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -111,30 +137,10 @@ async function streamChat(m, messages, opts) {
       while ((idx = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, idx).trim();
         buf = buf.slice(idx + 1);
-        if (!line.startsWith('data:')) continue;
-        const data = line.slice(5).trim();
-        if (!data || data === '[DONE]') continue;
-        let j;
-        try { j = JSON.parse(data); } catch (e) { continue; }
-
-        if (m.apiFormat === 'anthropic') {
-          if (j.type === 'content_block_delta') {
-            const d = j.delta || {};
-            if (d.type === 'text_delta' && d.text) { content += d.text; onEvent({ type: 'delta', text: d.text }); }
-            else if (d.type === 'thinking_delta' && d.thinking) { reasoning += d.thinking; onEvent({ type: 'reasoning', text: d.thinking }); }
-          } else if (j.type === 'error') {
-            throw new Error(j.error && j.error.message || '流式返回错误');
-          }
-        } else {
-          const ch = j.choices && j.choices[0];
-          if (!ch) continue;
-          const d = ch.delta || {};
-          if (d.content) { content += d.content; onEvent({ type: 'delta', text: d.content }); }
-          const r = d.reasoning_content != null ? d.reasoning_content : d.reasoning;
-          if (r) { reasoning += r; onEvent({ type: 'reasoning', text: r }); }
-        }
+        handleLine(line);
       }
     }
+    if (buf.trim()) handleLine(buf.trim()); // 末尾无换行的最后一条数据
     return { content, reasoning };
   } catch (e) {
     if (abortedByTimeout) throw new Error('连接超时：服务器超过 120 秒没有返回数据，已中断');
@@ -200,10 +206,13 @@ async function chatOnce(m) {
       }
       return '(空回复)';
     } catch (e) {
-      lastErr = e;
+      // 超时被 abort 时给中文提示，不要把英文 AbortError 直接抛给界面
+      const timedOut = e && (e.name === 'AbortError' || /abort/i.test(String(e.name)));
+      const err = timedOut ? new Error('连接超时：服务器 45 秒未响应') : e;
+      lastErr = err;
       // 仅对服务端繁忙/限流重试；参数/鉴权错误重试无意义
-      const retryable = e.status === 503 || e.status === 429 || e.status === 502 || e.status === 504;
-      if (!retryable || attempt === maxAttempts) throw e;
+      const retryable = err.status === 503 || err.status === 429 || err.status === 502 || err.status === 504;
+      if (!retryable || attempt === maxAttempts) throw err;
       await new Promise(r => setTimeout(r, 1500 * attempt));
     } finally {
       clearTimeout(timeout);
@@ -227,10 +236,16 @@ async function listModels(m) {
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), 20000);
   try {
-    const res = await fetch(modelsEndpoint(m), { method: 'GET', headers: authHeaders(m), signal: ctrl.signal });
+    let res;
+    try {
+      res = await fetch(modelsEndpoint(m), { method: 'GET', headers: authHeaders(m), signal: ctrl.signal });
+    } catch (e) {
+      if (e && (e.name === 'AbortError' || /abort/i.test(String(e.name)))) throw new Error('连接超时：服务器 20 秒未响应');
+      throw new Error('网络请求失败：' + ((e.cause && e.cause.message) || e.message));
+    }
     if (!res.ok) throw new Error(await readError(res));
     const j = await res.json();
-    const arr = j.data || j.models || [];
+    const arr = Array.isArray(j.data) ? j.data : (Array.isArray(j.models) ? j.models : []);
     const seen = new Set();
     const out = [];
     for (const x of arr) {

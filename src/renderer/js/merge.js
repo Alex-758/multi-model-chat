@@ -6,10 +6,17 @@
 (function () {
 
   // ---------- 要点拆分 ----------
-  // 剥掉要点开头残留的多层列表标记（如 "2. - " "• "），避免与输出编号叠加
+  // 只剥行首的标题/列表标记，保留正文里的 #、反引号和星号
+  // （全局删除会把 C# 变成 C、把 URL 的 #锚点 删掉、把行内代码的反引号吃掉）
+  const RE_HEADING = /^#{1,6}\s+/;
+  const RE_BULLET = /^[-*+•]\s+/;
+  const RE_ORDERED = /^\d{1,3}[.、)]\s*/;
   function stripListPrefix(s) {
-    let t = String(s).replace(/[*`#]/g, '').trim();
-    while (/^([-*•]|\d{1,3}[.、)])\s*/.test(t)) t = t.replace(/^([-*•]|\d{1,3}[.、)])\s*/, '').trim();
+    let t = String(s).trim();
+    if (RE_HEADING.test(t)) t = t.replace(RE_HEADING, '').trim();
+    while (RE_BULLET.test(t) || RE_ORDERED.test(t)) {
+      t = (RE_BULLET.test(t) ? t.replace(RE_BULLET, '') : t.replace(RE_ORDERED, '')).trim();
+    }
     return t;
   }
 
@@ -138,7 +145,7 @@
   }
 
   // ---------- 模型二次综合提示词 ----------
-  function synthesisPrompt(question, results) {
+  function synthesisPrompt(question, results, maxChars) {
     let p = '下面是多个 AI 模型对同一个问题的回答。请把它们融合改写为一份完整的最终回答：\n' +
       '要求：\n' +
       '- 直接输出最终回答本身（使用 Markdown），不要提及任何模型名称，不要对比各回答，不要逐条罗列“某模型说了什么”\n' +
@@ -147,8 +154,16 @@
       '- 保留重要的细节、数据、时间线和代码示例\n' +
       '- 不要寒暄，不要“欢迎继续提问”之类的收尾语\n\n' +
       '【原始问题】\n' + question + '\n\n';
+    // 控制总长度，避免多个长回答把综合请求顶出模型上下文窗口
+    const budget = Math.max(2000, Number(maxChars) || 48000);
+    let used = 0;
     results.forEach((r, i) => {
-      p += '【回答 ' + (i + 1) + '】\n' + r.content + '\n\n';
+      if (used >= budget) return;
+      let content = String(r.content || '');
+      const remain = budget - used;
+      if (content.length > remain) content = content.slice(0, remain) + '\n…（内容过长，已截断）';
+      used += content.length;
+      p += '【回答 ' + (i + 1) + '】\n' + content + '\n\n';
     });
     return p;
   }

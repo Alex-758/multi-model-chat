@@ -5,6 +5,8 @@ dist/
 
 # 运行时数据（含 API Key，绝不入库）
 store.json
+store.json.bak
+store.json.corrupt-*
 catalog.json
 *.local.json
 

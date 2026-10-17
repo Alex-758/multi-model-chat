@@ -6,14 +6,20 @@ window.MM = window.MM || {};
   const esc = MM.util.esc;
 
   function renderInline(s) {
-    // 行内代码
-    s = s.replace(/`([^`\n]+)`/g, (m, c) => '<code>' + c + '</code>');
+    // 行内代码先抽成占位符，避免代码里的 ** / * 被误当成粗体、斜体
+    const codes = [];
+    s = s.replace(/`([^`\n]+)`/g, (m, c) => {
+      codes.push(c);
+      return '\u0001C' + (codes.length - 1) + '\u0001';
+    });
     // 粗体、斜体
     s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
     s = s.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
     // 链接（仅 http/https）
     s = s.replace(/\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g,
       '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    // 还原行内代码
+    s = s.replace(/\u0001C(\d+)\u0001/g, (m, i) => '<code>' + codes[+i] + '</code>');
     return s;
   }
 
@@ -87,8 +93,9 @@ window.MM = window.MM || {};
       }
       if (listType) flushList();
 
-      // 表格
-      if (line.includes('|') && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+      // 表格：分隔行必须含 |，否则 "a | b" 后面跟一条 --- 会被误判成表格
+      if (line.includes('|') && i + 1 < lines.length && lines[i + 1].includes('|') &&
+          /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
         flushPara();
         const cells = r => r.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
         const head = cells(line);

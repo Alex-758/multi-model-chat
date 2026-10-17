@@ -20,6 +20,7 @@
     },
     "files": [
       "src/**/*",
+      "build/icon.ico",
       "package.json"
     ],
     "win": {

@@ -58,7 +58,8 @@ MM.defaults = {
   // 把旧版平铺的 config.models（每条含完整连接信息）迁移为分层 config.providers
   function migrateFlatModels(flatModels) {
     const byId = new Map();
-    for (const m of flatModels) {
+    for (const m of (flatModels || [])) {
+      if (!m || typeof m !== 'object') continue;
       let p;
       if (m.preset && m.provider) {
         p = byId.get(m.provider);
@@ -101,10 +102,12 @@ MM.defaults = {
   function fillPresetDefaults(providers, seedEmpty) {
     // 预置服务商：补齐中文名、升级旧模型 ID；seedEmpty=true 时（仅首次迁移）补上默认模型
     const upgrades = { 'glm-4': 'glm-4.6', 'glm-4-plus': 'glm-4.6', 'openai/gpt-4o-mini': 'openai/gpt-4.1-mini' };
-    for (const p of providers) {
-      if (!p.preset) continue;
+    for (const p of (providers || [])) {
+      if (!p || typeof p !== 'object' || !p.preset) continue;
       const def = MM.defaults.PRESET_PROVIDERS.find(x => x.id === p.id);
       if (def && def.name) p.name = def.name;
+      // 配置可能来自导入/手改：models 缺失或不是数组时补空数组，避免整段初始化中断
+      p.models = (Array.isArray(p.models) ? p.models : []).filter(mo => mo && typeof mo === 'object');
       for (const mo of p.models) {
         if (upgrades[mo.modelId]) mo.modelId = upgrades[mo.modelId];
       }
@@ -152,7 +155,10 @@ MM.defaults = {
       providers = JSON.parse(JSON.stringify(MM.defaults.PRESET_PROVIDERS));
     }
     delete cfg.models;
+    // 丢弃非法条目，并保证每个服务商都有 models 数组（导入/手改数据可能缺字段）
+    providers = providers.filter(p => p && typeof p === 'object');
     for (const p of providers) {
+      if (!Array.isArray(p.models)) p.models = [];
       if (typeof p.hasKey !== 'boolean') p.hasKey = !!(p.apiKey || '').trim();
     }
     // 保留 modelLists 等其余字段（此前启动时被整体丢弃，导致模型列表缓存永远无法跨重启生效）
@@ -183,9 +189,10 @@ MM.defaults = {
   MM.migrateSessions = function (sessions) {
     let changed = false;
     for (const s of (sessions || [])) {
-      if (!Array.isArray(s.messages)) continue;
+      if (!s || typeof s !== 'object' || !Array.isArray(s.messages)) continue;
       const keep = [];
       for (const m of s.messages) {
+        if (!m || typeof m !== 'object') continue;
         if (m.role === 'merge') {
           const am = keep.slice().reverse().find(x => x.role === 'assistant' && x.roundId === m.roundId);
           if (am) {
@@ -199,6 +206,7 @@ MM.defaults = {
       s.messages = keep;
       // 版本快照种子
       for (const am of s.messages) {
+        if (!am || typeof am !== 'object') continue;
         if (am.role !== 'assistant' || !Array.isArray(am.results) || !am.results.length) continue;
         if (!Array.isArray(am.versions) || !am.versions.length) {
           am.versions = [{
@@ -258,19 +266,49 @@ MM.defaults = {
 
   const U = MM.util;
 
+  let saveFailToastAt = 0;
   MM.save = function () {
     // 返回是否落盘成功：调用方据此判断能否安全丢弃本地明文密钥等临时状态
     return api.saveAll({ config: MM.state.config, sessions: MM.state.sessions })
       .then(function () { return true; })
-      .catch(function () { return false; });
+      .catch(function (e) {
+        // 写盘失败不能静默：5 秒内最多提示一次，避免防抖保存刷屏
+        const now = Date.now();
+        if (now - saveFailToastAt > 5000) {
+          saveFailToastAt = now;
+          U.toast('保存失败：' + ((e && e.message) || e) + '（数据可能未写入磁盘）', true);
+        }
+        return false;
+      });
   };
 
+  // 初始化失败时给出可见提示，而不是留下一个空白/半死的界面
+  function showFatalError(err) {
+    const detail = String((err && (err.stack || err.message)) || err || '未知错误');
+    console.error('[mmc] init error: ' + detail);
+    if (document.getElementById('fatal-error')) return;
+    const box = document.createElement('div');
+    box.id = 'fatal-error';
+    box.setAttribute('style', 'position:fixed;inset:0;z-index:999;display:flex;align-items:center;justify-content:center;background:rgba(15,18,28,.55);padding:24px;');
+    const panel = document.createElement('div');
+    panel.setAttribute('style', 'max-width:640px;width:100%;background:#fff;color:#1f2329;border-radius:12px;padding:22px 24px;font-size:13px;line-height:1.7;box-shadow:0 18px 60px rgba(0,0,0,.35);');
+    panel.innerHTML = '<h2 style="font-size:16px;margin:0 0 8px">应用初始化失败</h2>' +
+      '<p style="margin:0 0 10px;color:#6b7280">数据文件可能已损坏或格式异常。请先备份 <code>%APPDATA%\\Multi-Model Chat\\store.json</code>，再重新加载；如需重置，可删除该文件后重启（会话记录会丢失）。</p>';
+    const pre = document.createElement('pre');
+    pre.setAttribute('style', 'max-height:180px;overflow:auto;background:#f2f3f5;border-radius:8px;padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all;');
+    pre.textContent = detail;
+    const btn = document.createElement('button');
+    btn.textContent = '重新加载';
+    btn.setAttribute('style', 'margin-top:14px;background:#4f5bef;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;');
+    btn.addEventListener('click', function () { location.reload(); });
+    panel.appendChild(pre);
+    panel.appendChild(btn);
+    box.appendChild(panel);
+    document.body.appendChild(box);
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
-    try {
-      init();
-      console.log('[mmc] init done');
-    } catch (e) {
-      console.error('[mmc] init error: ' + (e && e.stack || e));
-    }
+    // init 是 async：必须用 .catch 接住异步抛错，try/catch 对 Promise 拒绝无效
+    init().catch(showFatalError);
   });
 })();

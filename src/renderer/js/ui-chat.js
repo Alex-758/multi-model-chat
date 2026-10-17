@@ -5,8 +5,18 @@ window.MM = window.MM || {};
 (function () {
   const U = MM.util;
   let seq = 0;
-  let streaming = false;
+  // 正在生成的会话 id（null = 空闲）。全局同一时刻只跑一轮；
+  // 存会话 id 是为了区分"当前会话在生成"和"别的会话在生成"。
+  let streaming = null;
   const pending = new Map(); // requestId -> 请求上下文
+
+  function streamingHere() { return !!streaming && streaming === MM.state.currentId; }
+  function streamingSessionName() {
+    const s = MM.state.sessions.find(x => x.id === streaming);
+    return (s && s.title) || '其它会话';
+  }
+  // 切会话/轮次结束时同步发送按钮：别的会话在生成时，当前会话仍应可输入、可发送
+  function refreshSendBtn() { setSendBtn(streamingHere()); }
 
   function stripModel(m) {
     // 不携带 apiKey：密钥由主进程按 providerId 保管并在请求时解析
@@ -99,6 +109,14 @@ window.MM = window.MM || {};
         }
       }
     }
+    // 合并相邻的 user 消息：上一轮全部失败时历史里会出现连续 user，
+    // Anthropic 等格式对角色交替更敏感
+    for (let i = msgs.length - 1; i > 0; i--) {
+      if (msgs[i].role === 'user' && msgs[i - 1].role === 'user') {
+        msgs[i - 1].content += '\n\n' + msgs[i].content;
+        msgs.splice(i, 1);
+      }
+    }
     if (searchResults && searchResults.length) {
       const src = searchResults.map(r => '- ' + r.title + '\n  ' + r.snippet + '\n  来源: ' + r.url).join('\n');
       msgs.push({ role: 'system', content: '以下是与用户问题相关的联网搜索结果，回答时可以参考：\n\n' + src });
@@ -153,7 +171,13 @@ window.MM = window.MM || {};
     if (res.sources && res.sources.length) {
       card.appendChild(U.el('details', { class: 'sources' },
         U.el('summary', {}, '📎 搜索来源 (' + res.sources.length + ')'),
-        res.sources.map(r => U.el('a', { href: r.url, target: '_blank', rel: 'noopener' }, r.title || r.url))));
+        res.sources.map(r => {
+          const url = String(r.url || '');
+          // 只允许 http(s)：搜索服务返回的 URL 不可信，javascript:/data: 一律按纯文本渲染
+          return /^https?:\/\//i.test(url)
+            ? U.el('a', { href: url, target: '_blank', rel: 'noopener' }, r.title || url)
+            : U.el('span', { class: 'src-item' }, r.title || url);
+        })));
     }
     const body = U.el('div', { class: 'ac-body' + (streamingNow ? ' streaming' : ' md') });
     if (streamingNow) body.textContent = res.content || '';
@@ -279,6 +303,8 @@ window.MM = window.MM || {};
     wrap.innerHTML = '';
     const s = MM.sessions.current();
     U.$('#composer').style.display = s ? '' : 'none';
+    // 先同步按钮状态：空会话会提前 return，放在末尾会漏掉
+    refreshSendBtn();
     if (!s || !s.messages.length) {
       wrap.appendChild(emptyState());
       return;
@@ -339,7 +365,12 @@ window.MM = window.MM || {};
 
   // ---------- 发送 ----------
   async function send() {
-    if (streaming) { stopAll(); return; }
+    if (streamingHere()) { stopAll(); return; }
+    if (streaming) {
+      // 别的会话正在生成：不要静默停掉它，也不要把消息发错会话
+      U.toast('「' + streamingSessionName() + '」正在生成中，请等待完成或切回该会话停止', true);
+      return;
+    }
     const input = U.$('#input');
     const text = input.value.trim();
     if (!text) return;
@@ -365,10 +396,10 @@ window.MM = window.MM || {};
     autoResize();
 
     // 立即锁定状态：联网搜索 await 期间不允许再次发送/重试（防竞态）
-    streaming = true;
+    streaming = s.id;
     setSendBtn(true);
     dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, true)
-      .catch(e => { streaming = false; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
+      .catch(e => { streaming = null; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
   }
 
   // 发起一轮多模型请求并渲染占位卡片（inheritVersions：重试时继承的历史版本池）
@@ -406,7 +437,7 @@ window.MM = window.MM || {};
     s.updatedAt = Date.now();
     MM.save();
 
-    streaming = true;
+    streaming = s.id;
     setSendBtn(true);
 
     const wrap = U.$('#messages');
@@ -425,7 +456,7 @@ window.MM = window.MM || {};
       await api.send({ requestId: reqId, targets: targets, searchOn: !!(searchResults || searchOn) });
     } catch (e) {
       pending.delete(reqId);
-      streaming = false;
+      streaming = null;
       setSendBtn(false);
       U.toast('请求失败：' + e.message, true);
     }
@@ -439,7 +470,7 @@ window.MM = window.MM || {};
 
     if (ev.type === 'all-done') {
       pending.delete(ev.requestId);
-      if (!pending.size) { streaming = false; setSendBtn(false); }
+      if (!pending.size) { streaming = null; refreshSendBtn(); }
       if (ctx.mergeMsg) {
         // 综合请求结束：同步到当前版本的快照
         const am = ctx.am;
@@ -498,7 +529,10 @@ window.MM = window.MM || {};
 
     if (!ev.modelId) return;
     const res = ctx.assistantMsg.results.find(r => r.modelId === ev.modelId);
-    const card = ctx.grid.querySelector('.answer-card[data-model-id="' + ev.modelId + '"]');
+    // 不用属性选择器拼字符串：模型 ID 里可能含引号/反斜杠，会抛 DOMException
+    const card = Array.from(ctx.grid.querySelectorAll('.answer-card')).find(function (c) {
+      return c.getAttribute('data-model-id') === ev.modelId;
+    });
     if (!res || !card) return;
     const status = card.querySelector('.ac-status');
     const body = card.querySelector('.ac-body');
@@ -541,7 +575,7 @@ window.MM = window.MM || {};
   function stopAll() {
     for (const id of Array.from(pending.keys())) api.stop(id);
     // 搜索阶段尚无 pending 可中止：立即复位，dispatchRound 在搜索返回后检测到取消即退出
-    streaming = false;
+    streaming = null;
     setSendBtn(false);
   }
 
@@ -567,10 +601,10 @@ window.MM = window.MM || {};
     MM.save();
     renderAll();
     // 立即锁定状态（防搜索 await 期间重复触发）
-    streaming = true;
+    streaming = s.id;
     setSendBtn(true);
     dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, false, versions)
-      .catch(e => { streaming = false; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
+      .catch(e => { streaming = null; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
   }
 
   // ---------- 综合回答 ----------
@@ -605,7 +639,9 @@ window.MM = window.MM || {};
     const oldTools = wrap.querySelector('.round-tools[data-round="' + roundId + '"]');
     if (oldTools) oldTools.replaceWith(roundTools(am));
     const card = mergeCard(am.merge, true, roundId);
-    wrap.appendChild(card);
+    // 插到本轮回答网格之后（而不是消息列表末尾），旧轮次综合时不会跑到页面最下面
+    const gridEl = wrap.querySelector('.answers[data-round="' + roundId + '"]');
+    if (gridEl) gridEl.after(card); else wrap.appendChild(card);
     scrollBottom(true);
 
     if (source === 'frontend') {
@@ -627,11 +663,13 @@ window.MM = window.MM || {};
       MM.save();
       return;
     }
-    streaming = true;
+    streaming = s.id;
     setSendBtn(true);
     const t0 = Date.now();
     const reqId = 'syn' + (++seq);
-    const prompt = MM.merge.synthesisPrompt(userMsg.content, okResults);
+    // 按综合模型的上下文给提示词设上限，避免多份长回答顶爆上下文
+    const promptBudget = Math.max(4000, (model.contextTokens || 32768) - (model.maxTokens || 4096) - 2048);
+    const prompt = MM.merge.synthesisPrompt(userMsg.content, okResults, promptBudget);
     pending.set(reqId, {
       mergeMsg: am.merge,
       mergeBody: card.querySelector('.ac-body'),
@@ -644,7 +682,7 @@ window.MM = window.MM || {};
       await api.synthesize({ requestId: reqId, model: stripModel(model), messages: [{ role: 'user', content: prompt }] });
     } catch (e) {
       pending.delete(reqId);
-      streaming = false;
+      streaming = null;
       setSendBtn(false);
       U.toast('综合失败：' + e.message, true);
       // 回滚 merge 状态并恢复工具栏，允许再次综合
@@ -679,9 +717,12 @@ window.MM = window.MM || {};
     // 恢复工具栏（综合回答入口随 am.merge 状态更新）
     const wrap = U.$('#messages');
     const grid = wrap.querySelector('.answers[data-round="' + ctx.roundId + '"]');
+    const mergeEl = wrap.querySelector('.merge-card[data-round="' + ctx.roundId + '"]');
     const oldTools = wrap.querySelector('.round-tools[data-round="' + ctx.roundId + '"]');
     if (oldTools) oldTools.remove();
-    if (grid && ctx.am) grid.after(roundTools(ctx.am));
+    // 与 renderAll 的顺序保持一致：回答网格 → 综合卡片 → 工具栏
+    const anchor = mergeEl || grid;
+    if (anchor && ctx.am) anchor.after(roundTools(ctx.am));
   }
 
   // ---------- 滚动：贴底检测 + 智能跟随 ----------
@@ -715,14 +756,14 @@ window.MM = window.MM || {};
   // ---------- 绑定 ----------
   function bind() {
     U.$('#btn-new-chat').addEventListener('click', function () {
-      if (streaming) stopAll();
+      if (streamingHere()) stopAll();
       MM.sessions.create();
       renderAll();
       renderTitle();
       U.$('#input').focus();
     });
     U.$('#btn-send').addEventListener('click', function () {
-      if (streaming) stopAll(); else send();
+      if (streamingHere()) stopAll(); else send();
     });
     U.$('#input').addEventListener('input', autoResize);
     // 中文输入法兼容：组合输入（拼音候选）期间不能拦截按键，否则上屏会被打断

@@ -7,13 +7,14 @@ const providers = require('./providers');
 const search = require('./search');
 
 if (!app.requestSingleInstanceLock()) {
+  // 拿不到锁：直接退出，不再注册 IPC / 建窗，避免第二实例读写同一份数据文件
   app.quit();
-} else {
-  app.on('second-instance', () => {
-    const w = BrowserWindow.getAllWindows()[0];
-    if (w) { if (w.isMinimized()) w.restore(); w.focus(); }
-  });
+  return; // CommonJS 模块顶层允许 return
 }
+app.on('second-instance', () => {
+  const w = BrowserWindow.getAllWindows()[0];
+  if (w) { if (w.isMinimized()) w.restore(); w.focus(); }
+});
 
 let win = null;
 let db = { config: {}, sessions: [] };
@@ -50,12 +51,21 @@ function createWindow() {
   });
   win.loadFile(path.join(__dirname, '../renderer/index.html'));
   // 渲染进程日志/错误转发到主进程 stdout，便于排查
-  win.webContents.on('console-message', (e, level, message, line, sourceId) => {
-    console.log('[renderer]', message, sourceId ? '(' + sourceId + ':' + line + ')' : '');
+  win.webContents.on('console-message', (details) => {
+    // Electron 44 推荐使用事件对象（旧的位置参数已弃用）
+    const d = details || {};
+    console.log('[renderer]', d.message, d.sourceId ? '(' + d.sourceId + ':' + d.lineNumber + ')' : '');
   });
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: 'deny' };
+  });
+  // 禁止页面内导航：一旦导航到远程页面，preload 暴露的 IPC 会被该页面拿到
+  const wc = win.webContents;
+  wc.on('will-navigate', (e, url) => {
+    if (url === wc.getURL()) return; // 允许同页刷新
+    e.preventDefault();
+    if (/^https?:/i.test(url)) shell.openExternal(url);
   });
   // F12 打开开发者工具，便于排查
   win.webContents.on('before-input-event', (e, input) => {
@@ -129,7 +139,8 @@ ipcMain.handle('secrets:set', (e, { id, key }) => {
     db.config.search.apiKey = k;
   } else {
     const p = (db.config.providers || []).find(x => x.id === id);
-    if (p) p.apiKey = k;
+    if (!p) return false; // 服务商不存在：不要假装写入成功
+    p.apiKey = k;
   }
   store.save(db);
   return true;
@@ -215,11 +226,11 @@ ipcMain.handle('catalog:get', async (e, force) => {
   try { cached = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (err) { /* ignore */ }
   const stale = !cached || !cached.byId || !cached.byProvider; // 旧版缓存无 byProvider，视为过期
   if (!force && !stale && Date.now() - (cached.fetchedAt || 0) < TTL) return expose(cached);
+  let timeout = null;
   try {
     const ctrl = new AbortController();
-    const timeout = setTimeout(() => ctrl.abort(), 12000);
+    timeout = setTimeout(() => ctrl.abort(), 12000);
     const res = await fetch('https://models.dev/api.json', { signal: ctrl.signal });
-    clearTimeout(timeout);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const j = await res.json();
     const byId = {};
@@ -245,6 +256,8 @@ ipcMain.handle('catalog:get', async (e, force) => {
     return expose(catalog);
   } catch (err) {
     return expose(cached); // 离线/失败时用旧缓存
+  } finally {
+    if (timeout) clearTimeout(timeout); // 失败路径也要清掉计时器
   }
 });
 
@@ -281,12 +294,14 @@ ipcMain.handle('data:import', async () => {
   try {
     const parsed = JSON.parse(fs.readFileSync(r.filePaths[0], 'utf8'));
     if (!parsed || !parsed.config || !Array.isArray(parsed.sessions)) throw new Error('缺少 config/sessions 字段');
-    db = { config: parsed.config, sessions: parsed.sessions };
+    // 兼容导入本应用内部的 store.json（密钥为 safeStorage 密文）：先解密再落盘
+    const imported = store.decryptData(parsed);
+    db = { config: imported.config, sessions: imported.sessions };
     store.save(db);
     // 1.0 平铺旧结构原样返回（含密钥）：渲染层迁移逻辑需要读密钥并经 store:save 合并回主进程；
     // 新结构返回剥离密钥后的数据
-    const legacyFlat = Array.isArray(parsed.config.models) && parsed.config.models.length;
-    return { config: legacyFlat ? parsed.config : sanitizeConfig(parsed.config), sessions: db.sessions };
+    const legacyFlat = Array.isArray(imported.config.models) && imported.config.models.length;
+    return { config: legacyFlat ? imported.config : sanitizeConfig(imported.config), sessions: db.sessions };
   } catch (err) {
     throw new Error('文件解析失败：' + err.message);
   }
@@ -296,6 +311,16 @@ app.whenReady().then(() => {
   store.init(app.getPath('userData'));
   const loaded = store.load();
   if (loaded) db = { config: loaded.config || {}, sessions: loaded.sessions || [] };
+  const bad = store.corruptInfo();
+  if (bad) {
+    dialog.showMessageBox({
+      type: 'warning',
+      title: '数据文件损坏',
+      message: '本地数据文件（store.json）无法解析，本次将以空配置启动。\n\n' +
+        (bad.backup ? '原文件已备份为：\n' + bad.backup : '原文件备份失败，请手动备份。') +
+        '\n\n错误信息：' + bad.message
+    });
+  }
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

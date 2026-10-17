@@ -177,6 +177,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .sources a:hover { text-decoration: underline; }
+/* 非 http(s) 来源按纯文本展示，不可点击 */
+.sources .src-item {
+  display: block; padding: 3px 0; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 details.reasoning {
   margin: 0 13px 10px; border: 1px dashed var(--border); border-radius: var(--radius);
   padding: 7px 11px; font-size: 12px; color: var(--muted);

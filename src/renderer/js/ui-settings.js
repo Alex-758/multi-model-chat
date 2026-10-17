@@ -43,8 +43,10 @@ window.MM = window.MM || {};
   }
 
   // ---------- 服务商 / 模型 ----------
-  function providers() { return MM.state.config.providers; }
-  function findProvider(id) { return providers().find(p => p.id === id); }
+  function providers() {
+    return (MM.state.config && Array.isArray(MM.state.config.providers)) ? MM.state.config.providers : [];
+  }
+  function findProvider(id) { return providers().find(p => p && p.id === id); }
 
   function findMeta(p, id) {
     if (!MM.state.config.modelLists) return null;
@@ -79,7 +81,9 @@ window.MM = window.MM || {};
   function allFlatModels() {
     const out = [];
     for (const p of providers()) {
+      if (!p || typeof p !== 'object') continue;
       for (const mo of (p.models || [])) {
+        if (!mo || typeof mo !== 'object') continue;
         if (mo.enabled !== false && mo.modelId) out.push(flatten(p, mo));
       }
     }
@@ -203,18 +207,17 @@ window.MM = window.MM || {};
     const enCheck = U.el('input', { type: 'checkbox', title: '启用', ...(mo.enabled !== false ? { checked: '' } : {}) });
     const delBtn = U.el('button', { class: 'm-del', title: '删除此模型' }, '✕');
     const infoHint = U.el('div', { class: 'hint' });
+    // 上一次识别对应的模型 ID：只有 ID 变化时才回填，避免失焦时覆盖用户手填的上下文/最大输出
+    let lastAutoId = mo.modelId || '';
 
-    function applyInfo(force) {
+    function applyInfo() {
       const id = midInput.value.trim();
       if (!id) { infoHint.textContent = ''; return; }
       const meta = MM.modelInfo.guess(id, findMeta(p, id), MM.state.catalog, mo.multimodal, p.provider || p.id);
-      if (force) {
-        if (meta.contextTokens) ctxInput.value = meta.contextTokens;
-        if (meta.maxOutputTokens) outInput.value = meta.maxOutputTokens;
-      } else {
-        if (!ctxInput.value && meta.contextTokens) ctxInput.value = meta.contextTokens;
-        if (!outInput.value && meta.maxOutputTokens) outInput.value = meta.maxOutputTokens;
-      }
+      const idChanged = id !== lastAutoId;
+      if ((idChanged || !ctxInput.value) && meta.contextTokens) ctxInput.value = meta.contextTokens;
+      if ((idChanged || !outInput.value) && meta.maxOutputTokens) outInput.value = meta.maxOutputTokens;
+      lastAutoId = id;
       mo.modelId = id;
       mo.contextTokens = ctxInput.value ? parseInt(ctxInput.value, 10) : undefined;
       mo.maxTokens = outInput.value ? parseInt(outInput.value, 10) : undefined;
@@ -247,7 +250,7 @@ window.MM = window.MM || {};
           onclick: () => {
             midInput.value = it.id;
             dropPanel.classList.add('hidden');
-            applyInfo(true);
+            applyInfo();
           }
         },
           U.el('span', { class: 'dd-id' }, it.id),
@@ -266,7 +269,7 @@ window.MM = window.MM || {};
     midInput.addEventListener('input', () => { renderPanel(midInput.value); dropPanel.classList.remove('hidden'); });
     midInput.addEventListener('blur', () => {
       setTimeout(() => dropPanel.classList.add('hidden'), 180);
-      applyInfo(true);
+      applyInfo();
     });
     nameInput.addEventListener('input', () => { mo.name = nameInput.value.trim(); saveSoon(); });
     ctxInput.addEventListener('change', () => { mo.contextTokens = ctxInput.value ? parseInt(ctxInput.value, 10) : undefined; saveSoon(); });
@@ -291,7 +294,7 @@ window.MM = window.MM || {};
         U.el('span', { class: 'mini-label' }, '最大输出'), outInput,
         infoHint));
     // 挂载后回填识别信息（只补空字段）
-    setTimeout(() => applyInfo(false), 0);
+    setTimeout(() => applyInfo(), 0);
     return row;
   }
 
@@ -299,6 +302,9 @@ window.MM = window.MM || {};
   function renderModelEntries() {
     const box = U.$('#model-entries');
     if (!box) return;
+    // 正在输入时不要重建：模型目录异步到达会调用本函数，会把未失焦的输入清回旧值
+    const active = document.activeElement;
+    if (active && active.tagName === 'INPUT' && box.contains(active)) return;
     const p = findProvider(editingId);
     if (!p) return;
     if (modelCountEl) modelCountEl.textContent = '📦 模型（' + (p.models || []).length + '）';
@@ -344,11 +350,24 @@ window.MM = window.MM || {};
     keyInput.addEventListener('change', () => { commitKeyIfTyped(); });
 
     const result = U.el('div', { class: 'test-result' });
+    // 自定义服务商允许改名（预置服务商的名字由预置定义维护，改名会在启动时被覆盖）
+    let nameRow = null;
+    if (!p.preset) {
+      const nameInput = U.el('input', { type: 'text', value: p.name || '', placeholder: '服务商名称', maxlength: '40' });
+      nameInput.addEventListener('change', () => {
+        p.name = nameInput.value.trim() || '自定义服务商';
+        MM.save();
+        MM.chat.renderChips();
+        renderModels(); // 同步左侧列表与常驻标题行
+      });
+      nameRow = hrow('名称', nameInput);
+    }
     wrap.appendChild(U.el('div', { class: 'p-card' },
       U.el('div', { class: 'p-card-h' },
         U.el('span', {}, '🔌 连接'),
         U.el('span', { class: 'p-card-note' }, '该服务商下所有模型共用')),
       U.el('div', { class: 'p-card-b' },
+        nameRow,
         hrow('API 格式', fmtSel),
         hrow('请求地址', urlInput, U.el('label', { class: 'inline-check', title: '勾选后不再自动补全路径' }, fullUrlCheck, '完整 URL')),
         U.el('div', { class: 'hint h-indent' }, '兼容 OpenAI API 的服务端点地址，不要以斜杠结尾；不勾选「完整 URL」时自动补全 /chat/completions 或 /v1/messages。'),
@@ -359,7 +378,8 @@ window.MM = window.MM || {};
     async function commitKeyIfTyped() {
       const k = keyInput.value.trim();
       if (!k) return;
-      await api.setSecret(p.id, k);
+      const ok = await api.setSecret(p.id, k);
+      if (!ok) { U.toast('密钥保存失败：服务商已不存在', true); return; }
       p.hasKey = true;
       keyInput.value = '';
       keyInput.placeholder = '已保存密钥——输入新值可覆盖';
@@ -407,10 +427,14 @@ window.MM = window.MM || {};
         const reply = await api.testModel({ apiFormat: p.apiFormat, baseUrl: p.baseUrl, fullUrl: p.fullUrl, modelId: mo.modelId, providerId: p.id, provider: p.provider || p.id });
         result.className = 'test-result ok';
         result.textContent = '✓ 连接成功（' + mo.modelId + '），回复：' + String(reply).slice(0, 100);
+        U.toast('连接成功：' + String(reply).slice(0, 40));
       } catch (e) {
         result.className = 'test-result err';
         result.textContent = '✗ ' + e.message;
+        U.toast('连接失败：' + e.message, true);
       }
+      // 按钮在常驻标题行，结果在连接卡片里：滚到可见位置，避免"点了没反应"
+      if (result.scrollIntoView) result.scrollIntoView({ block: 'nearest' });
       testBtn.disabled = false; testBtn.textContent = '测试连接';
     });
 
@@ -591,34 +615,43 @@ window.MM = window.MM || {};
     box.appendChild(U.el('button', {
       class: 'btn-secondary',
       onclick: async () => {
-        const p = await api.exportData({ config: MM.state.config, sessions: MM.state.sessions });
-        if (p) U.toast('已导出到 ' + p);
+        try {
+          const p = await api.exportData({ config: MM.state.config, sessions: MM.state.sessions });
+          if (p) U.toast('已导出到 ' + p + '（含 API 密钥，请妥善保管）');
+        } catch (e) {
+          U.toast('导出失败：' + ((e && e.message) || e), true);
+        }
       }
-    }, U.el('span', {}, '导出数据'), U.el('small', {}, '将模型配置与全部会话导出为 JSON 备份文件')));
+    }, U.el('span', {}, '导出数据'), U.el('small', {}, '将模型配置与全部会话导出为 JSON 备份文件（含 API 密钥，请妥善保管）')));
 
     box.appendChild(U.el('button', {
       class: 'btn-secondary',
       onclick: async () => {
-        const data = await api.importData();
-        if (!data) return;
-        const cfg = data.config || {};
-        // 兼容 1.0 的平铺结构（config.models），交由 MM.normalizeConfig 统一迁移
-        if (!Array.isArray(data.sessions) && !Array.isArray(cfg.providers) && !Array.isArray(cfg.models)) {
-          U.toast('文件格式不正确', true); return;
+        try {
+          const data = await api.importData();
+          if (!data) return;
+          const cfg = data.config || {};
+          // 兼容 1.0 的平铺结构（config.models），交由 MM.normalizeConfig 统一迁移
+          if (!Array.isArray(data.sessions) && !Array.isArray(cfg.providers) && !Array.isArray(cfg.models)) {
+            U.toast('文件格式不正确', true); return;
+          }
+          MM.state.config = MM.normalizeConfig(cfg);
+          MM.state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+          MM.migrateSessions(MM.state.sessions);
+          if (!MM.state.sessions.length) MM.sessions.createSilent();
+          const top = MM.sessions.sorted()[0];
+          MM.state.currentId = top ? top.id : null;
+          U.$('#tgl-auto').checked = !!MM.state.config.synthesis.autoMerge;
+          // 旧备份迁移后带明文密钥：先落盘交给主进程保管，再从渲染层状态剥离
+          await MM.save();
+          MM.stripSecrets(MM.state.config);
+          renderModels(); renderSearch(); renderSynth();
+          MM.chat.renderAll(); MM.sessions.render(); MM.chat.renderChips();
+          U.toast('导入成功');
+        } catch (e) {
+          // 主进程解析失败/文件不可读都会 reject：必须给用户明确反馈
+          U.toast('导入失败：' + ((e && e.message) || e), true);
         }
-        MM.state.config = MM.normalizeConfig(cfg);
-        MM.state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
-        MM.migrateSessions(MM.state.sessions);
-        if (!MM.state.sessions.length) MM.sessions.createSilent();
-        const top = MM.sessions.sorted()[0];
-        MM.state.currentId = top ? top.id : null;
-        U.$('#tgl-auto').checked = !!MM.state.config.synthesis.autoMerge;
-        // 旧备份迁移后带明文密钥：先落盘交给主进程保管，再从渲染层状态剥离
-        await MM.save();
-        MM.stripSecrets(MM.state.config);
-        renderModels(); renderSearch(); renderSynth();
-        MM.chat.renderAll(); MM.sessions.render(); MM.chat.renderChips();
-        U.toast('导入成功');
       }
     }, U.el('span', {}, '导入数据'), U.el('small', {}, '从备份文件恢复，将覆盖当前全部数据')));
 
