@@ -551,7 +551,9 @@ window.MM = window.MM || {};
           U.el('div', { class: 'r-body' }));
         card.insertBefore(det, body);
       }
-      det.querySelector('.r-body').textContent = res.reasoning;
+      // 与正文一样按帧合帧：长思考链下每个 delta 全量重写 textContent 是 O(n²)
+      const rBody = det.querySelector('.r-body');
+      scheduleStreamPaint(rBody, function () { rBody.textContent = res.reasoning; });
     } else if (ev.type === 'done') {
       res.status = 'done'; res.ms = ev.ms; res.chars = ev.chars;
       status.textContent = '✓ ' + U.fmtMs(ev.ms) + ' · ' + ev.chars + ' 字';
@@ -573,10 +575,27 @@ window.MM = window.MM || {};
   }
 
   function stopAll() {
-    for (const id of Array.from(pending.keys())) api.stop(id);
+    for (const id of Array.from(pending.keys())) {
+      // 停止失败不应变成未处理的 Promise 拒绝
+      Promise.resolve(api.stop(id)).catch(function () { });
+    }
     // 搜索阶段尚无 pending 可中止：立即复位，dispatchRound 在搜索返回后检测到取消即退出
     streaming = null;
     setSendBtn(false);
+  }
+
+  // 停止指定会话的在途请求（删除会话时调用；含仍在搜索阶段的轮次）
+  function stopSession(sessionId) {
+    for (const [reqId, ctx] of Array.from(pending.entries())) {
+      if (ctx.session && ctx.session.id === sessionId) {
+        pending.delete(reqId);
+        Promise.resolve(api.stop(reqId)).catch(function () { });
+      }
+    }
+    if (streaming === sessionId) {
+      streaming = null;
+      setSendBtn(false);
+    }
   }
 
   // ---------- 重新生成 ----------
@@ -805,5 +824,5 @@ window.MM = window.MM || {};
     }, 150);
   }
 
-  MM.chat = { send, renderAll, renderChips, renderTitle, bind };
+  MM.chat = { send, renderAll, renderChips, renderTitle, bind, stopSession };
 })();

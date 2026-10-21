@@ -82,6 +82,8 @@ window.MM = window.MM || {};
     const s = MM.state.sessions.find(x => x.id === id);
     if (!s) return;
     if (!window.confirm('确定删除会话「' + s.title + '」？删除后不可恢复。')) return;
+    // 该会话可能正在生成：先停掉在途请求，避免删掉后还在后台消耗 token
+    if (MM.chat.stopSession) MM.chat.stopSession(id);
     MM.state.sessions = MM.state.sessions.filter(x => x.id !== id);
     if (MM.state.currentId === id) {
       const first = sorted()[0];

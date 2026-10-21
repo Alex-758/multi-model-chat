@@ -21,9 +21,12 @@
 - **模型信息自动识别**：根据模型 ID 自动填充上下文窗口 / 最大输出 / 多模态标记（models.dev 目录 + 内置规则库 + 服务商元数据三级来源）
 - **亮 / 暗主题**，数据导入导出备份
 
-## 下载使用
+## 获取与运行
 
-从 [Releases](../../releases) 页面下载 `Multi-Model-Chat-Portable-x.x.x.exe`，双击即用（免安装便携版）。
+本仓库不发布 Release，请从源码构建（见下方「自己构建」）。构建产物在 `dist/`：
+
+- `Multi-Model-Chat-Portable-x.x.x.exe`：免安装便携版，双击即用
+- `Multi-Model Chat Setup x.x.x.exe`：安装版
 
 首次使用：左下角「设置 → 模型配置」填写各服务商的 API Key（密钥仅保存在本机用户目录，不上传任何服务器）。
 
@@ -47,6 +50,8 @@ scripts/         图标生成、本地 mock 测试服务器
 ## 隐私说明
 
 - API 密钥与全部会话数据仅保存在本机（`%APPDATA%\Multi-Model Chat\`），不上传任何服务器
+- 磁盘上的 API Key 使用系统凭据保护（Windows DPAPI / Electron safeStorage）加密存储
+- 导出的备份文件包含明文密钥，请妥善保管
 - 仓库不含任何密钥与运行时数据
 
 ## License

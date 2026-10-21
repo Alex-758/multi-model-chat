@@ -10,7 +10,8 @@
   // （全局删除会把 C# 变成 C、把 URL 的 #锚点 删掉、把行内代码的反引号吃掉）
   const RE_HEADING = /^#{1,6}\s+/;
   const RE_BULLET = /^[-*+•]\s+/;
-  const RE_ORDERED = /^\d{1,3}[.、)]\s*/;
+  // (?!\d)：避免把行首的 "1.5 倍" 当成有序列表前缀剥成 "5 倍"
+  const RE_ORDERED = /^\d{1,3}[.、)](?!\d)\s*/;
   function stripListPrefix(s) {
     let t = String(s).trim();
     if (RE_HEADING.test(t)) t = t.replace(RE_HEADING, '').trim();
@@ -18,6 +19,14 @@
       t = (RE_BULLET.test(t) ? t.replace(RE_BULLET, '') : t.replace(RE_ORDERED, '')).trim();
     }
     return t;
+  }
+
+  // 补句号：中英文常见结尾标点（含引号/括号收尾）都视为已结束，避免出现 "！。"
+  const END_PUNCT = /[。！？；：….!?]$/;
+  function ensureSentenceEnd(text) {
+    const t = String(text).trim();
+    const tail = t.replace(/[”’」』）)\]]+$/, '');
+    return END_PUNCT.test(tail) ? t : t + '。';
   }
 
   function splitPoints(text) {
@@ -136,7 +145,7 @@
     // （单换行连接：保证 Markdown 渲染为同一个连续编号列表，而不是每条都从 1 开始）
     const lines = clusters.map(c => {
       const rep = c.members.reduce((a, b) => a.text.length >= b.text.length ? a : b);
-      return (rep.text.endsWith('。') || rep.text.endsWith('？') ? rep.text : rep.text + '。');
+      return ensureSentenceEnd(rep.text);
     });
     let out = lines.map((t, i) => (i + 1) + '. ' + t).join('\n');
     // 表格作为补充信息附在末尾（原文完整保留）

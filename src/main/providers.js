@@ -129,7 +129,15 @@ async function streamChat(m, messages, opts) {
       }
     };
     for (;;) {
-      const { done, value } = await reader.read();
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (e) {
+        // 超时/用户停止交给外层统一处理；其余情况（连接被重置等）给中文提示
+        if (abortedByTimeout || (signal && signal.aborted) || /abort/i.test(String(e && e.name))) throw e;
+        throw new Error('流式传输中断：' + ((e && e.message) || e));
+      }
+      const { done, value } = chunk;
       if (done) break;
       bumpIdle(); // 收到数据，重置空闲计时
       buf += dec.decode(value, { stream: true });

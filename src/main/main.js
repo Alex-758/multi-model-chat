@@ -80,12 +80,14 @@ function createWindow() {
 // API Key 只存在于主进程内存与磁盘数据文件中，渲染层永远只拿到 hasKey 布尔标记
 function sanitizeConfig(cfg) {
   const c = JSON.parse(JSON.stringify(cfg || {}));
+  // 只接受字符串密钥：异常数据（对象等）按空处理，避免 .trim() 抛错导致整份配置读不出来
+  const keyOf = v => (typeof v === 'string' ? v.trim() : '');
   for (const p of (c.providers || [])) {
-    p.hasKey = !!(p.apiKey || '').trim();
+    p.hasKey = !!keyOf(p.apiKey);
     delete p.apiKey;
   }
   if (c.search) {
-    c.search.hasKey = !!(c.search.apiKey || '').trim();
+    c.search.hasKey = !!keyOf(c.search.apiKey);
     delete c.search.apiKey;
   }
   return c;
@@ -319,6 +321,15 @@ app.whenReady().then(() => {
       message: '本地数据文件（store.json）无法解析，本次将以空配置启动。\n\n' +
         (bad.backup ? '原文件已备份为：\n' + bad.backup : '原文件备份失败，请手动备份。') +
         '\n\n错误信息：' + bad.message
+    });
+  }
+  const lostKeys = store.decryptInfo();
+  if (lostKeys > 0) {
+    dialog.showMessageBox({
+      type: 'warning',
+      title: '部分密钥无法解密',
+      message: '检测到 ' + lostKeys + ' 个 API 密钥无法解密（通常是因为数据文件来自其它电脑或其它 Windows 用户）。\n\n' +
+        '这些密钥已按空处理，请在「设置 → 模型配置」中重新填写。'
     });
   }
   createWindow();

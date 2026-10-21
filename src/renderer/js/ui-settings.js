@@ -20,13 +20,15 @@ window.MM = window.MM || {};
     renderSearch();
     renderSynth();
     renderData();
-    // 后台刷新 models.dev 模型目录（缓存 7 天）
-    api.getCatalog().then(cat => {
-      if (cat && cat !== MM.state.catalog) {
-        MM.state.catalog = cat;
-        renderModelEntries(); // 目录到达后刷新识别信息
-      }
-    }).catch(() => {});
+    // 模型目录每次运行只取一次（主进程有 7 天缓存）：避免每次打开设置页都跨进程传 1MB+
+    if (!MM.state.catalog) {
+      api.getCatalog().then(cat => {
+        if (cat && cat !== MM.state.catalog) {
+          MM.state.catalog = cat;
+          renderModelEntries(); // 目录到达后刷新识别信息
+        }
+      }).catch(() => {});
+    }
   }
   function close() {
     const overlay = U.$('#settings-overlay');
@@ -335,7 +337,8 @@ window.MM = window.MM || {};
     clearKeyBtn.addEventListener('click', async () => {
       if (!p.hasKey) return;
       if (!window.confirm('确定清除已保存的 API 密钥？')) return;
-      await api.clearSecret(p.id);
+      try { await api.clearSecret(p.id); }
+      catch (e) { U.toast('清除失败：' + ((e && e.message) || e), true); return; }
       p.hasKey = false;
       keyInput.placeholder = '请输入 API Key';
       clearKeyBtn.disabled = true;
@@ -375,14 +378,18 @@ window.MM = window.MM || {};
         U.el('div', { class: 'hint h-indent' }, p.hasKey ? '已保存密钥不在本界面显示；输入新值并保存可覆盖，点“清除”删除。密钥仅保存在本机。' : '密钥仅保存在本机。'),
         result)));
 
+    // 返回是否成功（没有输入新密钥时视为成功，不需要写入）
     async function commitKeyIfTyped() {
       const k = keyInput.value.trim();
-      if (!k) return;
-      const ok = await api.setSecret(p.id, k);
-      if (!ok) { U.toast('密钥保存失败：服务商已不存在', true); return; }
+      if (!k) return true;
+      let ok = false;
+      try { ok = await api.setSecret(p.id, k); }
+      catch (e) { U.toast('密钥保存失败：' + ((e && e.message) || e), true); return false; }
+      if (!ok) { U.toast('密钥保存失败：服务商已不存在', true); return false; }
       p.hasKey = true;
       keyInput.value = '';
       keyInput.placeholder = '已保存密钥——输入新值可覆盖';
+      return true;
     }
 
     // ---- 模型卡片：该服务商下的模型列表 ----
@@ -390,7 +397,7 @@ window.MM = window.MM || {};
       class: 'btn-secondary',
       onclick: async (e) => {
         p.baseUrl = U.$('#p-url').value.trim();
-        await commitKeyIfTyped(); // 输入了新密钥先保存
+        if (!(await commitKeyIfTyped())) return; // 输入了新密钥先保存
         const list = await fetchList(p, e.currentTarget);
         if (list) { U.toast('获取到 ' + list.length + ' 个模型'); renderModelEntries(); }
       }
@@ -422,8 +429,11 @@ window.MM = window.MM || {};
       if (!mo || !mo.modelId) { result.className = 'test-result err'; result.textContent = '✗ 请先在模型卡片中添加模型 ID'; return; }
       testBtn.disabled = true; testBtn.textContent = '测试中…';
       result.className = 'test-result';
+      if (!(await commitKeyIfTyped())) { // 输入了新密钥先保存
+        testBtn.disabled = false; testBtn.textContent = '测试连接';
+        return;
+      }
       try {
-        await commitKeyIfTyped(); // 输入了新密钥先保存
         const reply = await api.testModel({ apiFormat: p.apiFormat, baseUrl: p.baseUrl, fullUrl: p.fullUrl, modelId: mo.modelId, providerId: p.id, provider: p.provider || p.id });
         result.className = 'test-result ok';
         result.textContent = '✓ 连接成功（' + mo.modelId + '），回复：' + String(reply).slice(0, 100);
@@ -440,7 +450,7 @@ window.MM = window.MM || {};
 
     const saveBtn = U.el('button', { class: 'btn-primary' }, '保存');
     saveBtn.addEventListener('click', async () => {
-      await commitKeyIfTyped(); // 输入了新密钥先写入主进程保管
+      if (!(await commitKeyIfTyped())) return; // 输入了新密钥先写入主进程保管
       MM.save(); MM.chat.renderChips();
       U.toast('已保存「' + p.name + '」');
     });
@@ -510,9 +520,16 @@ window.MM = window.MM || {};
     // 整个字段一起显隐：密钥不适用时不留孤零零的「API 密钥」标签
     const keyField = field('API 密钥', keyRow);
 
+    // 返回是否成功（没有输入新密钥时视为成功）
     async function commitSearchKeyIfTyped() {
       const k = keyInput.value.trim();
-      if (k) { await api.setSecret('search', k); cfg.hasKey = true; keyInput.value = ''; keyInput.placeholder = '已保存密钥——输入新值可覆盖'; }
+      if (!k) return true;
+      try { await api.setSecret('search', k); }
+      catch (e) { U.toast('密钥保存失败：' + ((e && e.message) || e), true); return false; }
+      cfg.hasKey = true;
+      keyInput.value = '';
+      keyInput.placeholder = '已保存密钥——输入新值可覆盖';
+      return true;
     }
 
     function syncKeyVisible() {
@@ -534,19 +551,18 @@ window.MM = window.MM || {};
         result.textContent = '✗ 所选搜索服务商需要 API 密钥，请填写后再保存';
         return;
       }
-      await commitSearchKeyIfTyped();
+      if (!(await commitSearchKeyIfTyped())) return;
       cfg.provider = pv;
-      MM.save(); U.toast('搜索设置已保存');
-    });
+      MM.save(); U.toast('搜索设置已保存');    });
     const testBtn = U.el('button', { class: 'btn-secondary' }, '测试搜索');
     testBtn.addEventListener('click', async () => {
       const pv = provSel.value;
       result.className = 'test-result';
       if (pv === 'none') { result.className = 'test-result err'; result.textContent = '当前为「不使用搜索」，请先选择搜索引擎'; return; }
       if ((pv === 'tavily' || pv === 'bocha') && !keyInput.value.trim() && !cfg.hasKey) { result.className = 'test-result err'; result.textContent = '✗ 请先填写 API 密钥'; return; }
+      if (!(await commitSearchKeyIfTyped())) return;
       testBtn.disabled = true; testBtn.textContent = '搜索中…';
       try {
-        await commitSearchKeyIfTyped();
         const rs = await api.testSearch({ provider: pv });
         if (!rs || !rs.length) { result.className = 'test-result err'; result.textContent = '✗ 未返回结果'; }
         else { result.className = 'test-result ok'; result.textContent = '✓ 返回 ' + rs.length + ' 条结果：' + rs[0].title; }

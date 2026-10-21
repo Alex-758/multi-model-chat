@@ -12,6 +12,7 @@ const { safeStorage } = require('electron');
 let dataDir = null;
 let lastMtime = 0; // 本进程最后已知的 store.json 修改时间
 let corrupt = null; // 最近一次加载失败的信息 { backup, message }
+let decryptFailures = 0; // 本次加载中无法解密的密钥数量（用于界面提示）
 
 function init(userDataDir) { dataDir = userDataDir; }
 function file() { return path.join(dataDir, 'store.json'); }
@@ -32,9 +33,12 @@ function encryptValue(v) {
   catch (e) { return v; } // 加密失败退回明文，保证功能可用
 }
 function decryptValue(v) {
-  if (v && typeof v === 'object' && v.enc) {
+  if (v == null) return v;
+  if (typeof v === 'object') {
+    if (!v.enc) { decryptFailures++; return ''; } // 未知格式（手改/异版本数据）：当作空密钥，避免后续 .trim() 崩溃
     try { return safeStorage.decryptString(Buffer.from(v.enc, 'base64')); }
     catch (e) {
+      decryptFailures++;
       console.warn('[store] 密钥解密失败（可能来自其它机器/用户），已清空该密钥');
       return '';
     }
@@ -74,6 +78,7 @@ function load() {
     const data = JSON.parse(raw);
     lastMtime = currentMtime();
     corrupt = null;
+    decryptFailures = 0;
     return decryptData(data);
   } catch (e) {
     // 文件存在但解析失败：保留现场，避免下一次保存把它覆盖掉
@@ -87,6 +92,7 @@ function load() {
 }
 
 function corruptInfo() { return corrupt; }
+function decryptInfo() { return decryptFailures; }
 
 function save(data) {
   // 并发检测：磁盘上的 mtime 与本进程记录不一致 => 被其他实例/进程改过
@@ -107,4 +113,4 @@ function save(data) {
   return { conflict };
 }
 
-module.exports = { init, load, save, dir, corruptInfo, decryptData };
+module.exports = { init, load, save, dir, corruptInfo, decryptInfo, decryptData };
