@@ -8,7 +8,16 @@ window.MM = window.MM || {};
   // 正在生成的会话 id（null = 空闲）。全局同一时刻只跑一轮；
   // 存会话 id 是为了区分"当前会话在生成"和"别的会话在生成"。
   let streaming = null;
+  // 轮次令牌：每次 dispatchRound 自增。停止或开始新一轮后，仍停留在搜索阶段的旧轮次
+  // 醒来时令牌已过期，必须放弃——只看 streaming 是否为真值会把新轮次误当成"没被取消"。
+  let runToken = 0;
+  // 处于联网搜索阶段（尚未建立 pending）的轮次数。此时收到上一轮的 all-done 不能把
+  // streaming 清空，否则刚开始的新一轮会被误判为"已取消"。
+  let searchPhase = 0;
   const pending = new Map(); // requestId -> 请求上下文
+  // 会话提示词是长文本，防抖要更长，避免边打字边写盘。
+  // 注意会话级提示词存在 session 上（不是 config），必须整份保存。
+  const saveSoonPrompt = U.debounce(() => { MM.save(); }, 800);
 
   function streamingHere() { return !!streaming && streaming === MM.state.currentId; }
   function streamingSessionName() {
@@ -21,6 +30,17 @@ window.MM = window.MM || {};
   function stripModel(m) {
     // 不携带 apiKey：密钥由主进程按 providerId 保管并在请求时解析
     return { id: m.id, providerId: m.providerId, name: m.name, provider: m.provider, apiFormat: m.apiFormat, baseUrl: m.baseUrl, modelId: m.modelId, fullUrl: m.fullUrl, maxTokens: m.maxTokens };
+  }
+
+  // 按 data-round 查找元素：roundId 可能来自导入数据，不能直接拼进 CSS 选择器
+  function byRound(sel, roundId, root) {
+    const box = root || U.$('#messages');
+    if (!box) return null;
+    const want = roundId == null ? '' : String(roundId);
+    for (const el of Array.from(box.querySelectorAll(sel))) {
+      if ((el.getAttribute('data-round') || '') === want) return el;
+    }
+    return null;
   }
 
   function setSendBtn(on) {
@@ -94,6 +114,14 @@ window.MM = window.MM || {};
     return cjk + Math.ceil((s.length - cjk) / 4);
   }
 
+  // 生效的系统提示词：会话级覆盖优先，取不到再用全局；两者都为空返回 ''（调用方自行判断是否注入）
+  function effectiveSystemPrompt(s) {
+    const local = s && typeof s.systemPrompt === 'string' ? s.systemPrompt.trim() : '';
+    if (local) return local;
+    const g = MM.state.config && MM.state.config.systemPrompt;
+    return typeof g === 'string' ? g.trim() : '';
+  }
+
   function buildHistory(s, userMsg, searchResults, ctxLimit, maxOut) {
     const msgs = [];
     for (const m of s.messages) {
@@ -116,9 +144,11 @@ window.MM = window.MM || {};
       msgs.push({ role: 'system', content: '以下是与用户问题相关的联网搜索结果，回答时可以参考：\n\n' + src });
     }
     // 按模型上下文窗口裁剪历史，避免超限报错
+    // 系统提示词的 token 也要计入预算，否则长提示词 + 长历史仍会超限
+    const sysPrompt = effectiveSystemPrompt(s);
     if (ctxLimit) {
       // 预算下限取 512：极小上下文窗口（如 3000）下不能仍塞 4096
-      const budget = Math.max(ctxLimit - (maxOut || 4096) - 4096, 512);
+      const budget = Math.max(ctxLimit - (maxOut || 4096) - 4096, 512) - estTokens(sysPrompt);
       let total = msgs.reduce((a, x) => a + estTokens(x.content), 0);
       while (total > budget && msgs.length > 1) {
         total -= estTokens(msgs[0].content);
@@ -131,6 +161,9 @@ window.MM = window.MM || {};
       // Anthropic 要求首条消息为 user
       while (msgs.length && msgs[0].role === 'assistant') msgs.shift();
     }
+    // 提示词插在裁剪之后：从前面 shift 历史时不能把它一起丢掉，
+    // 它是本轮对话的角色设定，任何时候都要保住
+    if (sysPrompt) msgs.unshift({ role: 'system', content: sysPrompt });
     msgs.push({ role: 'user', content: userMsg.content });
     // 合并相邻的 user 消息：上一轮全部失败/被停止时，历史最后一条 user 会与当前消息相邻，
     // Anthropic 等格式对角色交替更敏感（必须在 push 当前消息之后执行）
@@ -176,6 +209,18 @@ window.MM = window.MM || {};
     return box;
   }
 
+  // Markdown 渲染缓存：切换会话/版本时会反复重画同一条回答，
+  // 内容没变就直接复用上次的 HTML。WeakMap 以结果对象为键，删除会话后可被 GC。
+  const mdCache = new WeakMap();
+  function mdHtml(obj, content) {
+    const src = content || '';
+    const hit = mdCache.get(obj);
+    if (hit && hit.src === src) return hit.html;
+    const html = MM.md.render(src);
+    mdCache.set(obj, { src: src, html: html });
+    return html;
+  }
+
   function answerCard(res, streamingNow) {
     const card = U.el('div', { class: 'answer-card', 'data-model-id': res.modelId });
     const statusSpan = U.el('span', { class: 'ac-status' });
@@ -204,7 +249,7 @@ window.MM = window.MM || {};
     const body = U.el('div', { class: 'ac-body' + (streamingNow ? ' streaming' : ' md') });
     if (streamingNow) body.textContent = res.content || '';
     else if (res.status === 'error' && res.error) body.innerHTML = '<div class="ac-error">✗ ' + U.esc(res.error) + '</div>';
-    else body.innerHTML = MM.md.render(res.content || '');
+    else body.innerHTML = mdHtml(res, res.content);
     card.appendChild(body);
     card.appendChild(U.el('div', { class: 'card-foot' },
       U.el('button', {
@@ -214,17 +259,44 @@ window.MM = window.MM || {};
     return card;
   }
 
+  // 缓存一张回答卡片里高频访问的节点（状态、正文、思考过程）
+  function cardRefs(card) {
+    return {
+      card: card,
+      status: card.querySelector('.ac-status'),
+      body: card.querySelector('.ac-body'),
+      reasoning: card.querySelector('.reasoning .r-body')
+    };
+  }
+
   function statusHtml(res) {
     if (res.status === 'streaming') return '<span class="spinner"></span><span class="badge muted">生成中…</span>';
     if (res.status === 'done') {
       let h = '<span class="badge ok">✓</span>';
       if (res.ms) h += '<span class="badge">' + U.fmtMs(res.ms) + '</span>';
       if (res.chars) h += '<span class="badge">' + res.chars + ' 字</span>';
-      return h;
+      return h + usageBadge(res.usage);
     }
-    if (res.status === 'error') return '<span class="badge err">✗ 失败</span>';
-    if (res.status === 'stopped') return '<span class="badge muted">⏹ 已停止</span>';
+    if (res.status === 'error') return '<span class="badge err">✗ 失败</span>' + usageBadge(res.usage);
+    if (res.status === 'stopped') return '<span class="badge muted">⏹ 已停止</span>' + usageBadge(res.usage);
     return '';
+  }
+
+  // token 用量徽标。悬停看输入/输出拆分——只显示总数会让「为什么这么贵」查不到原因。
+  // 用量是服务端回传的，某些端点不返回时此处自然为空，不猜不估算。
+  function usageBadge(u) {
+    if (!u || !u.input && !u.output) return '';
+    const total = (u.input || 0) + (u.output || 0);
+    if (!total) return '';
+    const tip = '输入 ' + U.esc(String(u.input || 0)) + ' + 输出 ' + U.esc(String(u.output || 0)) + ' tokens';
+    return '<span class="badge tok" title="' + tip + '">' + MM.modelInfo.fmtTokens(total) + ' tok</span>';
+  }
+
+  // 本轮合计用量（供轮次工具栏显示）；没有任何模型回传时返回 null，界面不显示
+  function roundUsage(am) {
+    const list = (am.results || []).filter(r => r.usage && (r.usage.input || r.usage.output));
+    if (!list.length) return null;
+    return list.reduce((a, r) => a + (r.usage.input || 0) + (r.usage.output || 0), 0);
   }
 
   function answersGrid(am) {
@@ -238,14 +310,16 @@ window.MM = window.MM || {};
     const card = U.el('div', { class: 'merge-card', 'data-role': 'merge', 'data-round': roundId || '' });
     const label = msg.mode === 'model' ? '综合回答 · 模型二次综合' : '综合回答';
     const mStatus = U.el('span', { class: 'ac-status' });
-    mStatus.innerHTML = live ? '<span class="spinner"></span>' : '';
+    // 非流式（历史快照）也要带上完成标记与用量，否则重开会话后综合卡片的头部是空的
+    mStatus.innerHTML = live ? '<span class="spinner"></span>'
+      : '✓ ' + (msg.mode === 'model' ? '完成' : '已合并') + usageBadge(msg.usage);
     card.appendChild(U.el('div', { class: 'ac-head' },
       U.el('span', { class: 'ac-name' }, label),
       mStatus
     ));
     const body = U.el('div', { class: 'ac-body' + (live ? ' streaming' : ' md') });
     if (live) body.textContent = msg.content || '';
-    else body.innerHTML = MM.md.render(msg.content || '');
+    else body.innerHTML = mdHtml(msg, msg.content);
     card.appendChild(body);
     card.appendChild(U.el('div', { class: 'card-foot' },
       U.el('button', { class: 'ac-copy', onclick: function () { U.copyTextFrom(body); U.toast('已复制'); } }, '复制')));
@@ -313,6 +387,15 @@ window.MM = window.MM || {};
     if (!hasMerge) {
       tools.appendChild(U.el('button', { class: 'tool-btn', onclick: function () { doMerge(am.roundId); } }, '综合回答'));
     }
+    // 本轮合计 token：放在最后，不打乱既有按钮顺序
+    const total = roundUsage(am);
+    if (total) {
+      const n = (am.results || []).filter(r => r.usage && (r.usage.input || r.usage.output)).length;
+      tools.appendChild(U.el('span', {
+        class: 'round-tok',
+        title: '本轮 ' + n + ' 个模型的 token 用量合计（输入+输出）'
+      }, 'Σ ' + MM.modelInfo.fmtTokens(total) + ' tok'));
+    }
     return tools;
   }
 
@@ -332,6 +415,9 @@ window.MM = window.MM || {};
     U.$('#composer').style.display = s ? '' : 'none';
     // 先同步按钮状态：空会话会提前 return，放在末尾会漏掉
     refreshSendBtn();
+    // 顶栏提示词按钮与面板也要先同步：空会话提前 return 时同样不能显示上一个会话的状态
+    refreshPromptBadge();
+    syncPromptBox();
     if (!s || !s.messages.length) {
       wrap.appendChild(emptyState());
       return;
@@ -357,8 +443,14 @@ window.MM = window.MM || {};
           if (live && live.type === 'round') {
             grid = U.el('div', { class: 'answers', 'data-round': am.roundId });
             // 已完成的模型按渲染态显示，仍在生成的才显示流式样式
-            for (const r of am.results) grid.appendChild(answerCard(r, r.status === 'streaming'));
+            const cards = new Map();
+            for (const r of am.results) {
+              const card = answerCard(r, r.status === 'streaming');
+              grid.appendChild(card);
+              cards.set(r.modelId, cardRefs(card));
+            }
             live.ctx.grid = grid;
+            live.ctx.cards = cards; // 重建后事件分发要用新的节点引用
           } else {
             grid = answersGrid(am);
           }
@@ -373,6 +465,10 @@ window.MM = window.MM || {};
             }
           }
           frag.appendChild(roundTools(am));
+        } else if (i >= s.messages.length) {
+          // 这一轮没有回答（例如联网搜索阶段被停止）：补一个「重新生成」入口，
+          // 否则这条提问只能删掉重发
+          frag.appendChild(userRetryTools(m));
         }
       } else {
         i++;
@@ -387,11 +483,169 @@ window.MM = window.MM || {};
   }
 
   function renderUser(msg) {
+    // 编辑态下不显示编辑按钮（避免按钮被替换后绑不到事件）
+    const editBtn = U.el('div', { class: 'copy-hint', onclick: function () { startEdit(msg); } }, '编辑');
     return U.el('div', { class: 'user-msg' },
       U.el('div', { class: 'user-bubble' },
         U.el('div', { style: 'white-space:pre-wrap' }, msg.content),
-        U.el('div', { class: 'copy-hint', onclick: function () { U.copyText(msg.content); } }, '复制')
+        U.el('div', { class: 'copy-hints' },
+          U.el('div', { class: 'copy-hint', onclick: function () { U.copyText(msg.content); } }, '复制'),
+          editBtn)
       ));
+  }
+
+  // ---------- 编辑重发 ----------
+  // 把这条用户消息就地改成编辑框；保存后删除它后面的所有轮次并重新发送。
+  function startEdit(msg) {
+    if (streaming) { U.toast('请等待当前任务完成', true); return; }
+    const s = MM.sessions.current();
+    if (!s) return;
+    const bubble = findUserBubble(msg);
+    if (!bubble) return;
+    // 已存在的编辑框不再重复插入（连点两次会套两层）
+    if (bubble.querySelector('.edit-box')) return;
+    // 其它气泡先退出编辑态，避免同屏出现多个编辑框（要连原文一起还原）
+    closeOtherEdits(bubble);
+
+    const idx = s.messages.indexOf(msg);
+    const hasTail = s.messages.some((m, i) => i > idx && m.role === 'assistant');
+    const ta = U.el('textarea', { class: 'edit-input', rows: '3' });
+    ta.value = msg.content;
+    const box = U.el('div', { class: 'edit-box' }, ta,
+      U.el('div', { class: 'edit-actions' },
+        U.el('span', { class: 'edit-hint' }, hasTail ? '保存后会删除这条消息之后的全部对话（含后续提问）并重新发送' : '保存后重新发送'),
+        U.el('button', { class: 'btn-ghost', onclick: function () { cancelEdit(msg); } }, '取消'),
+        U.el('button', { class: 'btn-primary', onclick: function () { saveEdit(msg); } }, '保存并重发')));
+    // 原文隐藏但保留（取消时能还原），不要直接清空
+    const orig = bubble.querySelector('[style*="pre-wrap"]');
+    if (orig) orig.classList.add('hidden');
+    // 插到内容与按钮之间；参照节点不存在时退化为追加到末尾，不能让它静默丢失
+    const hintRow = bubble.querySelector('.copy-hints');
+    if (hintRow) bubble.insertBefore(box, hintRow); else bubble.appendChild(box);
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    autoResizeTextarea(ta);
+    // 中文输入法兼容
+    let composing = false;
+    ta.addEventListener('compositionstart', function () { composing = true; });
+    ta.addEventListener('compositionend', function () { composing = false; });
+    ta.addEventListener('input', function () { autoResizeTextarea(ta); });
+    ta.addEventListener('keydown', function (e) {
+      if (composing || e.isComposing || e.keyCode === 229) return;
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); saveEdit(msg); }
+      else if (e.key === 'Escape') { e.preventDefault(); cancelEdit(msg); }
+    });
+  }
+
+  // 关闭除 keep 以外的所有编辑框，并还原被隐藏的原文
+  function closeOtherEdits(keep) {
+    for (const box of Array.from(document.querySelectorAll('.user-bubble .edit-box'))) {
+      const bubble = box.closest('.user-bubble');
+      if (bubble === keep) continue;
+      box.remove();
+      const orig = bubble && bubble.querySelector('[style*="pre-wrap"]');
+      if (orig) orig.classList.remove('hidden');
+    }
+  }
+
+  function autoResizeTextarea(ta) {
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight + 2, 320) + 'px';
+  }
+
+  function findUserBubble(msg) {
+    // 返回 .user-bubble（气泡本身），不是外层 .user-msg：
+    // 编辑框要插在气泡内部，原文和按钮都在这一层
+    const nodes = Array.from(document.querySelectorAll('.user-msg'));
+    const i = MM.state.sessions.find(x => x.id === MM.state.currentId);
+    if (!i) return null;
+    const real = i.messages.filter(m => m.role === 'user').indexOf(msg);
+    if (real < 0) return null;
+    const outer = nodes[real];
+    return outer ? outer.querySelector('.user-bubble') : null;
+  }
+
+  function cancelEdit(msg) {
+    const bubble = findUserBubble(msg);
+    if (!bubble) return;
+    const box = bubble.querySelector('.edit-box');
+    if (box) box.remove();
+    const orig = bubble.querySelector('[style*="pre-wrap"]');
+    if (orig) orig.classList.remove('hidden');
+  }
+
+  function saveEdit(msg) {
+    if (streaming) { U.toast('请等待当前任务完成', true); return; }
+    const s = MM.sessions.current();
+    if (!s) return;
+    const bubble = findUserBubble(msg);
+    const box = bubble && bubble.querySelector('.edit-box');
+    const ta = box && box.querySelector('.edit-input');
+    if (!ta) return;
+    const text = ta.value.trim();
+    if (!text) { U.toast('内容不能为空', true); return; }
+    if (text === msg.content) { cancelEdit(msg); U.toast('内容未变化，已取消编辑'); return; }
+
+    const models = selectedModels();
+    if (!models.length) { U.toast('请先在输入框上方选择至少一个模型', true); return; }
+
+    // 只保留这条消息及其之前的历史，后面的回答全部丢弃（用户明确要改这条提问）
+    const idx = s.messages.indexOf(msg);
+    if (idx < 0) return; // 消息已不在当前会话（例如刚导入/切换过），不能盲目 splice(-1+1) 清空全部
+    s.messages.splice(idx + 1);
+    msg.content = text;
+    // 搜索结果是针对旧提问的，必须清掉，否则重新发送会带着过期来源
+    delete msg.sources;
+    if (s.title === '新会话' || s.messages.length === 1) s.title = text.slice(0, 30);
+    s.updatedAt = Date.now();
+    MM.save();
+    renderAll();
+    renderTitle();
+    MM.sessions.render();
+
+    streaming = s.id;
+    setSendBtn(true);
+    dispatchRound(s, msg, models, U.$('#tgl-search').checked, false)
+      .catch(e => { streaming = null; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
+  }
+
+  // ---------- 会话提示词 ----------
+  // 顶栏「提示词」按钮展开面板；会话里设了提示词时按钮点亮，便于一眼看出本会话有覆盖。
+  function refreshPromptBadge() {
+    const s = MM.sessions.current();
+    const btn = U.$('#btn-session-prompt');
+    if (!btn) return;
+    const has = !!(s && typeof s.systemPrompt === 'string' && s.systemPrompt.trim());
+    btn.classList.toggle('on', has);
+    btn.title = has ? '本会话已设置提示词（点击编辑/清除）' : '为当前会话单独设置系统提示词（留空则用全局提示词）';
+    const hint = U.$('#sp-hint');
+    if (hint) {
+      const g = MM.state.config && typeof MM.state.config.systemPrompt === 'string' ? MM.state.config.systemPrompt.trim() : '';
+      hint.textContent = has ? '本会话提示词已启用' : (g ? '本会话未设置，将使用全局提示词' : '未设置提示词（可去设置里写全局的）');
+    }
+  }
+
+  function togglePromptBox(forceOpen) {
+    const box = U.$('#session-prompt-box');
+    if (!box) return;
+    const open = forceOpen === undefined ? box.classList.contains('hidden') : !!forceOpen;
+    box.classList.toggle('hidden', !open);
+    if (!open) return;
+    const s = MM.sessions.current();
+    const ta = U.$('#session-prompt');
+    if (ta) ta.value = (s && typeof s.systemPrompt === 'string') ? s.systemPrompt : '';
+    refreshPromptBadge();
+    if (ta) ta.focus();
+  }
+
+  // 面板展开时把内容同步成当前会话的提示词（只在会话切换/整体重绘时调用，
+  // 不能放进 refreshPromptBadge：每次输入都重设 value 会把光标顶到末尾）
+  function syncPromptBox() {
+    const box = U.$('#session-prompt-box');
+    if (!box || box.classList.contains('hidden')) return;
+    const s = MM.sessions.current();
+    const ta = U.$('#session-prompt');
+    if (ta) ta.value = (s && typeof s.systemPrompt === 'string') ? s.systemPrompt : '';
   }
 
   // ---------- 发送 ----------
@@ -421,6 +675,8 @@ window.MM = window.MM || {};
     const wrap = U.$('#messages');
     const es = wrap.querySelector('.empty-state');
     if (es) es.remove();
+    // 上一条"无回答"提问留下的重新生成入口已经过期（后面有新消息了），先移除
+    for (const t of Array.from(wrap.querySelectorAll('.round-tools.retry-only'))) t.remove();
     wrap.appendChild(renderUser(userMsg));
     scrollBottom(true);
     input.value = '';
@@ -435,19 +691,27 @@ window.MM = window.MM || {};
 
   // 发起一轮多模型请求并渲染占位卡片（inheritVersions：重试时继承的历史版本池）
   async function dispatchRound(s, userMsg, models, searchOn, appendUserDom, inheritVersions) {
-    let searchResults = userMsg.sources || null;
-    if (searchOn && !searchResults) {
-      try {
-        searchResults = await api.search(userMsg.content, 6);
-        if (!searchResults) U.toast('联网搜索未返回结果（可在设置中检查搜索引擎）');
-      } catch (e) {
-        U.toast('联网搜索失败：' + e.message, true);
-        searchResults = null;
+    const myToken = ++runToken;
+    // 关闭联网搜索时不能沿用上一轮缓存的来源（旧结果可能已过时，还会把 searchOn 抬成 true）
+    let searchResults = null;
+    if (searchOn) {
+      searchResults = userMsg.sources || null;
+      if (!searchResults) {
+        searchPhase++;
+        try {
+          searchResults = await api.search(userMsg.content, 6);
+          if (!searchResults) U.toast('联网搜索未返回结果（可在设置中检查搜索引擎）');
+        } catch (e) {
+          U.toast('联网搜索失败：' + e.message, true);
+          searchResults = null;
+        } finally {
+          searchPhase--;
+        }
+        if (searchResults && searchResults.length) userMsg.sources = searchResults;
       }
-      if (searchResults && searchResults.length) userMsg.sources = searchResults;
     }
-    // 搜索期间用户点了停止：放弃本轮（此时助手消息尚未入列，干净退出）
-    if (!streaming) { U.toast('已取消'); return; }
+    // 搜索期间用户点了停止（或已开始新一轮）：放弃本轮（此时助手消息尚未入列，干净退出）
+    if (streaming !== s.id || runToken !== myToken) { U.toast('已取消'); return; }
 
     const roundId = U.uid();
     const reqId = 'req' + (++seq);
@@ -466,29 +730,46 @@ window.MM = window.MM || {};
     };
     s.messages.push(assistantMsg);
     s.updatedAt = Date.now();
-    MM.save();
+    // 这里不落盘：所有调用方（send/retryRound/saveEdit/retryUser）在进入本函数前
+    // 已经把用户消息/裁剪结果保存过了。占位卡片没有内容，等 all-done 再连同结果一起写，
+    // 可以少一次整份会话历史的 IPC 复制与磁盘写入。
 
     streaming = s.id;
     setSendBtn(true);
 
     const wrap = U.$('#messages');
     const grid = U.el('div', { class: 'answers', 'data-round': roundId });
-    for (const r of assistantMsg.results) grid.appendChild(answerCard(r, true));
+    // 缓存每张卡片的节点引用：流式期间每个 delta 都要更新状态/正文，
+    // 逐个事件 querySelector 会在 4 模型并发时放大成大量 DOM 查询
+    const cards = new Map();
+    for (const r of assistantMsg.results) {
+      const card = answerCard(r, true);
+      grid.appendChild(card);
+      cards.set(r.modelId, cardRefs(card));
+    }
     if (appendUserDom) { /* user DOM 已在 send() 中追加 */ }
-    pending.set(reqId, { session: s, assistantMsg: assistantMsg, grid: grid, userMsg: userMsg });
+    pending.set(reqId, { session: s, assistantMsg: assistantMsg, grid: grid, userMsg: userMsg, cards: cards });
     // 前面 await 过联网搜索：这期间用户可能已切到别的会话，
     // 此时不能把卡片挂到当前视图上（否则会串进别的会话界面）。
     // 数据照常更新，切回本会话时 renderAll 会把进行中的流式卡片重画出来。
     if (MM.sessions.current() === s) {
+      // 搜索期间重绘可能留下"重新生成"临时工具栏：回答卡片要替换它，不能排在它后面
+      for (const t of Array.from(wrap.querySelectorAll('.round-tools.retry-only'))) t.remove();
       wrap.appendChild(grid);
       scrollBottom(true);
     }
     try {
-      await api.send({ requestId: reqId, targets: targets, searchOn: !!(searchResults || searchOn) });
+      await api.send({ requestId: reqId, targets: targets, searchOn: !!searchOn });
     } catch (e) {
       pending.delete(reqId);
       streaming = null;
       setSendBtn(false);
+      // 请求没能启动：把占位卡片标成失败并落盘，避免界面上永远转圈
+      for (const r of assistantMsg.results) {
+        if (r.status === 'streaming') { r.status = 'error'; r.error = '请求失败：' + e.message; }
+      }
+      MM.save();
+      renderAll();
       U.toast('请求失败：' + e.message, true);
     }
   }
@@ -501,7 +782,8 @@ window.MM = window.MM || {};
 
     if (ev.type === 'all-done') {
       pending.delete(ev.requestId);
-      if (!pending.size) { streaming = null; refreshSendBtn(); }
+      // 还有其它请求在跑、或有新一轮正在搜索时，不能把 streaming 清掉
+      if (!pending.size && !searchPhase) { streaming = null; refreshSendBtn(); }
       if (ctx.mergeMsg) {
         // 综合请求结束：同步到当前版本的快照
         const am = ctx.am;
@@ -527,12 +809,13 @@ window.MM = window.MM || {};
         am.active = Array.isArray(am.versions) ? am.versions.length - 1 : -1;
       }
       // 重建轮次工具栏（版本导航 / 重新生成 / 综合回答入口）
-      const oldTools = wrap.querySelector('.round-tools[data-round="' + am.roundId + '"]');
+      const oldTools = byRound('.round-tools', am.roundId, wrap);
       if (oldTools) oldTools.remove();
       if (ctx.grid) ctx.grid.after(roundTools(am));
       MM.save();
       MM.sessions.render();
-      if (U.$('#tgl-auto').checked) doMerge(am.roundId);
+      // 整轮全失败时没有可合并的内容，不要弹「没有可合并的成功回答」
+      if (U.$('#tgl-auto').checked && hasUsefulResults(am.results)) doMerge(am.roundId);
       return;
     }
 
@@ -543,6 +826,11 @@ window.MM = window.MM || {};
         ctx.mergeMsg.content += ev.text;
         scheduleStreamPaint(body, function () { body.textContent = ctx.mergeMsg.content; });
       }
+      else if (ev.type === 'done' && ev.usage) {
+        // 综合也是真实请求，占用量要一并记下并显示，否则统计会漏掉这一项
+        ctx.mergeMsg.usage = ev.usage;
+        status.innerHTML = '✓ 完成' + usageBadge(ev.usage);
+      }
       else if (ev.type === 'error') {
         // 综合失败：回滚 merge 状态，允许用户再次点击“综合回答”
         ctx.mergeFailed = true; // 标记失败，随后的 all-done 不能把状态改回“完成”
@@ -551,7 +839,7 @@ window.MM = window.MM || {};
         if (ctx.am) {
           ctx.am.merge = null;
           syncMergeToVersion(ctx.am);
-          const oldTools = wrap.querySelector('.round-tools[data-round="' + ctx.roundId + '"]');
+          const oldTools = byRound('.round-tools', ctx.roundId, wrap);
           if (oldTools) oldTools.replaceWith(roundTools(ctx.am));
         }
       }
@@ -560,13 +848,12 @@ window.MM = window.MM || {};
 
     if (!ev.modelId) return;
     const res = ctx.assistantMsg.results.find(r => r.modelId === ev.modelId);
-    // 不用属性选择器拼字符串：模型 ID 里可能含引号/反斜杠，会抛 DOMException
-    const card = Array.from(ctx.grid.querySelectorAll('.answer-card')).find(function (c) {
-      return c.getAttribute('data-model-id') === ev.modelId;
-    });
-    if (!res || !card) return;
-    const status = card.querySelector('.ac-status');
-    const body = card.querySelector('.ac-body');
+    // 用建卡时缓存的节点引用，避免每个 delta 都遍历/查询 DOM
+    const refs = ctx.cards && ctx.cards.get(ev.modelId);
+    if (!res || !refs) return;
+    const card = refs.card;
+    const status = refs.status;
+    const body = refs.body;
 
     if (ev.type === 'start') {
       status.innerHTML = '<span class="spinner"></span> 生成中…';
@@ -575,31 +862,37 @@ window.MM = window.MM || {};
       scheduleStreamPaint(body, function () { body.textContent = res.content; });
     } else if (ev.type === 'reasoning') {
       res.reasoning = (res.reasoning || '') + ev.text;
-      let det = card.querySelector('details.reasoning');
-      if (!det) {
-        det = U.el('details', { class: 'reasoning' },
-          U.el('summary', {}, '查看思考过程'),
-          U.el('div', { class: 'r-body' }));
-        card.insertBefore(det, body);
+      if (!refs.reasoning) {
+        let det = card.querySelector('details.reasoning');
+        if (!det) {
+          det = U.el('details', { class: 'reasoning' },
+            U.el('summary', {}, '查看思考过程'),
+            U.el('div', { class: 'r-body' }));
+          card.insertBefore(det, body);
+        }
+        refs.reasoning = det.querySelector('.r-body');
       }
       // 与正文一样按帧合帧：长思考链下每个 delta 全量重写 textContent 是 O(n²)
-      const rBody = det.querySelector('.r-body');
-      scheduleStreamPaint(rBody, function () { rBody.textContent = res.reasoning; });
+      const rBody = refs.reasoning;
+      if (rBody) scheduleStreamPaint(rBody, function () { rBody.textContent = res.reasoning; });
     } else if (ev.type === 'done') {
       res.status = 'done'; res.ms = ev.ms; res.chars = ev.chars;
+      if (ev.usage) res.usage = ev.usage; // token 用量（服务端回传，无则不显示）
       status.innerHTML = statusHtml(res);
       body.classList.remove('streaming');
       body.classList.add('md');
-      body.innerHTML = MM.md.render(res.content);
+      body.innerHTML = mdHtml(res, res.content);
     } else if (ev.type === 'error') {
       if (/已停止/.test(ev.message)) { res.status = 'stopped'; res.content = res.content || ''; }
       else { res.status = 'error'; res.error = ev.message; }
+      // 已停止的回答也可能带出部分用量，一起存下来
+      if (ev.usage) res.usage = ev.usage;
       body.classList.remove('streaming');
       if (res.status === 'error') {
         body.innerHTML = '<div class="ac-error">✗ ' + U.esc(ev.message) + '</div>';
       } else if (res.content) {
         body.classList.add('md');
-        body.innerHTML = MM.md.render(res.content);
+        body.innerHTML = mdHtml(res, res.content);
       }
       status.innerHTML = statusHtml(res);
     }
@@ -610,8 +903,9 @@ window.MM = window.MM || {};
       // 停止失败不应变成未处理的 Promise 拒绝
       Promise.resolve(api.stop(id)).catch(function () { });
     }
-    // 搜索阶段尚无 pending 可中止：立即复位，dispatchRound 在搜索返回后检测到取消即退出
+    // 搜索阶段尚无 pending 可中止：立即复位并让令牌失效，dispatchRound 在搜索返回后检测到即退出
     streaming = null;
+    runToken++;
     setSendBtn(false);
   }
 
@@ -625,11 +919,44 @@ window.MM = window.MM || {};
     }
     if (streaming === sessionId) {
       streaming = null;
+      runToken++;
       setSendBtn(false);
     }
   }
 
   // ---------- 重新生成 ----------
+  // 没有回答的提问（搜索阶段被停止）用这个临时工具栏重发；回答开始后工具栏会被移除
+  function userRetryTools(msg) {
+    return U.el('div', { class: 'round-tools retry-only' },
+      U.el('button', { class: 'tool-btn', onclick: function () { retryUser(msg); } },
+        U.el('span', { class: 'ico' }, '↻'), '重新生成'));
+  }
+
+  async function retryUser(userMsg) {
+    if (streaming) { U.toast('请等待当前任务完成', true); return; }
+    const s = MM.sessions.current();
+    if (!s) return;
+    const idx = s.messages.indexOf(userMsg);
+    if (idx < 0) return;
+    // 只允许对"最后一条消息"重发：否则后面的新对话会被 splice 掉
+    if (idx !== s.messages.length - 1) {
+      U.toast('该提问后面已有新内容，请刷新后重试', true);
+      renderAll();
+      return;
+    }
+    const models = selectedModels();
+    if (!models.length) { U.toast('请先选择模型', true); return; }
+    // 正常情况下该提问就是最后一条；若后面还有残留消息，一并清掉避免重复
+    s.messages.splice(idx + 1);
+    for (const t of Array.from(document.querySelectorAll('.round-tools.retry-only'))) t.remove();
+    s.updatedAt = Date.now();
+    MM.save();
+    streaming = s.id;
+    setSendBtn(true);
+    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, false)
+      .catch(e => { streaming = null; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
+  }
+
   async function retryRound(roundId) {
     if (streaming) { U.toast('请等待当前任务完成', true); return; }
     const s = MM.sessions.current();
@@ -681,16 +1008,18 @@ window.MM = window.MM || {};
     // 综合回答挂在轮次上（不再作为独立消息），并同步进当前版本快照
     am.merge = { content: '', mode: source === 'frontend' ? 'frontend' : 'model', createdAt: Date.now() };
     s.updatedAt = Date.now();
-    MM.save();
+    // 前端合并是同步完成的，直接等下面的最终保存即可；只有模型综合需要先落盘占位
+    if (source !== 'frontend') MM.save();
 
     // 渲染实时卡片（先清掉该轮此前失败留下的综合卡片，避免重复堆叠）
     const wrap = U.$('#messages');
-    for (const stale of Array.from(wrap.querySelectorAll('.merge-card[data-round="' + roundId + '"]'))) stale.remove();
-    const oldTools = wrap.querySelector('.round-tools[data-round="' + roundId + '"]');
+    const staleCard = byRound('.merge-card', roundId, wrap);
+    if (staleCard) staleCard.remove();
+    const oldTools = byRound('.round-tools', roundId, wrap);
     if (oldTools) oldTools.replaceWith(roundTools(am));
     const card = mergeCard(am.merge, true, roundId);
     // 插到本轮回答网格之后（而不是消息列表末尾），旧轮次综合时不会跑到页面最下面
-    const gridEl = wrap.querySelector('.answers[data-round="' + roundId + '"]');
+    const gridEl = byRound('.answers', roundId, wrap);
     if (gridEl) gridEl.after(card); else wrap.appendChild(card);
     scrollBottom(true);
 
@@ -720,6 +1049,11 @@ window.MM = window.MM || {};
     // 按综合模型的上下文给提示词设上限，避免多份长回答顶爆上下文
     const promptBudget = Math.max(4000, (model.contextTokens || 32768) - (model.maxTokens || 4096) - 2048);
     const prompt = MM.merge.synthesisPrompt(userMsg.content, okResults, promptBudget);
+    // 综合也是一次真实提问：系统提示词同样要带上，否则综合结果会丢掉角色设定
+    const synthMsgs = [];
+    const sys = effectiveSystemPrompt(s);
+    if (sys) synthMsgs.push({ role: 'system', content: sys });
+    synthMsgs.push({ role: 'user', content: prompt });
     pending.set(reqId, {
       mergeMsg: am.merge,
       mergeBody: card.querySelector('.ac-body'),
@@ -729,7 +1063,7 @@ window.MM = window.MM || {};
       roundId: roundId
     });
     try {
-      await api.synthesize({ requestId: reqId, model: stripModel(model), messages: [{ role: 'user', content: prompt }] });
+      await api.synthesize({ requestId: reqId, model: stripModel(model), messages: synthMsgs });
     } catch (e) {
       pending.delete(reqId);
       streaming = null;
@@ -740,7 +1074,7 @@ window.MM = window.MM || {};
         am.merge = null;
         syncMergeToVersion(am);
       }
-      const oldTools = wrap.querySelector('.round-tools[data-round="' + roundId + '"]');
+      const oldTools = byRound('.round-tools', roundId, wrap);
       if (oldTools) oldTools.replaceWith(roundTools(am));
       const body = card && card.querySelector('.ac-body'), st = card && card.querySelector('.ac-status');
       if (body) { body.classList.remove('streaming'); body.innerHTML = '<div class="ac-error">✗ ' + U.esc(e.message) + '</div>'; }
@@ -761,14 +1095,16 @@ window.MM = window.MM || {};
     body.classList.remove('streaming');
     body.classList.add('md');
     body.innerHTML = MM.md.render(ctx.mergeMsg.content || '（空）');
-    // 失败/已停止时保留失败标记，不能被覆盖成完成状态
-    if (failed) status.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>';
-    else status.textContent = ctx.mergeMsg.mode === 'model' ? '✓ 完成' : '✓ 已合并';
+    // 失败/已停止时保留失败标记，不能被覆盖成完成状态；
+    // 综合请求的 token 用量一并显示（用量存在 mergeMsg 上，会随版本快照一起保留）
+    const mu = ctx.mergeMsg.usage;
+    if (failed) status.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(mu);
+    else status.innerHTML = (ctx.mergeMsg.mode === 'model' ? '✓ 完成' : '✓ 已合并') + usageBadge(mu);
     // 恢复工具栏（综合回答入口随 am.merge 状态更新）
     const wrap = U.$('#messages');
-    const grid = wrap.querySelector('.answers[data-round="' + ctx.roundId + '"]');
-    const mergeEl = wrap.querySelector('.merge-card[data-round="' + ctx.roundId + '"]');
-    const oldTools = wrap.querySelector('.round-tools[data-round="' + ctx.roundId + '"]');
+    const grid = byRound('.answers', ctx.roundId, wrap);
+    const mergeEl = byRound('.merge-card', ctx.roundId, wrap);
+    const oldTools = byRound('.round-tools', ctx.roundId, wrap);
     if (oldTools) oldTools.remove();
     // 与 renderAll 的顺序保持一致：回答网格 → 综合卡片 → 工具栏
     const anchor = mergeEl || grid;
@@ -776,23 +1112,35 @@ window.MM = window.MM || {};
   }
 
   // ---------- 滚动：贴底检测 + 智能跟随 ----------
-  function nearBottom() {
-    const w = U.$('#messages');
-    return w.scrollHeight - w.scrollTop - w.clientHeight < 140;
-  }
+  // stickBottom 由滚动事件维护：流式期间不再每帧读 scrollHeight（读布局会强制同步重排）
+  let stickBottom = true;
   function scrollBottom(force) {
     const w = U.$('#messages');
-    if (force || nearBottom()) w.scrollTop = w.scrollHeight;
+    if (force) stickBottom = true;
+    if (stickBottom) w.scrollTop = 1e9; // 超大值由浏览器夹紧到最大位置，避免读 scrollHeight
   }
 
-  // 流式渲染按帧合帧：同一帧内到达的多个 delta 只写一次 DOM、做一次布局读取
+  // 流式渲染按帧合帧：同一帧内所有卡片只写一次 DOM、只做一次滚动
   // （scrollHeight/scrollTop 读取会强制重排，4 模型并发时每秒可达数十次 delta）
+  let paintQueue = [];
+  let paintRaf = 0;
   function scheduleStreamPaint(el, paint) {
-    if (el._paintRaf) return;
-    el._paintRaf = requestAnimationFrame(function () {
-      el._paintRaf = null;
-      paint();
-      scrollBottom();
+    el._paint = paint; // 同一元素一帧内只保留最后一次（最新的完整文本）
+    if (el._paintQueued) return;
+    el._paintQueued = true;
+    paintQueue.push(el);
+    if (paintRaf) return;
+    paintRaf = requestAnimationFrame(function () {
+      paintRaf = 0;
+      const q = paintQueue;
+      paintQueue = [];
+      for (const node of q) {
+        node._paintQueued = false;
+        const fn = node._paint;
+        node._paint = null;
+        if (fn) fn();
+      }
+      scrollBottom(); // 整帧只滚动一次
     });
   }
 
@@ -814,6 +1162,31 @@ window.MM = window.MM || {};
 
   // ---------- 绑定 ----------
   function bind() {
+    // 会话提示词面板：展开 / 收起 / 清除；内容随输入写入当前会话并防抖落盘
+    const spBtn = U.$('#btn-session-prompt');
+    const spBox = U.$('#session-prompt-box');
+    const spTa = U.$('#session-prompt');
+    if (spBtn && spBox && spTa) {
+      spBtn.addEventListener('click', function () { togglePromptBox(); });
+      U.$('#btn-sp-close').addEventListener('click', function () { togglePromptBox(false); });
+      U.$('#btn-sp-clear').addEventListener('click', function () {
+        const s = MM.sessions.current();
+        if (s) { delete s.systemPrompt; MM.save(); }
+        spTa.value = '';
+        refreshPromptBadge();
+        U.toast('已清除本会话提示词');
+      });
+      // 输入即写入会话对象：面板可能被直接关掉，不点保存也不会丢
+      spTa.addEventListener('input', function () {
+        const s = MM.sessions.current();
+        if (!s) return;
+        const v = spTa.value.trim();
+        if (v) s.systemPrompt = spTa.value; else delete s.systemPrompt;
+        saveSoonPrompt();
+        refreshPromptBadge();
+      });
+    }
+
     U.$('#btn-new-chat').addEventListener('click', function () {
       if (streamingHere()) stopAll();
       MM.sessions.create();
@@ -843,7 +1216,7 @@ window.MM = window.MM || {};
     });
     U.$('#tgl-auto').addEventListener('change', function () {
       MM.state.config.synthesis.autoMerge = this.checked;
-      MM.save();
+      MM.save({ configOnly: true }); // 只改了 config，不需要复制整份会话历史
     });
     // 顶栏开关胶囊的高亮态跟随复选框（开启时文字变 accent 色，一眼可辨）
     for (const id of ['#tgl-search', '#tgl-auto']) {
@@ -856,8 +1229,9 @@ window.MM = window.MM || {};
     const wrap = U.$('#messages');
     const sb = U.$('#btn-scroll-bottom');
     wrap.addEventListener('scroll', function () {
-      const away = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight > 240;
-      sb.classList.toggle('show', away);
+      const gap = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight;
+      sb.classList.toggle('show', gap > 240);
+      stickBottom = gap < 140; // 用户滚回底部后恢复自动跟随
     }, { passive: true });
     sb.addEventListener('click', function () {
       wrap.scrollTo({ top: wrap.scrollHeight, behavior: 'smooth' });
@@ -874,5 +1248,10 @@ window.MM = window.MM || {};
     }, 150);
   }
 
-  MM.chat = { send, renderAll, renderChips, renderTitle, bind, stopSession };
+  MM.chat = {
+    send, renderAll, renderChips, renderTitle, bind, stopSession, refreshPromptBadge,
+    // 给 smoke 测试用的出口，不影响线上逻辑
+    _buildHistoryForTest: buildHistory,
+    _statusHtmlForTest: statusHtml
+  };
 })();

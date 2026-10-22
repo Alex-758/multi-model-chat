@@ -25,6 +25,33 @@ function emit(payload) {
   if (win && !win.isDestroyed()) win.webContents.send('chat:event', payload);
 }
 
+// 高频 delta 合批：每个模型每 ~30ms 最多发一条 IPC。
+// 渲染层本来就用 rAF 合帧，这里减少的是跨进程消息数量（4 模型并发时最明显）。
+// start/done/error 之前必须先把缓冲的文本发出去，保证顺序与内容完整。
+function makeEmitter(requestId, modelId) {
+  let text = '', reasoning = '', timer = null;
+  const flush = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    if (text) { emit({ requestId, modelId, type: 'delta', text }); text = ''; }
+    if (reasoning) { emit({ requestId, modelId, type: 'reasoning', text: reasoning }); reasoning = ''; }
+  };
+  const send = ev => {
+    if (ev.type === 'delta') {
+      text += ev.text;
+      if (!timer) timer = setTimeout(flush, 30);
+      return;
+    }
+    if (ev.type === 'reasoning') {
+      reasoning += ev.text;
+      if (!timer) timer = setTimeout(flush, 30);
+      return;
+    }
+    flush();
+    emit({ requestId, modelId, ...ev });
+  };
+  return { send, flush };
+}
+
 function createWindow() {
   win = new BrowserWindow({
     width: 1440,
@@ -78,15 +105,22 @@ function createWindow() {
 
 // ---------- 密钥保管 ----------
 // API Key 只存在于主进程内存与磁盘数据文件中，渲染层永远只拿到 hasKey 布尔标记
+function hasAnyKey(cfg) {
+  const isKey = v => typeof v === 'string' && !!v.trim();
+  const list = cfg && Array.isArray(cfg.providers) ? cfg.providers : [];
+  if (list.some(p => p && isKey(p.apiKey))) return true;
+  return !!(cfg && cfg.search && typeof cfg.search === 'object' && isKey(cfg.search.apiKey));
+}
 function sanitizeConfig(cfg) {
   const c = JSON.parse(JSON.stringify(cfg || {}));
   // 只接受字符串密钥：异常数据（对象等）按空处理，避免 .trim() 抛错导致整份配置读不出来
   const keyOf = v => (typeof v === 'string' ? v.trim() : '');
-  for (const p of (c.providers || [])) {
+  for (const p of (Array.isArray(c.providers) ? c.providers : [])) {
+    if (!p || typeof p !== 'object') continue;
     p.hasKey = !!keyOf(p.apiKey);
     delete p.apiKey;
   }
-  if (c.search) {
+  if (c.search && typeof c.search === 'object') {
     c.search.hasKey = !!keyOf(c.search.apiKey);
     delete c.search.apiKey;
   }
@@ -95,30 +129,44 @@ function sanitizeConfig(cfg) {
 
 // 渲染层传入的模型对象不含密钥：按 providerId 从主进程数据中解析
 function resolveModel(mLike) {
-  const pid = mLike.providerId || String(mLike.id || '').split('::')[0];
-  const p = (db.config.providers || []).find(x => x.id === pid);
-  const full = Object.assign({}, mLike, { apiKey: (p && p.apiKey) || '' });
+  const m = (mLike && typeof mLike === 'object') ? mLike : {};
+  const pid = m.providerId || String(m.id || '').split('::')[0];
+  const list = (db.config && Array.isArray(db.config.providers)) ? db.config.providers : [];
+  const p = list.find(x => x && x.id === pid);
+  const full = Object.assign({}, m, { apiKey: (p && p.apiKey) || '' });
   delete full.hasKey;
   return full;
 }
 
 // ---------- IPC：存储 ----------
-ipcMain.handle('store:all', () => ({ config: sanitizeConfig(db.config), sessions: db.sessions }));
+ipcMain.handle('store:all', () => ({
+  // 配置/会话字段可能是手改或旧版本留下的非法类型：归一成渲染层能处理的最小形状，
+  // 避免整个 IPC 抛错（渲染层会把读取失败当成严重错误并停止启动）
+  config: sanitizeConfig((db.config && typeof db.config === 'object') ? db.config : {}),
+  sessions: Array.isArray(db.sessions) ? db.sessions : []
+}));
 ipcMain.handle('store:save', (e, data) => {
   // 渲染层送来的 config 不含密钥：合并回主进程保管的部分，避免丢失/清空
   const incoming = (data && data.config) || {};
   const merged = JSON.parse(JSON.stringify(incoming));
-  const oldProviders = (db.config && db.config.providers) || [];
-  for (const p of (merged.providers || [])) {
-    const old = oldProviders.find(x => x.id === p.id);
+  const oldProviders = (db.config && Array.isArray(db.config.providers)) ? db.config.providers : [];
+  for (const p of (Array.isArray(merged.providers) ? merged.providers : [])) {
+    if (!p || typeof p !== 'object') continue;
+    const old = oldProviders.find(x => x && x.id === p.id);
     if (old && old.apiKey) p.apiKey = old.apiKey;
     delete p.hasKey;
   }
-  if (merged.search) {
+  if (merged.search && typeof merged.search === 'object') {
     if (!merged.search.apiKey && db.config && db.config.search) merged.search.apiKey = db.config.search.apiKey || '';
     delete merged.search.hasKey;
   }
-  db = { config: merged, sessions: (data && data.sessions) || [] };
+  // 渲染层只改配置时不会带 sessions：保留主进程内存里的会话，不能被空数组覆盖
+  db = {
+    config: merged,
+    sessions: Array.isArray(data && data.sessions)
+      ? data.sessions
+      : (Array.isArray(db.sessions) ? db.sessions : [])
+  };
   const r = store.save(db);
   // 多实例冲突：旧数据已备份，弹窗提示一次
   if (r && r.conflict && !conflictNotified) {
@@ -137,10 +185,11 @@ ipcMain.handle('secrets:set', (e, { id, key }) => {
   if (!id) return false;
   const k = String(key || '').trim();
   if (id === 'search') {
-    db.config.search = db.config.search || { provider: 'none' };
+    if (!db.config.search || typeof db.config.search !== 'object') db.config.search = { provider: 'none' };
     db.config.search.apiKey = k;
   } else {
-    const p = (db.config.providers || []).find(x => x.id === id);
+    const list = Array.isArray(db.config.providers) ? db.config.providers : [];
+    const p = list.find(x => x && x.id === id);
     if (!p) return false; // 服务商不存在：不要假装写入成功
     p.apiKey = k;
   }
@@ -149,9 +198,10 @@ ipcMain.handle('secrets:set', (e, { id, key }) => {
 });
 ipcMain.handle('secrets:clear', (e, { id }) => {
   if (id === 'search') {
-    if (db.config.search) db.config.search.apiKey = '';
+    if (db.config.search && typeof db.config.search === 'object') db.config.search.apiKey = '';
   } else {
-    const p = (db.config.providers || []).find(x => x.id === id);
+    const list = Array.isArray(db.config.providers) ? db.config.providers : [];
+    const p = list.find(x => x && x.id === id);
     if (p) p.apiKey = '';
   }
   store.save(db);
@@ -165,22 +215,31 @@ ipcMain.handle('chat:send', (e, payload) => {
   const ac = new AbortController();
   activeRequests.set(requestId, ac);
   (async () => {
-    const jobs = (targets || []).map(async ({ model, messages }) => {
-      const send = ev => emit({ requestId, modelId: model.id, ...ev });
-      send({ type: 'start' });
-      const t0 = Date.now();
-      try {
-        const { content, reasoning } = await providers.streamChat(resolveModel(model), messages, {
-          searchOn, signal: ac.signal, onEvent: send
-        });
-        send({ type: 'done', ms: Date.now() - t0, chars: content.length });
-      } catch (err) {
-        send({ type: 'error', message: (err && err.message) || String(err) });
-      }
-    });
-    await Promise.allSettled(jobs);
-    activeRequests.delete(requestId);
-    emit({ requestId, modelId: null, type: 'all-done' });
+    try {
+      // 非法 payload 不能留下未处理的 Promise 拒绝；过滤掉缺 model 的条目
+      const jobs = (Array.isArray(targets) ? targets : []).filter(t => t && t.model).map(async ({ model, messages }) => {
+        const em = makeEmitter(requestId, model.id);
+        const send = em.send;
+        send({ type: 'start' });
+        const t0 = Date.now();
+        try {
+          const { content, reasoning, usage } = await providers.streamChat(resolveModel(model), messages, {
+            searchOn, signal: ac.signal, onEvent: send
+          });
+          send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage });
+        } catch (err) {
+          // 已停止的回答也会带出已产生的 token 用量
+          send({ type: 'error', message: (err && err.message) || String(err), usage: (err && err.usage) || null });
+        }
+      });
+      await Promise.allSettled(jobs);
+    } catch (err) {
+      console.error('[chat:send] 请求处理失败：', err);
+    } finally {
+      // 无论成功/异常都要收尾，否则渲染层会一直停在"生成中"
+      activeRequests.delete(requestId);
+      emit({ requestId, modelId: null, type: 'all-done' });
+    }
   })();
   return true;
 });
@@ -191,16 +250,17 @@ ipcMain.handle('chat:synthesize', (e, payload) => {
   const ac = new AbortController();
   activeRequests.set(requestId, ac);
   (async () => {
-    const send = ev => emit({ requestId, modelId: '__merge__', ...ev });
+    const em = makeEmitter(requestId, '__merge__');
+    const send = em.send;
     send({ type: 'start' });
     const t0 = Date.now();
     try {
-      const { content } = await providers.streamChat(resolveModel(model), messages, {
+      const { content, usage } = await providers.streamChat(resolveModel(model), messages, {
         searchOn: false, signal: ac.signal, onEvent: send
       });
-      send({ type: 'done', ms: Date.now() - t0, chars: content.length });
+      send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage });
     } catch (err) {
-      send({ type: 'error', message: (err && err.message) || String(err) });
+      send({ type: 'error', message: (err && err.message) || String(err), usage: (err && err.usage) || null });
     }
     activeRequests.delete(requestId);
     emit({ requestId, modelId: null, type: 'all-done' });
@@ -269,7 +329,8 @@ ipcMain.handle('search:query', (e, { query, count }) => {
 });
 // 测试搜索：密钥由主进程合并（渲染层只传服务商选择）
 ipcMain.handle('search:test', (e, cfg) => {
-  const merged = Object.assign({}, (db.config && db.config.search) || {}, cfg || {});
+  const base = (db.config && db.config.search && typeof db.config.search === 'object') ? db.config.search : {};
+  const merged = Object.assign({}, base, (cfg && typeof cfg === 'object') ? cfg : {});
   return search.webSearch(merged, '今日科技新闻', 3);
 });
 
@@ -295,10 +356,15 @@ ipcMain.handle('data:import', async () => {
   if (r.canceled || !r.filePaths || !r.filePaths[0]) return null;
   try {
     const parsed = JSON.parse(fs.readFileSync(r.filePaths[0], 'utf8'));
-    if (!parsed || !parsed.config || !Array.isArray(parsed.sessions)) throw new Error('缺少 config/sessions 字段');
+    if (!parsed || !parsed.config || typeof parsed.config !== 'object' || !Array.isArray(parsed.sessions)) {
+      throw new Error('缺少 config/sessions 字段');
+    }
     // 兼容导入本应用内部的 store.json（密钥为 safeStorage 密文）：先解密再落盘
     const imported = store.decryptData(parsed);
-    db = { config: imported.config, sessions: imported.sessions };
+    // 会话条目必须过滤：null/字符串会让渲染层排序直接抛错，写回磁盘后下次启动即不可用
+    const sessions = imported.sessions.filter(s => s && typeof s === 'object');
+    for (const s of sessions) if (!Array.isArray(s.messages)) s.messages = [];
+    db = { config: imported.config, sessions: sessions };
     store.save(db);
     // 1.0 平铺旧结构原样返回（含密钥）：渲染层迁移逻辑需要读密钥并经 store:save 合并回主进程；
     // 新结构返回剥离密钥后的数据
@@ -330,6 +396,15 @@ app.whenReady().then(() => {
       title: '部分密钥无法解密',
       message: '检测到 ' + lostKeys + ' 个 API 密钥无法解密（通常是因为数据文件来自其它电脑或其它 Windows 用户）。\n\n' +
         '这些密钥已按空处理，请在「设置 → 模型配置」中重新填写。'
+    });
+  }
+  // 系统不支持安全存储时密钥会明文落盘：只在实际存有密钥时提示一次，避免每次启动都打扰
+  if (!store.encryptionAvailable() && hasAnyKey(db.config)) {
+    dialog.showMessageBox({
+      type: 'warning',
+      title: '密钥未加密保存',
+      message: '当前系统不支持 Electron 的安全存储（safeStorage），API 密钥将以明文形式保存在本机数据文件中。\n\n' +
+        '请勿把数据文件复制到网盘、聊天工具或不可信位置。'
     });
   }
   createWindow();

@@ -6,10 +6,34 @@ window.MM = window.MM || {};
   const U = MM.util;
 
   function sorted() {
-    return MM.state.sessions.slice().sort((a, b) => {
+    // 防御非法条目：导入/手改的数据里可能有 null，直接读 pinned 会抛错
+    return MM.state.sessions.filter(s => s && typeof s === 'object').slice().sort((a, b) => {
       if (!!b.pinned !== !!a.pinned) return b.pinned ? 1 : -1;
       return (b.updatedAt || 0) - (a.updatedAt || 0);
     });
+  }
+
+  // 整个会话累计的 token 消耗（含各模型回答 + 综合回答 + 历史版本）。
+  // 只统计服务端真实回传的用量，历史数据没有该字段时返回 0，界面就不显示，绝不估算。
+  // 按版本快照累加：重新生成后旧版本消耗仍计入（版本池里的每份快照都代表一次真实请求），
+  // 当前显示内容已包含在最后一份快照里，不能再额外加一遍。
+  function sessionTokens(s) {
+    let total = 0;
+    const add = u => { if (u) total += (u.input || 0) + (u.output || 0); };
+    for (const m of (s && s.messages) || []) {
+      if (!m || m.role !== 'assistant') continue;
+      const versions = Array.isArray(m.versions) && m.versions.length ? m.versions : null;
+      if (versions) {
+        for (const v of versions) {
+          for (const r of (v && v.results) || []) if (r) add(r.usage);
+          if (v && v.merge) add(v.merge.usage);
+        }
+      } else {
+        for (const r of (m.results) || []) if (r) add(r.usage);
+        if (m.merge) add(m.merge.usage);
+      }
+    }
+    return total;
   }
 
   function createSilent() {
@@ -42,7 +66,8 @@ window.MM = window.MM || {};
   function renameInline(id) {
     const s = MM.state.sessions.find(x => x.id === id);
     if (!s) return;
-    const item = U.$('#session-list .session-item[data-id="' + id + '"]');
+    // 不用属性选择器拼 id：导入的数据里 id 可能含引号，会抛 DOMException
+    const item = U.$$('#session-list .session-item').find(x => x.getAttribute('data-id') === id) || null;
     const titleEl = item ? item.querySelector('.s-title') : null;
     if (!titleEl) return;
     const input = U.el('input', { type: 'text', value: s.title, style: 'width:100%;font-size:13px;padding:2px 6px;border-radius:5px' });
@@ -111,6 +136,7 @@ window.MM = window.MM || {};
       }
       const roundCount = (s.messages || []).filter(m => m.role === 'user').length;
       const timeLabel = U.fmtTime(s.updatedAt || s.createdAt);
+      const tok = sessionTokens(s);
       const item = U.el('div', {
         class: 'session-item' + (s.id === MM.state.currentId ? ' active' : ''),
         'data-id': s.id,
@@ -121,7 +147,9 @@ window.MM = window.MM || {};
           U.el('div', { class: 's-title' },
             s.pinned ? U.el('span', { class: 'pin-dot', title: '已置顶' }) : null,
             s.title),
-          U.el('div', { class: 's-time' }, (timeLabel ? timeLabel + ' · ' : '') + roundCount + ' 轮')
+          U.el('div', { class: 's-time' },
+            (timeLabel ? timeLabel + ' · ' : '') + roundCount + ' 轮' +
+            (tok ? ' · ' + MM.modelInfo.fmtTokens(tok) + ' tok' : ''))
         ),
         U.el('div', { class: 's-actions' },
           U.el('button', { title: s.pinned ? '取消置顶' : '置顶', onclick: e => { e.stopPropagation(); togglePin(s.id); } }, s.pinned ? '已顶' : '置顶'),
@@ -134,5 +162,9 @@ window.MM = window.MM || {};
     }
   }
 
-  MM.sessions = { create, createSilent, current, switchTo, renameInline, togglePin, remove, render, sorted };
+  MM.sessions = {
+    create, createSilent, current, switchTo, renameInline, togglePin, remove, render, sorted,
+    // 给 smoke 测试用的出口，不影响线上逻辑
+    _sessionTokensForTest: sessionTokens
+  };
 })();

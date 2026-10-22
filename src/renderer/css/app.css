@@ -210,8 +210,32 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   border-radius: var(--radius-lg); padding: 10px 14px; line-height: 1.65;
 }
 .user-bubble > div:first-child { white-space: pre-wrap; word-break: break-word; }
-.copy-hint { opacity: .6; font-size: 11px; margin-top: 4px; text-align: right; cursor: pointer; }
+.user-bubble > div.hidden { display: none; }
+/* 消息操作：复制 / 编辑并排，避免两个 hint 换行错位 */
+.copy-hints { display: flex; justify-content: flex-end; gap: 12px; margin-top: 4px; }
+.copy-hint { opacity: .6; font-size: 11px; cursor: pointer; }
 .copy-hint:hover { opacity: 1; }
+/* 用户消息编辑态：气泡内嵌一个输入框，取消后还原原文 */
+.edit-box { margin: 2px 0; }
+.edit-input {
+  width: 100%; border: none; border-radius: 8px; background: rgba(255,255,255,.12);
+  color: #fff; padding: 7px 9px; font-size: 13px; line-height: 1.6;
+  font-family: inherit; resize: vertical; min-height: 60px; box-sizing: border-box;
+}
+.edit-input:focus { outline: none; background: rgba(255,255,255,.18); }
+.edit-input::placeholder { color: rgba(255,255,255,.6); }
+.edit-actions {
+  display: flex; align-items: center; gap: 8px; justify-content: flex-end;
+  margin-top: 7px; font-size: 11px;
+}
+.edit-hint { margin-right: auto; opacity: .75; color: rgba(255,255,255,.9); }
+/* 编辑态下的按钮：气泡是深色，反色处理 */
+.edit-box .btn-ghost { color: rgba(255,255,255,.85); border: none; padding: 4px 9px; }
+.edit-box .btn-ghost:hover { color: #fff; background: rgba(255,255,255,.14); }
+.edit-box .btn-primary {
+  background: #fff; color: var(--user-bubble); padding: 4px 12px; font-size: 12px; border: none;
+}
+.edit-box .btn-primary:hover { background: rgba(255,255,255,.88); }
 
 /* 搜索来源 / 思考过程：与卡片正文左边缘对齐 */
 .sources { margin: 0 13px 10px; font-size: 12px; }
@@ -262,6 +286,13 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .badge.ok { background: rgba(26,127,78,.12); color: var(--ok); }
 .badge.err { background: var(--danger-soft); color: var(--danger); }
 .badge.muted { background: var(--panel-2); color: var(--muted); }
+/* token 用量：与其他徽章区分，淡蓝提示「这是消耗统计」 */
+.badge.tok { background: rgba(79,91,239,.10); color: var(--accent); }
+/* 轮次工具栏末尾的本轮合计 */
+.round-tok {
+  margin-left: auto; font-size: 11px; color: var(--muted);
+  background: var(--panel-2); border-radius: 10px; padding: 3px 9px; white-space: nowrap;
+}
 .ac-body { padding: 12px 13px; font-size: 13.5px; line-height: 1.75; overflow-x: hidden; word-break: break-word; }
 .ac-body.streaming { white-space: pre-wrap; }
 .ac-error { color: var(--danger); font-size: 12.5px; word-break: break-all; }
@@ -300,6 +331,23 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 /* ---------- 输入区 ---------- */
 #composer { flex-shrink: 0; padding: 6px var(--gut) 16px; }
 #model-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+/* 会话提示词面板：可收起，收起时只留「提示词」按钮 */
+#session-prompt-box {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel);
+  padding: 8px 10px; margin-bottom: 10px;
+}
+#session-prompt-box.hidden { display: none; }
+.sp-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.sp-title { font-size: 12px; font-weight: 600; }
+.sp-hint { flex: 1; font-size: 11px; color: var(--muted); }
+.sp-head .btn-ghost { font-size: 11px; padding: 2px 8px; }
+#session-prompt {
+  width: 100%; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2);
+  resize: vertical; min-height: 56px; padding: 7px 9px; font-size: 12.5px; line-height: 1.6;
+}
+#session-prompt:focus { outline: none; border-color: var(--accent); }
+/* 顶栏提示词按钮：本会话已设提示词时点亮，一眼可辨 */
+#btn-session-prompt.on { color: var(--accent); border-color: var(--accent); }
 .chip {
   position: relative;
   display: inline-flex; align-items: center; height: 26px; padding: 0 12px 0 22px;
@@ -498,6 +546,15 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .field .hint { font-size: 11px; color: var(--muted); margin-top: 6px; line-height: 1.6; max-width: 620px; }
 .field input[type=text], .field input[type=password], .field input[type=number] { width: 100%; }
 .field select { width: 100%; max-width: 420px; }
+/* 系统提示词：长文本输入框，宽度与内容区对齐 */
+#sp-global { width: 100%; max-width: 720px; min-height: 150px; resize: vertical; font-family: inherit; }
+.prompt-tips {
+  margin-top: 18px; padding: 12px 14px; border-radius: var(--radius);
+  background: var(--panel-2); font-size: 12px; color: var(--muted); line-height: 1.9;
+}
+.prompt-tips .pt-title { font-weight: 600; color: var(--text); margin-bottom: 2px; }
+.prompt-tips ul { margin: 0; padding-left: 18px; }
+.prompt-tips li::marker { color: var(--muted); }
 .field-row { display: flex; gap: 8px; align-items: center; }
 .field-row input { flex: 1; }
 .field-row .btn-secondary { flex: none; padding: 0 12px; }

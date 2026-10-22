@@ -50,17 +50,21 @@ function decryptValue(v) {
 function encryptSecrets(data) {
   if (!data || !data.config || !canEncrypt()) return data;
   const cfg = JSON.parse(JSON.stringify(data.config));
-  for (const p of (cfg.providers || [])) p.apiKey = encryptValue(p.apiKey);
-  if (cfg.search) cfg.search.apiKey = encryptValue(cfg.search.apiKey);
+  for (const p of (Array.isArray(cfg.providers) ? cfg.providers : [])) {
+    if (p && typeof p === 'object') p.apiKey = encryptValue(p.apiKey);
+  }
+  if (cfg.search && typeof cfg.search === 'object') cfg.search.apiKey = encryptValue(cfg.search.apiKey);
   return Object.assign({}, data, { config: cfg });
 }
 
 // 把 { config, sessions } 里的密钥解密（导入内部 store.json 时也走这里）
 function decryptData(data) {
-  if (!data || typeof data !== 'object' || !data.config) return data;
+  if (!data || typeof data !== 'object' || !data.config || typeof data.config !== 'object') return data;
   const cfg = data.config;
-  for (const p of (cfg.providers || [])) p.apiKey = decryptValue(p.apiKey);
-  if (cfg.search) cfg.search.apiKey = decryptValue(cfg.search.apiKey);
+  for (const p of (Array.isArray(cfg.providers) ? cfg.providers : [])) {
+    if (p && typeof p === 'object') p.apiKey = decryptValue(p.apiKey);
+  }
+  if (cfg.search && typeof cfg.search === 'object') cfg.search.apiKey = decryptValue(cfg.search.apiKey);
   return data;
 }
 
@@ -93,6 +97,8 @@ function load() {
 
 function corruptInfo() { return corrupt; }
 function decryptInfo() { return decryptFailures; }
+// 当前系统是否支持加密（Windows 下为 DPAPI）。不可用时密钥会以明文落盘，界面需要提示。
+function encryptionAvailable() { return canEncrypt(); }
 
 function save(data) {
   // 并发检测：磁盘上的 mtime 与本进程记录不一致 => 被其他实例/进程改过
@@ -113,4 +119,4 @@ function save(data) {
   return { conflict };
 }
 
-module.exports = { init, load, save, dir, corruptInfo, decryptInfo, decryptData };
+module.exports = { init, load, save, dir, corruptInfo, decryptInfo, decryptData, encryptionAvailable };

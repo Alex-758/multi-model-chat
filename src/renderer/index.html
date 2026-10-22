@@ -33,6 +33,7 @@
       <header id="topbar">
         <div id="session-title" title="双击重命名">新会话</div>
         <div class="topbar-actions">
+          <button id="btn-session-prompt" class="btn-ghost" title="为当前会话单独设置系统提示词（留空则用全局提示词）">提示词</button>
           <label class="toggle" id="tgl-search-wrap" title="优先使用各服务商原生联网能力，并可在设置中配置通用搜索 API 注入结果">
             <input type="checkbox" id="tgl-search"><span class="tgl-track"></span><span class="tgl-label">联网搜索</span>
           </label>
@@ -48,6 +49,16 @@
 
       <footer id="composer">
         <div id="model-chips" title="选择要同时调用的模型（可多选）"></div>
+        <div id="session-prompt-box" class="hidden">
+          <div class="sp-head">
+            <span class="sp-title">会话提示词</span>
+            <span class="sp-hint" id="sp-hint"></span>
+            <button id="btn-sp-clear" class="btn-ghost" title="清空后改用全局提示词">清除</button>
+            <button id="btn-sp-close" class="btn-ghost" title="收起（内容保留）">收起</button>
+          </div>
+          <textarea id="session-prompt" rows="3"
+            placeholder="仅本会话生效；留空则使用「设置 → 系统提示词」里的全局提示词"></textarea>
+        </div>
         <div class="input-row">
           <textarea id="input" rows="1"
             placeholder="输入消息…  Enter 发送，Shift+Enter 换行"></textarea>
@@ -66,6 +77,7 @@
         <button class="settings-nav active" data-pane="models">模型配置</button>
         <button class="settings-nav" data-pane="search">联网搜索</button>
         <button class="settings-nav" data-pane="synth">综合回答</button>
+        <button class="settings-nav" data-pane="prompt">系统提示词</button>
         <button class="settings-nav" data-pane="data">数据管理</button>
         <div class="settings-spacer"></div>
         <button id="btn-settings-close" class="btn-ghost">关闭</button>
@@ -74,6 +86,7 @@
         <div id="pane-models" class="settings-pane active"></div>
         <div id="pane-search" class="settings-pane"></div>
         <div id="pane-synth" class="settings-pane"></div>
+        <div id="pane-prompt" class="settings-pane"></div>
         <div id="pane-data" class="settings-pane"></div>
       </div>
     </div>

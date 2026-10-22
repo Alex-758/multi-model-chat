@@ -91,7 +91,9 @@ MM.defaults = {
   DEFAULT_CONFIG: {
     providers: [],
     search: { provider: 'bing', apiKey: '' },
-    synthesis: { synthSource: 'frontend', autoMerge: true }
+    synthesis: { synthSource: 'frontend', autoMerge: true },
+    // 全局系统提示词：对所有模型、所有会话生效（按会话覆盖见 session.systemPrompt）
+    systemPrompt: ''
   }
 };
 
@@ -289,21 +291,39 @@ MM.defaults = {
       providers,
       // 不注入 apiKey 占位：渲染层状态里不该出现密钥字段（hasKey 才是渲染层可见的标记）
       search: Object.assign({ provider: 'bing' }, cfg.search || {}),
-      synthesis
+      synthesis,
+      // 老配置没有此字段：显式归一成字符串，避免界面取到 undefined
+      systemPrompt: (typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt : '')
     });
   };
 
-  // 渲染层不持有密钥：主进程接管保存后，把明文密钥从渲染层状态中剥离
+  // 渲染层不持有密钥：主进程接管保存后，把明文密钥从渲染层状态中剥离。
+  // 注意 hasKey 不能只用 apiKey 重算：主进程返回的配置本来就没有 apiKey（只有 hasKey），
+  // 重算会把"已保存密钥"全部误标成 false（导入备份后曾出现该问题）。
   MM.stripSecrets = function (cfg) {
-    for (const p of (cfg.providers || [])) {
-      p.hasKey = !!(p.apiKey || '').trim();
+    const hasPlain = v => typeof v === 'string' && !!v.trim();
+    for (const p of (Array.isArray(cfg.providers) ? cfg.providers : [])) {
+      if (!p || typeof p !== 'object') continue;
+      p.hasKey = hasPlain(p.apiKey) || p.hasKey === true;
       delete p.apiKey;
     }
-    if (cfg.search) {
-      cfg.search.hasKey = !!(cfg.search.apiKey || '').trim();
+    if (cfg.search && typeof cfg.search === 'object') {
+      cfg.search.hasKey = hasPlain(cfg.search.apiKey) || cfg.search.hasKey === true;
       delete cfg.search.apiKey;
     }
     return cfg;
+  };
+
+  // 会话条目校验：磁盘/导入文件里可能有 null、字符串等非法条目。
+  // 不清理会在排序时读 s.pinned 抛错，导致启动即失败，且坏数据可能被写回磁盘。
+  MM.normalizeSessions = function (list) {
+    const out = [];
+    for (const s of (Array.isArray(list) ? list : [])) {
+      if (!s || typeof s !== 'object') continue;
+      if (!Array.isArray(s.messages)) s.messages = [];
+      out.push(s);
+    }
+    return out;
   };
 
   // 旧数据迁移：
@@ -330,6 +350,12 @@ MM.defaults = {
       // 版本快照种子
       for (const am of s.messages) {
         if (!am || typeof am !== 'object') continue;
+        // 旧数据可能没有 roundId：补一个唯一值。
+        // 否则「重新生成 / 综合回答」按 roundId 查找时会命中第一条无 id 的回答（改错轮次）。
+        if (am.role === 'assistant' && !am.roundId) {
+          am.roundId = U.uid();
+          changed = true;
+        }
         if (am.role !== 'assistant' || !Array.isArray(am.results) || !am.results.length) continue;
         if (!Array.isArray(am.versions) || !am.versions.length) {
           am.versions = [{
@@ -357,10 +383,19 @@ MM.defaults = {
     };
 
     let saved = null;
-    try { saved = await api.getAll(); } catch (e) { saved = null; }
-    if (saved && saved.config) MM.state.config = MM.normalizeConfig(saved.config);
+    try {
+      saved = await api.getAll();
+    } catch (e) {
+      // 读取失败 ≠ 首次安装：继续往下会 createSilent() 并立刻落盘，
+      // 用空配置覆盖磁盘上的全部会话与密钥。这里必须停下来交给可见的错误界面。
+      throw new Error('读取本地数据失败，已停止启动以避免覆盖原有数据：' + ((e && e.message) || e));
+    }
+    if (!saved || typeof saved !== 'object' || !saved.config || typeof saved.config !== 'object' || !Array.isArray(saved.sessions)) {
+      throw new Error('读取本地数据失败（主进程返回的数据格式异常），已停止启动以避免覆盖原有数据。');
+    }
+    MM.state.config = MM.normalizeConfig(saved.config);
     // 恢复历史会话：缺了这一步会以空会话覆盖磁盘上的全部记录
-    if (saved && Array.isArray(saved.sessions)) MM.state.sessions = saved.sessions;
+    MM.state.sessions = MM.normalizeSessions(saved.sessions);
     if (!MM.state.sessions.length) MM.sessions.createSilent();
     // 旧格式会话迁移（merge 折叠 + 版本快照种子）
     if (MM.migrateSessions(MM.state.sessions)) MM.save();
@@ -390,9 +425,14 @@ MM.defaults = {
   const U = MM.util;
 
   let saveFailToastAt = 0;
-  MM.save = function () {
+  MM.save = function (opts) {
+    // configOnly：只保存配置（设置页、全局提示词）。不传 sessions，
+    // 避免把整份会话历史反复结构化克隆给主进程；主进程会保留它内存里的会话数据。
+    const payload = (opts && opts.configOnly)
+      ? { config: MM.state.config }
+      : { config: MM.state.config, sessions: MM.state.sessions };
     // 返回是否落盘成功：调用方据此判断能否安全丢弃本地明文密钥等临时状态
-    return api.saveAll({ config: MM.state.config, sessions: MM.state.sessions })
+    return api.saveAll(payload)
       .then(function () { return true; })
       .catch(function (e) {
         // 写盘失败不能静默：5 秒内最多提示一次，避免防抖保存刷屏

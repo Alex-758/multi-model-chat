@@ -4,6 +4,13 @@
 
 function normalizeBase(url) { return (url || '').trim().replace(/\/+$/, ''); }
 
+// 支持 stream_options.include_usage 的预置服务商。
+// 只对确认支持的服务商开启：自定义/自托管端点（Ollama、vLLM 等）传未知参数可能报错，
+// Anthropic 格式自带 usage，不需要此参数。
+const STREAM_USAGE_PROVIDERS = {
+  deepseek: 1, moonshot: 1, dashscope: 1, zhipu: 1, openrouter: 1, openai: 1
+};
+
 function chatEndpoint(m) {
   const base = normalizeBase(m.baseUrl);
   if (m.fullUrl) return base; // 用户填的就是完整 URL
@@ -65,6 +72,12 @@ function buildBody(m, messages, opts) {
       body.max_tokens = Math.floor(m.maxTokens);
     }
   }
+  // 流式用量统计：OpenAI 格式默认不在流里回 usage，需显式开启。
+  // 只对确认支持该参数的服务商开启——未知端点/自定义端点传未知参数可能直接 400，
+  // Anthropic 格式自带 usage（message_start / message_delta），无需此参数。
+  if (stream && m.apiFormat !== 'anthropic' && STREAM_USAGE_PROVIDERS[m.provider || m.id]) {
+    body.stream_options = { include_usage: true };
+  }
   if (searchOn) {
     if (m.provider === 'dashscope') body.enable_search = true;           // 阿里百炼原生搜索
     if (m.provider === 'zhipu') {                                        // 智谱原生搜索工具
@@ -76,6 +89,43 @@ function buildBody(m, messages, opts) {
 
 async function readError(res) {
   return friendlyHttpError(res.status, await readDetail(res));
+}
+
+// 把"完整 JSON 响应"归一成与流式一致的形状（兼容 OpenAI / Anthropic）。
+// 部分兼容端点或代理会忽略 stream:true 直接返回完整 JSON，只按 SSE 解析会得到空白回答。
+function textOf(v) {
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.map(x => (typeof x === 'string' ? x : (x && x.text) || '')).join('');
+  return '';
+}
+function extractFull(j, format) {
+  const out = { content: '', reasoning: '', input: null, output: null, error: '' };
+  if (!j || typeof j !== 'object') return out;
+  if (format === 'anthropic') {
+    for (const b of (Array.isArray(j.content) ? j.content : [])) {
+      if (!b) continue;
+      if (b.type === 'text' && b.text) out.content += b.text;
+      else if (b.type === 'thinking' && b.thinking) out.reasoning += b.thinking;
+    }
+    const u = j.usage || {};
+    if (u.input_tokens != null) out.input = u.input_tokens;
+    if (u.output_tokens != null) out.output = u.output_tokens;
+  } else {
+    const ch = (j.choices && j.choices[0]) || null;
+    const msg = (ch && (ch.message || ch.delta)) || {};
+    out.content = textOf(msg.content);
+    out.reasoning = msg.reasoning_content || msg.reasoning || '';
+    if (!out.content && ch && typeof ch.text === 'string') out.content = ch.text;
+    const u = j.usage || {};
+    if (u.prompt_tokens != null) out.input = u.prompt_tokens;
+    if (u.completion_tokens != null) out.output = u.completion_tokens;
+    if (out.input == null && u.input_tokens != null) out.input = u.input_tokens;
+    if (out.output == null && u.output_tokens != null) out.output = u.output_tokens;
+  }
+  const e = j.error;
+  if (e) out.error = String(typeof e === 'string' ? e : (e.message || e.msg || JSON.stringify(e))).slice(0, 200);
+  else if (!out.content && !out.reasoning && typeof j.message === 'string') out.error = j.message.slice(0, 200);
+  return out;
 }
 
 // 流式对话。onEvent({type:'delta'|'reasoning', text})
@@ -96,6 +146,17 @@ async function streamChat(m, messages, opts) {
   };
   bumpIdle();
   let content = '', reasoning = '';
+  // token 用量：各服务商字段名不同，统一归一成 {input, output}；无法取得时为 null，界面就不显示
+  let usage = null;
+  const noteUsage = (inp, out) => {
+    if (inp == null && out == null) return;
+    usage = {
+      input: (usage && usage.input) || 0,
+      output: (usage && usage.output) || 0
+    };
+    if (inp != null) usage.input = Math.max(usage.input, Math.floor(inp));
+    if (out != null) usage.output = Math.max(usage.output, Math.floor(out));
+  };
   try {
     let res;
     try {
@@ -114,12 +175,14 @@ async function streamChat(m, messages, opts) {
     if (!res.ok) throw new Error(await readError(res));
     if (!res.body) throw new Error('服务端返回了空响应（无响应体）');
 
-    const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
+    let sawData = false; // 是否出现过 SSE 的 data: 行
+    let rawText = '';    // 未知 Content-Type 时用于回退成"完整 JSON"解析
     // 单行 SSE 处理；抽成函数是为了流结束时能处理最后一行（可能没有换行结尾）
     const handleLine = (line) => {
       if (!line.startsWith('data:')) return;
+      sawData = true;
       const data = line.slice(5).trim();
       if (!data || data === '[DONE]') return;
       let j;
@@ -130,10 +193,19 @@ async function streamChat(m, messages, opts) {
           const d = j.delta || {};
           if (d.type === 'text_delta' && d.text) { content += d.text; onEvent({ type: 'delta', text: d.text }); }
           else if (d.type === 'thinking_delta' && d.thinking) { reasoning += d.thinking; onEvent({ type: 'reasoning', text: d.thinking }); }
+        } else if (j.type === 'message_start') {
+          // Anthropic 的 usage 分两次到：起点只有输入，终点才有输出，需要累加
+          const u = j.message && j.message.usage;
+          if (u) noteUsage(u.input_tokens, u.output_tokens);
+        } else if (j.type === 'message_delta') {
+          const u = j.usage;
+          if (u) noteUsage(u.input_tokens, u.output_tokens);
         } else if (j.type === 'error') {
           throw new Error(j.error && j.error.message || '流式返回错误');
         }
       } else {
+        // 用量可能出现在任意 chunk（多数服务商只在最后一块），覆盖而非累加
+        if (j.usage) noteUsage(j.usage.prompt_tokens, j.usage.completion_tokens);
         const ch = j.choices && j.choices[0];
         if (!ch) return;
         const d = ch.delta || {};
@@ -142,6 +214,30 @@ async function streamChat(m, messages, opts) {
         if (r) { reasoning += r; onEvent({ type: 'reasoning', text: r }); }
       }
     };
+
+    // 明确是 JSON：一次性读完按完整响应解析（有些端点会忽略 stream:true）
+    const ctype = String(res.headers.get('content-type') || '').toLowerCase();
+    if (ctype.indexOf('json') >= 0 && ctype.indexOf('event-stream') < 0) {
+      const text = await res.text();
+      let full = null;
+      try { full = extractFull(JSON.parse(text), m.apiFormat); } catch (e) { full = null; }
+      if (full) {
+        if (!full.content && !full.reasoning) {
+          throw new Error(full.error ? '服务端返回错误：' + full.error : '服务端未返回任何内容（响应格式无法识别）');
+        }
+        if (full.content) { content = full.content; onEvent({ type: 'delta', text: full.content }); }
+        if (full.reasoning) { reasoning = full.reasoning; onEvent({ type: 'reasoning', text: full.reasoning }); }
+        noteUsage(full.input, full.output);
+        return { content, reasoning, usage };
+      }
+      // 不是 JSON：按 SSE 文本继续解析（有些端点 Content-Type 写错）
+      for (const line of text.split('\n')) handleLine(line.trim());
+      if (!content && !reasoning && !sawData) throw new Error('服务端未返回任何内容（响应格式无法识别）');
+      return { content, reasoning, usage };
+    }
+
+    // 流式读取（Content-Type 是 event-stream，或未声明为 JSON）
+    const reader = res.body.getReader();
     for (;;) {
       let chunk;
       try {
@@ -154,7 +250,9 @@ async function streamChat(m, messages, opts) {
       const { done, value } = chunk;
       if (done) break;
       bumpIdle(); // 收到数据，重置空闲计时
-      buf += dec.decode(value, { stream: true });
+      const text = dec.decode(value, { stream: true });
+      buf += text;
+      if (!sawData) rawText += text;
       let idx;
       while ((idx = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, idx).trim();
@@ -163,12 +261,27 @@ async function streamChat(m, messages, opts) {
       }
     }
     if (buf.trim()) handleLine(buf.trim()); // 末尾无换行的最后一条数据
-    return { content, reasoning };
+    // Content-Type 缺失/写错且整段没有 data: 行：可能是被当成流的完整 JSON
+    if (!content && !reasoning && !sawData && rawText.trim()) {
+      let full = null;
+      try { full = extractFull(JSON.parse(rawText), m.apiFormat); } catch (e) { full = null; }
+      if (full && (full.content || full.reasoning)) {
+        if (full.content) { content = full.content; onEvent({ type: 'delta', text: full.content }); }
+        if (full.reasoning) { reasoning = full.reasoning; onEvent({ type: 'reasoning', text: full.reasoning }); }
+        noteUsage(full.input, full.output);
+      } else if (full && full.error) {
+        throw new Error('服务端返回错误：' + full.error);
+      }
+    }
+    if (!content && !reasoning && !sawData) throw new Error('服务端未返回任何内容（响应格式无法识别）');
+    return { content, reasoning, usage };
   } catch (e) {
     if (abortedByTimeout) throw new Error('连接超时：服务器超过 120 秒没有返回数据，已中断');
     if ((signal && signal.aborted) || /abort/i.test(String(e && e.name))) {
-      const err = new Error('已停止'); err.stopped = true; throw err;
+      // 已停止也要把已产生的 token 用量带出去，界面才能对半截回答显示统计
+      const err = new Error('已停止'); err.stopped = true; err.usage = usage; throw err;
     }
+    e.usage = usage;
     throw e;
   } finally {
     if (idleTimer) clearTimeout(idleTimer);

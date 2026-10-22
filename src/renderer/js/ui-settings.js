@@ -9,7 +9,7 @@ window.MM = window.MM || {};
 
   let closeTimer = null; // 关闭动画定时器（防快速开/关互相打架）
   // 行内编辑防抖自动落盘：应用崩溃/强杀时最多丢失 600ms 内的编辑
-  const saveSoon = U.debounce(() => { MM.save(); syncModelConsumers(); }, 600);
+  const saveSoon = U.debounce(() => { MM.save({ configOnly: true }); syncModelConsumers(); }, 600);
 
   // ---------- 打开 / 关闭 ----------
   function open() {
@@ -19,6 +19,7 @@ window.MM = window.MM || {};
     renderModels();
     renderSearch();
     renderSynth();
+    renderPrompt();
     renderData();
     // 模型目录每次运行只取一次（主进程有 7 天缓存）：避免每次打开设置页都跨进程传 1MB+
     if (!MM.state.catalog) {
@@ -40,7 +41,7 @@ window.MM = window.MM || {};
       closeTimer = null;
     }, 150);
     // 行内编辑自动保存，并同步聊天页选择器与综合回答下拉
-    MM.save();
+    MM.save({ configOnly: true });
     syncModelConsumers();
   }
 
@@ -177,7 +178,7 @@ window.MM = window.MM || {};
         const p = { id: U.uid(), name: '自定义服务商', provider: 'custom', apiFormat: 'openai', baseUrl: '', apiKey: '', fullUrl: false, preset: false, models: [{ modelId: '', name: '', enabled: true }] };
         providers().push(p);
         editingId = p.id;
-        MM.save();
+        MM.save({ configOnly: true });
         renderModels();
       }
     }, '添加自定义服务商'));
@@ -191,7 +192,7 @@ window.MM = window.MM || {};
             providers().push(copy);
           }
         }
-        MM.save(); renderModels(); syncModelConsumers();
+        MM.save({ configOnly: true }); renderModels(); syncModelConsumers();
         U.toast('已恢复预置服务商');
       }
     }, '恢复预置服务商'));
@@ -230,7 +231,7 @@ window.MM = window.MM || {};
     try {
       const list = await api.listModels({ apiFormat: p.apiFormat, baseUrl: p.baseUrl, fullUrl: p.fullUrl, providerId: p.id, provider: p.provider || p.id });
       getCache()[p.id] = list;
-      MM.save();
+      MM.save({ configOnly: true });
       return list;
     } catch (e) {
       U.toast('获取失败：' + e.message, true);
@@ -256,11 +257,13 @@ window.MM = window.MM || {};
     // 上一次识别对应的模型 ID：只有 ID 变化时才回填，避免失焦时覆盖用户手填的上下文/最大输出
     let lastAutoId = mo.modelId || '';
 
-    function applyInfo() {
+    function applyInfo(persist) {
       const id = midInput.value.trim();
       if (!id) { infoHint.textContent = ''; return; }
       const meta = MM.modelInfo.guess(id, findMeta(p, id), MM.state.catalog, mo.multimodal, p.provider || p.id);
       const idChanged = id !== lastAutoId;
+      // 用户手动改了模型 ID：不再算"预置自带"，否则下次启动会被旧 ID 迁移规则改写回去
+      if (idChanged && id) delete mo.fromPreset;
       if ((idChanged || !ctxInput.value) && meta.contextTokens) ctxInput.value = meta.contextTokens;
       if ((idChanged || !outInput.value) && meta.maxOutputTokens) outInput.value = meta.maxOutputTokens;
       lastAutoId = id;
@@ -268,7 +271,9 @@ window.MM = window.MM || {};
       mo.contextTokens = ctxInput.value ? parseInt(ctxInput.value, 10) : undefined;
       mo.maxTokens = outInput.value ? parseInt(outInput.value, 10) : undefined;
       mo.multimodal = meta.multimodal != null ? meta.multimodal : mo.multimodal;
-      saveSoon(); // 落盘时同步聊天页选择器，避免逐条目重建
+      // 挂载时的自动识别不落盘：打开设置页会为每个模型行触发一次，没必要写盘。
+      // 用户真正编辑（失焦/选择下拉）时才保存；关闭设置页也会统一保存一次。
+      if (persist !== false) saveSoon();
       const ctxVal = mo.contextTokens || meta.contextTokens;
       infoHint.textContent = '多模态：' + (mo.multimodal === true ? '支持' : mo.multimodal === false ? '不支持' : '未知') +
         ' · 上下文：' + (ctxVal ? MM.modelInfo.fmtTokens(ctxVal) : '未知') +
@@ -327,7 +332,7 @@ window.MM = window.MM || {};
     });
     delBtn.addEventListener('click', () => {
       p.models = p.models.filter(x => x !== mo);
-      MM.save();
+      MM.save({ configOnly: true });
       renderModelEntries();
       syncModelConsumers();
     });
@@ -340,7 +345,7 @@ window.MM = window.MM || {};
         U.el('span', { class: 'mini-label' }, '最大输出'), outInput,
         infoHint));
     // 挂载后回填识别信息（只补空字段）
-    setTimeout(() => applyInfo(), 0);
+    setTimeout(() => applyInfo(false), 0); // 挂载时只回填识别信息，不触发保存
     return row;
   }
 
@@ -415,7 +420,7 @@ window.MM = window.MM || {};
       const nameInput = U.el('input', { type: 'text', value: p.name || '', placeholder: '服务商名称', maxlength: '40' });
       nameInput.addEventListener('change', () => {
         p.name = nameInput.value.trim() || '自定义服务商';
-        MM.save();
+        MM.save({ configOnly: true });
         MM.chat.renderChips();
         renderModels(true); // 同步左侧列表与常驻标题行（改名输入框仍聚焦，需强制重画）
       });
@@ -507,7 +512,7 @@ window.MM = window.MM || {};
     const saveBtn = U.el('button', { class: 'btn-primary' }, '保存');
     saveBtn.addEventListener('click', async () => {
       if (!(await commitKeyIfTyped())) return; // 输入了新密钥先写入主进程保管
-      MM.save(); MM.chat.renderChips();
+      MM.save({ configOnly: true }); MM.chat.renderChips();
       U.toast('已保存「' + p.name + '」');
     });
 
@@ -517,7 +522,7 @@ window.MM = window.MM || {};
         if (!window.confirm('确定删除服务商「' + p.name + '」及其全部模型？')) return;
         MM.state.config.providers = providers().filter(x => x.id !== p.id);
         editingId = null;
-        MM.save(); renderModels(); syncModelConsumers();
+        MM.save({ configOnly: true }); renderModels(); syncModelConsumers();
       });
       ops.appendChild(delBtn);
     }
@@ -619,7 +624,7 @@ window.MM = window.MM || {};
       }
       if (!(await commitSearchKeyIfTyped())) return;
       cfg.provider = pv;
-      MM.save(); U.toast('搜索设置已保存');    });
+      MM.save({ configOnly: true }); U.toast('搜索设置已保存');    });
     const testBtn = U.el('button', { class: 'btn-secondary' }, '测试搜索');
     testBtn.addEventListener('click', async () => {
       const pv = provSel.value;
@@ -677,7 +682,7 @@ window.MM = window.MM || {};
     saveBtn.addEventListener('click', () => {
       cfg.synthSource = sourceSel.value;
       cfg.autoMerge = autoCheck.checked;
-      MM.save();
+      MM.save({ configOnly: true });
       U.$('#tgl-auto').checked = cfg.autoMerge;
       U.$('#tgl-auto').closest('.toggle').classList.toggle('on', cfg.autoMerge);
       U.toast('综合设置已保存');
@@ -690,6 +695,47 @@ window.MM = window.MM || {};
       U.el('label', { class: 'inline-check' }, autoCheck, '回答完成后自动执行综合（顶栏「自动综合」开关）')));
     pane.appendChild(saveBtn);
   }
+
+  // ---------- 系统提示词 ----------
+  // 全局提示词对所有模型、所有会话生效；聊天页可用「提示词」按钮给当前会话单独覆盖。
+  // 这里只管全局那一条，会话级的编辑面板在 ui-chat.js。
+  function renderPrompt() {
+    const pane = U.$('#pane-prompt');
+    if (!pane) return;
+    // 正在该面板里输入时不重建：整块重建会清空未保存的草稿
+    const active = document.activeElement;
+    if (active && pane.contains(active) && active.tagName === 'TEXTAREA') return;
+    pane.innerHTML = '';
+    const cfg = MM.state.config;
+    if (typeof cfg.systemPrompt !== 'string') cfg.systemPrompt = '';
+
+    pane.appendChild(U.el('div', { class: 'pane-title' }, '系统提示词'));
+    pane.appendChild(U.el('div', { class: 'pane-sub' },
+      '设置模型的角色与回答风格，每次提问都会随请求一起发送给所选的全部模型。留空则不注入。'));
+
+    const ta = U.el('textarea', {
+      id: 'sp-global', rows: '7',
+      placeholder: '例如：你是一位严谨的中文技术顾问。回答要先给结论再给理由，不确定的地方明确说明，不要编造。'
+    });
+    ta.value = cfg.systemPrompt;
+    // 输入即写入内存并防抖落盘：设置页可能被直接关掉，不点保存也不会丢
+    ta.addEventListener('input', () => { cfg.systemPrompt = ta.value; saveSoonPrompt(); });
+    pane.appendChild(field('全局提示词', ta,
+      '不消耗额外请求：它会作为 system 消息插入每一轮对话的历史最前面。',
+      '按会话覆盖：聊天页右上角「提示词」按钮可为当前会话单独设置，会话里设了就以会话的为准。'));
+
+    const hintBox = U.el('div', { class: 'prompt-tips' },
+      U.el('div', { class: 'pt-title' }, '常用写法'),
+      U.el('ul', {},
+        U.el('li', {}, '角色：「你是一位……」限定身份，能显著影响回答口吻'),
+        U.el('li', {}, '结构：「先给结论，再给理由」「用要点列表回答」'),
+        U.el('li', {}, '边界：「不确定就说不确定」「不要编造数据」'),
+        U.el('li', {}, '语言：「一律用简体中文回答」')));
+    pane.appendChild(hintBox);
+  }
+
+  // 与 saveSoon 分开计时：提示词是长文本，防抖要更长，避免边打字边写盘
+  const saveSoonPrompt = U.debounce(() => { MM.save({ configOnly: true }); if (MM.chat && MM.chat.refreshPromptBadge) MM.chat.refreshPromptBadge(); }, 800);
 
   // ---------- 数据管理 ----------
   function renderData() {
@@ -731,19 +777,24 @@ window.MM = window.MM || {};
           if (!Array.isArray(data.sessions) && !Array.isArray(cfg.providers) && !Array.isArray(cfg.models)) {
             U.toast('文件格式不正确', true); return;
           }
-          MM.state.config = MM.normalizeConfig(cfg);
-          MM.state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
-          MM.migrateSessions(MM.state.sessions);
-          if (!MM.state.sessions.length) MM.sessions.createSilent();
+          // 先在本地的变量里完成迁移/校验，全部成功后再替换状态：
+          // 中途失败（如配置格式异常）不会留下"配置已换、会话还是旧的"的半截状态
+          const nextConfig = MM.normalizeConfig(cfg);
+          const nextSessions = MM.normalizeSessions(data.sessions);
+          MM.migrateSessions(nextSessions);
+          MM.state.config = nextConfig;
+          MM.state.sessions = nextSessions;
+          if (!nextSessions.length) MM.sessions.createSilent();
           const top = MM.sessions.sorted()[0];
           MM.state.currentId = top ? top.id : null;
           U.$('#tgl-auto').checked = !!MM.state.config.synthesis.autoMerge;
           U.$('#tgl-auto').closest('.toggle').classList.toggle('on', !!MM.state.config.synthesis.autoMerge);
-          // 旧备份迁移后带明文密钥：先落盘交给主进程保管，再从渲染层状态剥离
-          await MM.save();
-          MM.stripSecrets(MM.state.config);
-          renderModels(true); renderSearch(); renderSynth();
-          MM.chat.renderAll(); MM.sessions.render(); MM.chat.renderChips();
+          // 旧备份迁移后带明文密钥：先落盘交给主进程保管，再从渲染层状态剥离。
+          // 落盘失败时不要剥离：否则明文密钥只存在于内存里的旧值，用户又没收到任何提示。
+          const savedOk = await MM.save();
+          if (savedOk) MM.stripSecrets(MM.state.config);
+          renderModels(true); renderSearch(); renderSynth(); renderPrompt();
+          MM.chat.renderAll(); MM.chat.renderTitle(); MM.sessions.render(); MM.chat.renderChips();
           U.toast('导入成功');
         } catch (e) {
           // 主进程解析失败/文件不可读都会 reject：必须给用户明确反馈
