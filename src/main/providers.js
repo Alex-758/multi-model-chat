@@ -11,12 +11,15 @@ function chatEndpoint(m) {
     return /\/v\d+$/.test(base) ? base + '/messages' : base + '/v1/messages';
   }
   if (/\/(chat\/completions|completions)$/.test(base)) return base;
+  // Gemini 的 OpenAI 兼容端点形如 .../v1beta/openai，路径到此为止，直接接 /chat/completions
+  if (/\/openai$/.test(base)) return base + '/chat/completions';
   return /\/v\d+$/.test(base) ? base + '/chat/completions' : base + '/v1/chat/completions';
 }
 
 function modelsEndpoint(m) {
   const base = normalizeBase(m.baseUrl);
   if (m.fullUrl) return base;
+  if (/\/openai$/.test(base)) return base + '/models';
   return /\/v\d+$/.test(base) ? base + '/models' : base + '/v1/models';
 }
 
@@ -50,7 +53,18 @@ function buildBody(m, messages, opts) {
     return body;
   }
   const body = { model: requestModelId(m, searchOn), messages, stream };
-  if (m.maxTokens) body.max_tokens = Math.floor(m.maxTokens);
+  if (m.maxTokens) {
+    // 新一代推理模型都已弃用 max_tokens，传了会 400：改用 max_completion_tokens。
+    // Kimi 仅 K3 起、OpenAI 的 GPT-5 起为限；其余服务商（含 OpenRouter 中转）仍用 max_tokens。
+    const needsCompletionTokens =
+      (m.provider === 'moonshot' && /^kimi-k3/i.test(m.modelId || '')) ||
+      (m.provider === 'openai' && /^(gpt-5|gpt-6|o\d)/i.test(m.modelId || ''));
+    if (needsCompletionTokens) {
+      body.max_completion_tokens = Math.floor(m.maxTokens);
+    } else {
+      body.max_tokens = Math.floor(m.maxTokens);
+    }
+  }
   if (searchOn) {
     if (m.provider === 'dashscope') body.enable_search = true;           // 阿里百炼原生搜索
     if (m.provider === 'zhipu') {                                        // 智谱原生搜索工具
@@ -190,7 +204,11 @@ async function chatOnce(m) {
     const timeout = setTimeout(() => ctrl.abort(), 45000);
     try {
       const body = buildBody(m, [{ role: 'user', content: '你好' }], { stream: false, searchOn: false });
-      if (m.apiFormat !== 'anthropic') body.max_tokens = 100;
+      // 沿用 buildBody 选定的字段名（新一代推理模型只认 max_completion_tokens），只把值压小省钱
+      if (m.apiFormat !== 'anthropic') {
+        if ('max_completion_tokens' in body) body.max_completion_tokens = 100;
+        else body.max_tokens = 100;
+      }
       const res = await fetch(chatEndpoint(m), {
         method: 'POST', headers: authHeaders(m), body: JSON.stringify(body), signal: ctrl.signal
       });

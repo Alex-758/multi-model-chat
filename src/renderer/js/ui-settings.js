@@ -9,7 +9,7 @@ window.MM = window.MM || {};
 
   let closeTimer = null; // 关闭动画定时器（防快速开/关互相打架）
   // 行内编辑防抖自动落盘：应用崩溃/强杀时最多丢失 600ms 内的编辑
-  const saveSoon = U.debounce(() => { MM.save(); MM.chat.renderChips(); }, 600);
+  const saveSoon = U.debounce(() => { MM.save(); syncModelConsumers(); }, 600);
 
   // ---------- 打开 / 关闭 ----------
   function open() {
@@ -39,9 +39,9 @@ window.MM = window.MM || {};
       overlay.classList.remove('closing');
       closeTimer = null;
     }, 150);
-    // 行内编辑自动保存，并同步聊天页的模型选择器
+    // 行内编辑自动保存，并同步聊天页选择器与综合回答下拉
     MM.save();
-    if (MM.chat.renderChips) MM.chat.renderChips();
+    syncModelConsumers();
   }
 
   // ---------- 服务商 / 模型 ----------
@@ -92,6 +92,18 @@ window.MM = window.MM || {};
     return out;
   }
 
+  // 模型/服务商变动后统一刷新所有依赖「可用模型集合」的地方。
+  // 漏掉任何一处都会留下指向已删除模型的残留项（例如综合回答下拉里还挂着已删的模型）。
+  function syncModelConsumers() {
+    // 综合来源指向已不存在的模型时回落到前端合并，否则会一直用失效配置静默失败
+    const cfg = MM.state.config.synthesis;
+    if (cfg && cfg.synthSource && cfg.synthSource !== 'frontend') {
+      if (!allFlatModels().some(m => m.id === cfg.synthSource)) cfg.synthSource = 'frontend';
+    }
+    if (MM.chat.renderChips) MM.chat.renderChips();
+    renderSynth();
+  }
+
   function dotColor(key) {
     const colors = ['#6366f1', '#0ea5e9', '#f59e0b', '#10b981', '#ec4899', '#8b5cf6', '#ef4444', '#14b8a6'];
     let h = 0;
@@ -100,8 +112,15 @@ window.MM = window.MM || {};
   }
 
   // ---------- 模型配置 ----------
-  function renderModels() {
+  // force=true 用于数据被整体替换（如导入备份）必须重画的场景
+  function renderModels(force) {
     const pane = U.$('#pane-models');
+    // 正在模型表单里输入时不重建：整块 innerHTML 重建会丢掉未提交的编辑
+    // （点左侧服务商行时输入框已先失焦，不会命中这个守卫）
+    if (pane && !force) {
+      const active = document.activeElement;
+      if (active && pane.contains(active) && /^(INPUT|SELECT|TEXTAREA)$/.test(active.tagName)) return;
+    }
     pane.innerHTML = '';
     modelCountEl = null;
     const cur = findProvider(editingId) || providers()[0];
@@ -120,16 +139,35 @@ window.MM = window.MM || {};
 
     const layout = U.el('div', { class: 'model-layout' });
     const list = U.el('div', { class: 'model-list' });
+    // 国内 → 国际 → 自定义。normalizeConfig 已排好序，这里只按区间插小节标题，
+    // 让分组一眼可见，而不是把「排序规则」藏起来。
+    // 国际：OpenRouter（聚合）与 OpenAI / Anthropic / Google 三家海外官方；其余预置算国内。
+    const INTL = { openrouter: 1, openai: 1, anthropic: 1, google: 1 };
+    const groupOf = p => (p.preset ? (INTL[p.provider || p.id] ? 'international' : 'domestic') : 'custom');
+    const GROUP_LABEL = { domestic: '国内服务商', international: '国际服务商', custom: '自定义' };
+    let lastGroup = null;
     for (const p of providers()) {
+      const g = groupOf(p);
+      if (g !== lastGroup) {
+        list.appendChild(U.el('div', { class: 'model-list-group' }, GROUP_LABEL[g]));
+        lastGroup = g;
+      }
       const total = (p.models || []).length;
       const on = (p.models || []).filter(mo => mo.enabled !== false && mo.modelId).length;
+      // 「未配置」按实际可用模型判定：模型条目里 ID 全空也算空壳
+      // （新建自定义服务商默认带一条空模型，否则它会伪装成「已配置 1 个」）
+      const empty = on === 0;
+      const tagText = empty ? '未配置' : (p.preset ? '预置' : '自定义') + ' ' + on + '/' + total;
+      const tagTitle = empty
+        ? (total ? '模型 ID 为空，尚未配置任何可用模型' : '还没有添加任何模型')
+        : (p.preset ? '预置' : '自定义') + ' · ' + on + '/' + total + ' 启用';
       list.appendChild(U.el('div', {
-        class: 'model-row' + (p.id === editingId ? ' active' : ''),
+        class: 'model-row' + (p.id === editingId ? ' active' : '') + (empty ? ' is-empty' : ''),
         onclick: () => { editingId = p.id; renderModels(); }
       },
         U.el('span', { class: 'ac-dot', style: 'background:' + dotColor(p.id) }),
         U.el('span', { class: 'p-name', title: p.name || p.id }, p.name || p.id),
-        U.el('span', { class: 'tag', title: (p.preset ? '预置' : '自定义') + ' · ' + on + '/' + total + ' 启用' }, (p.preset ? '预置' : '自定义') + ' ' + on + '/' + total)
+        U.el('span', { class: 'tag', title: tagTitle }, tagText)
       ));
     }
     list.appendChild(U.el('div', { class: 'model-list-sep' }));
@@ -147,9 +185,13 @@ window.MM = window.MM || {};
       class: 'btn-secondary', style: 'width:100%',
       onclick: () => {
         for (const def of MM.defaults.PRESET_PROVIDERS) {
-          if (!findProvider(def.id)) providers().push(JSON.parse(JSON.stringify(def)));
+          if (!findProvider(def.id)) {
+            const copy = JSON.parse(JSON.stringify(def));
+            for (const mo of (copy.models || [])) mo.fromPreset = true;
+            providers().push(copy);
+          }
         }
-        MM.save(); renderModels(); MM.chat.renderChips();
+        MM.save(); renderModels(); syncModelConsumers();
         U.toast('已恢复预置服务商');
       }
     }, '恢复预置服务商'));
@@ -166,6 +208,8 @@ window.MM = window.MM || {};
     body.appendChild(U.el('div', { class: 'pane-sub', style: 'margin-bottom:14px' },
       '每个服务商（共享地址与密钥）可配置多个模型；启用后出现在聊天输入框上方，可同时多选并发调用。'));
     body.appendChild(layout);
+    // 切换服务商时右侧表单区淡入（整页重建后的视觉缓冲）
+    form.classList.add('pane-in');
   }
 
   function getCache() {
@@ -279,13 +323,13 @@ window.MM = window.MM || {};
     enCheck.addEventListener('change', () => {
       mo.enabled = enCheck.checked;
       saveSoon();
-      MM.chat.renderChips(); // 启用状态实时反映到聊天页模型选择器
+      syncModelConsumers(); // 启用状态实时反映到聊天页选择器与综合回答下拉
     });
     delBtn.addEventListener('click', () => {
       p.models = p.models.filter(x => x !== mo);
       MM.save();
       renderModelEntries();
-      MM.chat.renderChips();
+      syncModelConsumers();
     });
 
     const row = U.el('div', { class: 'm-entry' },
@@ -325,10 +369,22 @@ window.MM = window.MM || {};
     );
     const urlInput = U.el('input', { type: 'text', id: 'p-url', placeholder: '例如 https://api.openai.com/v1', value: p.baseUrl || '' });
     const fullUrlCheck = U.el('input', { type: 'checkbox', id: 'p-fullurl', ...(p.fullUrl ? { checked: '' } : {}) });
-    // 密钥只写入主进程保管：输入框不回显已存密钥；"清除"内联在同行
+    // 密钥只写入主进程保管：已保存时输入框显示遮罩（••••••••），聚焦时清空进入"输入新值"模式
+    const KEY_MASK = '••••••••';
     const keyInput = U.el('input', {
-      type: 'password', id: 'p-key', value: '',
-      placeholder: p.hasKey ? '已保存密钥——输入新值可覆盖' : '请输入 API Key'
+      type: 'password', id: 'p-key', autocomplete: 'new-password',
+      value: p.hasKey ? KEY_MASK : '',
+      placeholder: '请输入 API Key'
+    });
+    // 遮罩态以「输入框当前内容」为准，而不是单独的布尔标记：
+    // 密码管理器/输入法自动填充会直接写 value（不触发 focus），只看标记会把真实密钥当成遮罩丢掉。
+    const isMasked = () => keyInput.value === KEY_MASK;
+    keyInput.addEventListener('focus', () => {
+      if (isMasked()) keyInput.value = ''; // 进入输入新值模式
+    });
+    keyInput.addEventListener('blur', () => {
+      // 没输入新值就失焦：恢复遮罩（视觉上回到"已保存"）
+      if (p.hasKey && !keyInput.value.trim()) keyInput.value = KEY_MASK;
     });
     const clearKeyBtn = U.el('button', {
       class: 'btn-secondary', style: 'flex:none;padding:0 12px',
@@ -340,7 +396,7 @@ window.MM = window.MM || {};
       try { await api.clearSecret(p.id); }
       catch (e) { U.toast('清除失败：' + ((e && e.message) || e), true); return; }
       p.hasKey = false;
-      keyInput.placeholder = '请输入 API Key';
+      keyInput.value = '';
       clearKeyBtn.disabled = true;
       U.toast('密钥已清除');
       MM.chat.renderChips();
@@ -361,7 +417,7 @@ window.MM = window.MM || {};
         p.name = nameInput.value.trim() || '自定义服务商';
         MM.save();
         MM.chat.renderChips();
-        renderModels(); // 同步左侧列表与常驻标题行
+        renderModels(true); // 同步左侧列表与常驻标题行（改名输入框仍聚焦，需强制重画）
       });
       nameRow = hrow('名称', nameInput);
     }
@@ -375,11 +431,12 @@ window.MM = window.MM || {};
         hrow('请求地址', urlInput, U.el('label', { class: 'inline-check', title: '勾选后不再自动补全路径' }, fullUrlCheck, '完整 URL')),
         U.el('div', { class: 'hint h-indent' }, '兼容 OpenAI API 的服务端点地址，不要以斜杠结尾；不勾选「完整 URL」时自动补全 /chat/completions 或 /v1/messages。'),
         hrow('API 密钥', keyInput, clearKeyBtn),
-        U.el('div', { class: 'hint h-indent' }, p.hasKey ? '已保存密钥不在本界面显示；输入新值并保存可覆盖，点“清除”删除。密钥仅保存在本机。' : '密钥仅保存在本机。'),
+        U.el('div', { class: 'hint h-indent' }, p.hasKey ? '已保存密钥以 •••••••• 显示；点击输入框可输入新值覆盖，点"清除"删除。密钥仅保存在本机。' : '密钥仅保存在本机。'),
         result)));
 
     // 返回是否成功（没有输入新密钥时视为成功，不需要写入）
     async function commitKeyIfTyped() {
+      if (isMasked()) return true; // 仍是遮罩：用户没有输入新密钥
       const k = keyInput.value.trim();
       if (!k) return true;
       let ok = false;
@@ -387,8 +444,7 @@ window.MM = window.MM || {};
       catch (e) { U.toast('密钥保存失败：' + ((e && e.message) || e), true); return false; }
       if (!ok) { U.toast('密钥保存失败：服务商已不存在', true); return false; }
       p.hasKey = true;
-      keyInput.value = '';
-      keyInput.placeholder = '已保存密钥——输入新值可覆盖';
+      keyInput.value = KEY_MASK; // 保存后回到遮罩态
       return true;
     }
 
@@ -461,7 +517,7 @@ window.MM = window.MM || {};
         if (!window.confirm('确定删除服务商「' + p.name + '」及其全部模型？')) return;
         MM.state.config.providers = providers().filter(x => x.id !== p.id);
         editingId = null;
-        MM.save(); renderModels(); MM.chat.renderChips();
+        MM.save(); renderModels(); syncModelConsumers();
       });
       ops.appendChild(delBtn);
     }
@@ -495,7 +551,7 @@ window.MM = window.MM || {};
     pane.appendChild(U.el('div', { class: 'pane-sub', style: 'margin-bottom:6px' }, '聊天页开启「联网搜索」开关后：'));
     const tips = U.el('ul', { class: 'tip-list' });
     for (const t of [
-      'DeepSeek / 硅基流动 / 自定义端点：用下方选择的搜索引擎检索，结果注入对话上下文；',
+      'DeepSeek / Kimi / 自定义端点：用下方选择的搜索引擎检索，结果注入对话上下文；',
       '阿里百炼：自动开启原生 enable_search；',
       '智谱 BigModel：自动开启原生 web_search 工具；',
       'OpenRouter：自动为模型 ID 追加 :online 后缀。'
@@ -509,9 +565,19 @@ window.MM = window.MM || {};
       U.el('option', { value: 'none', selected: cfg.provider === 'none' }, '不使用搜索')
     );
     const keyRow = U.el('div', {});
+    // 与模型配置页一致：已保存密钥显示遮罩态，聚焦时清空进入"输入新值"模式
+    const SKEY_MASK = '••••••••';
     const keyInput = U.el('input', {
-      type: 'password', id: 's-key', style: 'width:100%',
-      placeholder: cfg.hasKey ? '已保存密钥——输入新值可覆盖' : '搜索 API Key'
+      type: 'password', id: 's-key', style: 'width:100%', autocomplete: 'off',
+      value: cfg.hasKey ? SKEY_MASK : '',
+      placeholder: '搜索 API Key'
+    });
+    const isSearchMasked = () => keyInput.value === SKEY_MASK;
+    keyInput.addEventListener('focus', () => {
+      if (isSearchMasked()) keyInput.value = '';
+    });
+    keyInput.addEventListener('blur', () => {
+      if (cfg.hasKey && !keyInput.value.trim()) keyInput.value = SKEY_MASK;
     });
     const keyHint = U.el('div', { class: 'hint' });
     keyRow.appendChild(keyInput);
@@ -522,13 +588,13 @@ window.MM = window.MM || {};
 
     // 返回是否成功（没有输入新密钥时视为成功）
     async function commitSearchKeyIfTyped() {
+      if (isSearchMasked()) return true; // 仍是遮罩：没有输入新密钥
       const k = keyInput.value.trim();
       if (!k) return true;
       try { await api.setSecret('search', k); }
       catch (e) { U.toast('密钥保存失败：' + ((e && e.message) || e), true); return false; }
       cfg.hasKey = true;
-      keyInput.value = '';
-      keyInput.placeholder = '已保存密钥——输入新值可覆盖';
+      keyInput.value = SKEY_MASK; // 保存后回到遮罩态
       return true;
     }
 
@@ -546,7 +612,7 @@ window.MM = window.MM || {};
     const saveBtn = U.el('button', { class: 'btn-primary' }, '保存');
     saveBtn.addEventListener('click', async () => {
       const pv = provSel.value;
-      if ((pv === 'tavily' || pv === 'bocha') && !keyInput.value.trim() && !cfg.hasKey) {
+      if ((pv === 'tavily' || pv === 'bocha') && !cfg.hasKey && (!keyInput.value.trim() || isSearchMasked())) {
         result.className = 'test-result err';
         result.textContent = '✗ 所选搜索服务商需要 API 密钥，请填写后再保存';
         return;
@@ -559,7 +625,7 @@ window.MM = window.MM || {};
       const pv = provSel.value;
       result.className = 'test-result';
       if (pv === 'none') { result.className = 'test-result err'; result.textContent = '当前为「不使用搜索」，请先选择搜索引擎'; return; }
-      if ((pv === 'tavily' || pv === 'bocha') && !keyInput.value.trim() && !cfg.hasKey) { result.className = 'test-result err'; result.textContent = '✗ 请先填写 API 密钥'; return; }
+      if ((pv === 'tavily' || pv === 'bocha') && !cfg.hasKey && (!keyInput.value.trim() || isSearchMasked())) { result.className = 'test-result err'; result.textContent = '✗ 请先填写 API 密钥'; return; }
       if (!(await commitSearchKeyIfTyped())) return;
       testBtn.disabled = true; testBtn.textContent = '搜索中…';
       try {
@@ -581,8 +647,12 @@ window.MM = window.MM || {};
   // ---------- 综合回答 ----------
   function renderSynth() {
     const pane = U.$('#pane-synth');
+    if (!pane) return;
+    // 正在该面板里操作时不重建：整块重建会丢掉用户未保存的选择
+    const active = document.activeElement;
+    if (active && pane.contains(active) && active.tagName === 'SELECT') return;
     pane.innerHTML = '';
-    const cfg = MM.state.config.synthesis;
+    const cfg = MM.state.config.synthesis = MM.state.config.synthesis || { synthSource: 'frontend', autoMerge: true };
     pane.appendChild(U.el('div', { class: 'pane-title' }, '综合回答'));
     pane.appendChild(U.el('div', { class: 'pane-sub' }, '选择每轮回答完成后，用什么方式把多个模型的回答合并为一份综合回答。'));
 
@@ -609,6 +679,7 @@ window.MM = window.MM || {};
       cfg.autoMerge = autoCheck.checked;
       MM.save();
       U.$('#tgl-auto').checked = cfg.autoMerge;
+      U.$('#tgl-auto').closest('.toggle').classList.toggle('on', cfg.autoMerge);
       U.toast('综合设置已保存');
     });
 
@@ -631,14 +702,23 @@ window.MM = window.MM || {};
     box.appendChild(U.el('button', {
       class: 'btn-secondary',
       onclick: async () => {
+        // 导出文件包含明文 API 密钥，先明确告知风险再让用户确认
+        const msg = [
+          '导出的备份文件包含明文 API 密钥。',
+          '',
+          '请只保存在本机或可信位置，不要上传到网盘、聊天工具或代码仓库。',
+          '',
+          '确定继续导出？'
+        ].join('\n');
+        if (!window.confirm(msg)) return;
         try {
           const p = await api.exportData({ config: MM.state.config, sessions: MM.state.sessions });
-          if (p) U.toast('已导出到 ' + p + '（含 API 密钥，请妥善保管）');
+          if (p) U.toast('已导出到 ' + p + '（含明文 API 密钥，请妥善保管）');
         } catch (e) {
           U.toast('导出失败：' + ((e && e.message) || e), true);
         }
       }
-    }, U.el('span', {}, '导出数据'), U.el('small', {}, '将模型配置与全部会话导出为 JSON 备份文件（含 API 密钥，请妥善保管）')));
+    }, U.el('span', {}, '导出数据'), U.el('small', {}, '将模型配置与全部会话导出为 JSON 备份文件（含明文 API 密钥）')));
 
     box.appendChild(U.el('button', {
       class: 'btn-secondary',
@@ -658,10 +738,11 @@ window.MM = window.MM || {};
           const top = MM.sessions.sorted()[0];
           MM.state.currentId = top ? top.id : null;
           U.$('#tgl-auto').checked = !!MM.state.config.synthesis.autoMerge;
+          U.$('#tgl-auto').closest('.toggle').classList.toggle('on', !!MM.state.config.synthesis.autoMerge);
           // 旧备份迁移后带明文密钥：先落盘交给主进程保管，再从渲染层状态剥离
           await MM.save();
           MM.stripSecrets(MM.state.config);
-          renderModels(); renderSearch(); renderSynth();
+          renderModels(true); renderSearch(); renderSynth();
           MM.chat.renderAll(); MM.sessions.render(); MM.chat.renderChips();
           U.toast('导入成功');
         } catch (e) {
@@ -699,13 +780,19 @@ window.MM = window.MM || {};
     });
     for (const nav of U.$$('.settings-nav')) {
       nav.addEventListener('click', () => {
+        if (nav.classList.contains('active')) return; // 重复点击当前 tab 不重播动画
         for (const n of U.$$('.settings-nav')) n.classList.remove('active');
         nav.classList.add('active');
         for (const p of U.$$('.settings-pane')) p.classList.remove('active');
-        U.$('#pane-' + nav.dataset.pane).classList.add('active');
+        const pane = U.$('#pane-' + nav.dataset.pane);
+        pane.classList.add('active');
+        // 切换页签时内容淡入微移（先移除再强制重排，连续切换也能重启动画）
+        pane.classList.remove('pane-in');
+        void pane.offsetWidth;
+        pane.classList.add('pane-in');
       });
     }
   }
 
-  MM.settings = { open, close, bind, renderModels, dotColor, allFlatModels };
+  MM.settings = { open, close, bind, renderModels, dotColor, allFlatModels, syncForTest: syncModelConsumers };
 })();

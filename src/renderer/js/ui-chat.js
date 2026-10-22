@@ -109,21 +109,16 @@ window.MM = window.MM || {};
         }
       }
     }
-    // 合并相邻的 user 消息：上一轮全部失败时历史里会出现连续 user，
-    // Anthropic 等格式对角色交替更敏感
-    for (let i = msgs.length - 1; i > 0; i--) {
-      if (msgs[i].role === 'user' && msgs[i - 1].role === 'user') {
-        msgs[i - 1].content += '\n\n' + msgs[i].content;
-        msgs.splice(i, 1);
-      }
-    }
+    // 注意：相邻 user 的合并必须放在"追加当前消息"之后（见函数末尾），
+    // 否则最常见的相邻情况（历史最后一条 user + 当前消息）不会被合并
     if (searchResults && searchResults.length) {
       const src = searchResults.map(r => '- ' + r.title + '\n  ' + r.snippet + '\n  来源: ' + r.url).join('\n');
       msgs.push({ role: 'system', content: '以下是与用户问题相关的联网搜索结果，回答时可以参考：\n\n' + src });
     }
     // 按模型上下文窗口裁剪历史，避免超限报错
     if (ctxLimit) {
-      const budget = Math.max(ctxLimit - (maxOut || 4096) - 4096, 4096);
+      // 预算下限取 512：极小上下文窗口（如 3000）下不能仍塞 4096
+      const budget = Math.max(ctxLimit - (maxOut || 4096) - 4096, 512);
       let total = msgs.reduce((a, x) => a + estTokens(x.content), 0);
       while (total > budget && msgs.length > 1) {
         total -= estTokens(msgs[0].content);
@@ -137,6 +132,14 @@ window.MM = window.MM || {};
       while (msgs.length && msgs[0].role === 'assistant') msgs.shift();
     }
     msgs.push({ role: 'user', content: userMsg.content });
+    // 合并相邻的 user 消息：上一轮全部失败/被停止时，历史最后一条 user 会与当前消息相邻，
+    // Anthropic 等格式对角色交替更敏感（必须在 push 当前消息之后执行）
+    for (let i = msgs.length - 1; i > 0; i--) {
+      if (msgs[i].role === 'user' && msgs[i - 1].role === 'user') {
+        msgs[i - 1].content += '\n\n' + msgs[i].content;
+        msgs.splice(i, 1);
+      }
+    }
     return msgs;
   }
 
@@ -147,11 +150,30 @@ window.MM = window.MM || {};
   }
 
   function emptyState() {
-    return U.el('div', { class: 'empty-state' },
+    const box = U.el('div', { class: 'empty-state' },
       U.el('h1', {}, 'Multi-Model Chat'),
-      U.el('p', {}, '在下方输入问题，同时获得多个模型的回答'),
-      U.el('p', {}, '首次使用请在左下角「设置」中填写 API Key')
-    );
+      U.el('p', {}, '在下方输入问题，同时获得多个模型的回答'));
+    // 没有任何已配置密钥的模型时显示引导（配置过后不再出现）
+    const hasUsableModel = MM.settings.allFlatModels().some(m => m.hasKey);
+    if (!hasUsableModel) {
+      box.appendChild(U.el('div', { class: 'empty-guide' },
+        U.el('span', { class: 'eg-text' }, '首次使用：请先在左下角「设置 → 模型配置」中为服务商填写 API Key'),
+        U.el('button', { class: 'btn-secondary eg-btn', onclick: function () { MM.settings.open(); } }, '打开设置')));
+    } else {
+      // 已配置：给两个示例提问，点击直接填入输入框
+      const ex = U.el('div', { class: 'empty-examples' });
+      for (const q of ['用三句话解释量子计算', '对比三种主流大模型的长文本能力']) {
+        ex.appendChild(U.el('button', {
+          class: 'eg-q', onclick: function () {
+            U.$('#input').value = q;
+            autoResize();
+            U.$('#input').focus();
+          }
+        }, q));
+      }
+      box.appendChild(ex);
+    }
+    return box;
   }
 
   function answerCard(res, streamingNow) {
@@ -193,10 +215,15 @@ window.MM = window.MM || {};
   }
 
   function statusHtml(res) {
-    if (res.status === 'streaming') return '<span class="spinner"></span> 生成中…';
-    if (res.status === 'done') return '✓ ' + (res.ms ? U.fmtMs(res.ms) : '') + (res.chars ? ' · ' + res.chars + ' 字' : '');
-    if (res.status === 'error') return '<span style="color:var(--danger)">✗ 失败</span>';
-    if (res.status === 'stopped') return '<span style="color:var(--muted)">⏹ 已停止</span>';
+    if (res.status === 'streaming') return '<span class="spinner"></span><span class="badge muted">生成中…</span>';
+    if (res.status === 'done') {
+      let h = '<span class="badge ok">✓</span>';
+      if (res.ms) h += '<span class="badge">' + U.fmtMs(res.ms) + '</span>';
+      if (res.chars) h += '<span class="badge">' + res.chars + ' 字</span>';
+      return h;
+    }
+    if (res.status === 'error') return '<span class="badge err">✗ 失败</span>';
+    if (res.status === 'stopped') return '<span class="badge muted">⏹ 已停止</span>';
     return '';
   }
 
@@ -353,6 +380,10 @@ window.MM = window.MM || {};
     }
     wrap.appendChild(frag);
     scrollBottom(true);
+    // 会话切换/重建后整体淡入一次（动画类播完即移除，避免影响后续重绘）
+    wrap.classList.remove('fade-in');
+    void wrap.offsetWidth; // 强制重排，让连续两次 renderAll 也能重启动画
+    wrap.classList.add('fade-in');
   }
 
   function renderUser(msg) {
@@ -556,7 +587,7 @@ window.MM = window.MM || {};
       scheduleStreamPaint(rBody, function () { rBody.textContent = res.reasoning; });
     } else if (ev.type === 'done') {
       res.status = 'done'; res.ms = ev.ms; res.chars = ev.chars;
-      status.textContent = '✓ ' + U.fmtMs(ev.ms) + ' · ' + ev.chars + ' 字';
+      status.innerHTML = statusHtml(res);
       body.classList.remove('streaming');
       body.classList.add('md');
       body.innerHTML = MM.md.render(res.content);
@@ -769,7 +800,16 @@ window.MM = window.MM || {};
     const ta = U.$('#input');
     ta.style.height = 'auto';
     ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
-    U.$('#btn-send').classList.toggle('ready', !!U.$('#btn-send').classList.contains('stop') || ta.value.trim().length > 0);
+    const btn = U.$('#btn-send');
+    const wasReady = btn.classList.contains('ready');
+    const ready = btn.classList.contains('stop') || ta.value.trim().length > 0;
+    btn.classList.toggle('ready', ready);
+    // 从"空"到"有内容"的瞬间脉冲一次提示可发送
+    if (ready && !wasReady) {
+      btn.classList.remove('pulse');
+      void btn.offsetWidth;
+      btn.classList.add('pulse');
+    }
   }
 
   // ---------- 绑定 ----------
@@ -795,13 +835,23 @@ window.MM = window.MM || {};
     });
     U.$('#btn-theme').addEventListener('click', function () {
       const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      // 加临时类播放颜色过渡，结束后移除（避免常驻 transition 干扰元素自身的 hover 过渡）
+      document.documentElement.classList.add('theme-anim');
       document.documentElement.setAttribute('data-theme', next);
+      setTimeout(function () { document.documentElement.classList.remove('theme-anim'); }, 280);
       try { localStorage.setItem('mmc-theme', next); } catch (e) { }
     });
     U.$('#tgl-auto').addEventListener('change', function () {
       MM.state.config.synthesis.autoMerge = this.checked;
       MM.save();
     });
+    // 顶栏开关胶囊的高亮态跟随复选框（开启时文字变 accent 色，一眼可辨）
+    for (const id of ['#tgl-search', '#tgl-auto']) {
+      const input = U.$(id);
+      const sync = function () { input.closest('.toggle').classList.toggle('on', input.checked); };
+      input.addEventListener('change', sync);
+      sync();
+    }
     // 回到底部悬浮按钮：离开底部较远时出现
     const wrap = U.$('#messages');
     const sb = U.$('#btn-scroll-bottom');

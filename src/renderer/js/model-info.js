@@ -16,13 +16,18 @@ window.MM = window.MM || {};
     { p: /grok.*vision/i, ctx: 131072, out: 16384, mm: true },
     { p: /doubao.*vision/i, ctx: 262144, out: 16384, mm: true },
 
-    // ---- DeepSeek（文本）----
+    // ---- DeepSeek ----
+    { p: /deepseek-v4\.1-flash|deepseek-flash/i, ctx: 1048576, out: 393216, mm: true },
+    { p: /deepseek-v4-flash|deepseek-v4\.1/i, ctx: 1048576, out: 393216, mm: true },
+    { p: /deepseek-v4-pro|deepseek-v4/i, ctx: 1048576, out: 393216, mm: false },
     { p: /deepseek-reasoner|r\d(?![\d])/i, ctx: 131072, out: 65536, mm: false },
     { p: /deepseek-chat|deepseek-v[23]/i, ctx: 131072, out: 8192, mm: false },
     { p: /deepseek/i, ctx: 131072, out: 8192, mm: false },
 
     // ---- 智谱 GLM ----
-    { p: /glm-5/i, ctx: 262144, out: 131072, mm: null },
+    { p: /glm-5\.[23]?-?flash|glm-5v/i, ctx: 1000000, out: 131072, mm: true },
+    { p: /glm-5\.[23]/i, ctx: 1000000, out: 131072, mm: false },
+    { p: /glm-5/i, ctx: 204800, out: 131072, mm: null },
     { p: /glm-4\.[5-9]/i, ctx: 204800, out: 131072, mm: false },
     { p: /glm-4-(plus|air|flash|long|0520|alltools)/i, ctx: 131072, out: 8192, mm: false },
     { p: /glm-4/i, ctx: 131072, out: 4096, mm: false },
@@ -30,13 +35,18 @@ window.MM = window.MM || {};
 
     // ---- 阿里 Qwen（百炼）----
     { p: /qwen-long/i, ctx: 10000000, out: 8192, mm: false },
+    { p: /qwen3\.8/i, ctx: 1000000, out: 131072, mm: true },
+    { p: /qwen3\.[5-7]/i, ctx: 1000000, out: 131072, mm: null },
+    { p: /qwen3-max/i, ctx: 262144, out: 65536, mm: false },
     { p: /qwen3/i, ctx: 131072, out: 16384, mm: null },
-    { p: /qwen-turbo/i, ctx: 1048576, out: 8192, mm: false },
-    { p: /qwen-plus/i, ctx: 131072, out: 8192, mm: false },
+    { p: /qwen-turbo|qwen-flash/i, ctx: 1048576, out: 32768, mm: false },
+    { p: /qwen-plus/i, ctx: 1000000, out: 32768, mm: false },
     { p: /qwen-max/i, ctx: 32768, out: 8192, mm: false },
     { p: /qwen/i, ctx: 131072, out: 8192, mm: null },
 
     // ---- OpenAI ----
+    { p: /gpt-5\.[5-9]|gpt-5-pro/i, ctx: 1050000, out: 128000, mm: true },
+    { p: /gpt-5\.[1-4]/i, ctx: 400000, out: 128000, mm: true },
     { p: /gpt-5/i, ctx: 409600, out: 131072, mm: true },
     { p: /(^|\/)o[134](-mini|-pro|-high|-low|-medium)?($|[-.])/i, ctx: 204800, out: 102400, mm: true },
     { p: /gpt-4\.1/i, ctx: 1048576, out: 32768, mm: true },
@@ -46,10 +56,12 @@ window.MM = window.MM || {};
     { p: /gpt-3\.5/i, ctx: 16385, out: 4096, mm: false },
 
     // ---- Anthropic Claude（全部支持图像输入）----
-    { p: /claude-(opus-)?4-5|claude-sonnet-4-5|claude-sonnet-4\.5/i, ctx: 1048576, out: 65536, mm: true },
+    { p: /claude-(opus|sonnet|haiku|fable)-5/i, ctx: 1000000, out: 128000, mm: true },
+    { p: /claude-(opus-)?4[-.]5|claude-opus-4\.6/i, ctx: 1000000, out: 128000, mm: true },
     { p: /claude/i, ctx: 204800, out: 65536, mm: true },
 
-    // ---- Google Gemini ----
+    // ---- Google Gemini（全部支持图像/音视频输入）----
+    { p: /gemini-4|gemini-4-argon/i, ctx: 1048576, out: 32768, mm: true },
     { p: /gemini/i, ctx: 1048576, out: 65536, mm: true },
 
     // ---- Meta Llama ----
@@ -60,9 +72,13 @@ window.MM = window.MM || {};
     { p: /mistral|mixtral/i, ctx: 131072, out: 8192, mm: null },
 
     // ---- Moonshot Kimi ----
-    { p: /kimi|moonshot/i, ctx: 262144, out: 16384, mm: null },
+    { p: /kimi-k3/i, ctx: 1048576, out: 131072, mm: true },
+    { p: /kimi-k2\.[5-9]/i, ctx: 262144, out: 32768, mm: true },
+    { p: /kimi|moonshot/i, ctx: 262144, out: 32768, mm: null },
 
     // ---- MiniMax ----
+    { p: /minimax-m3/i, ctx: 1000000, out: 131072, mm: true },
+    { p: /minimax-m2/i, ctx: 204800, out: 131072, mm: false },
     { p: /minimax|abab/i, ctx: 245760, out: 16384, mm: null },
 
     // ---- 字节 Doubao ----
@@ -81,6 +97,8 @@ window.MM = window.MM || {};
     { p: /step-/i, ctx: 131072, out: 8192, mm: null },
 
     // ---- xAI Grok ----
+    { p: /grok-4\.(20|2|3)(?![\d])/i, ctx: 2000000, out: 1800000, mm: true },
+    { p: /grok-4\.[4-9]/i, ctx: 500000, out: 450000, mm: true },
     { p: /grok/i, ctx: 262144, out: 16384, mm: null }
   ];
 
@@ -114,7 +132,7 @@ window.MM = window.MM || {};
   }
 
   // 我们的 provider 标识 → models.dev 的 provider 键
-  const PROVIDER_ALIAS = { zhipu: 'zhipuai', dashscope: 'alibaba', deepseek: 'deepseek', siliconflow: 'siliconflow', openrouter: 'openrouter' };
+  const PROVIDER_ALIAS = { zhipu: 'zhipuai', dashscope: 'alibaba', deepseek: 'deepseek', moonshot: 'moonshotai-cn', siliconflow: 'siliconflow', openrouter: 'openrouter', openai: 'openai', anthropic: 'anthropic', google: 'google', minimax: 'minimax' };
 
   function lookupCatalog(catalog, provider, id) {
     if (!catalog) return null;

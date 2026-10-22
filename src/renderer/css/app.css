@@ -45,6 +45,11 @@ body {
   background: var(--bg);
   overflow: hidden;
 }
+/* 亮暗主题切换：JS 在切换瞬间给 <html> 加 .theme-anim，250ms 后移除。
+   用独立类而不是常驻 transition，避免覆盖元素自身的交互过渡（hover .12s 等） */
+html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *::after {
+  transition: background-color .25s ease, border-color .25s ease, color .25s ease, box-shadow .25s ease !important;
+}
 button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 input, textarea, select {
@@ -130,8 +135,29 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 }
 #session-title { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .topbar-actions { display: flex; align-items: center; gap: 16px; flex-shrink: 0; }
-.toggle { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; }
-.toggle input { accent-color: var(--accent); width: 14px; height: 14px; padding: 0; margin: 0; cursor: pointer; }
+.toggle {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--muted); cursor: pointer; user-select: none;
+  padding: 4px 8px; border-radius: 20px;
+  transition: background .15s, color .15s;
+}
+.toggle:hover { background: var(--panel-2); color: var(--text); }
+.toggle input { display: none; } /* 原生复选框隐藏，用 .tgl-track 绘制滑块 */
+.toggle .tgl-track {
+  position: relative; width: 30px; height: 17px; flex-shrink: 0;
+  border-radius: 10px; background: var(--border);
+  transition: background .18s;
+}
+.toggle .tgl-track::after {
+  content: ''; position: absolute; left: 2px; top: 2px;
+  width: 13px; height: 13px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.25);
+  transition: transform .18s cubic-bezier(.2,.7,.3,1);
+}
+.toggle input:checked + .tgl-track { background: var(--accent); }
+.toggle input:checked + .tgl-track::after { transform: translateX(13px); }
+.toggle.on { color: var(--accent); }
+.toggle .tgl-label { line-height: 1; }
 
 /* 消息区：与输入区共用左右留白，滚动条占位稳定，避免内容宽度跳动。
    右内边距扣掉滚动条宽度，使内容右边缘与输入区、顶栏落在同一条竖线上 */
@@ -140,11 +166,29 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   padding: 20px calc(var(--gut) - var(--sbw)) 8px var(--gut);
   scrollbar-gutter: stable;
 }
+/* 会话切换时整体淡入（renderAll 重建后由 JS 加类，动画播完即移除） */
+#messages.fade-in { animation: msgFadeIn .16s ease; }
+@keyframes msgFadeIn { from { opacity: 0; transform: translateY(4px); } }
 
 /* 空状态 */
 .empty-state { text-align: center; color: var(--muted); padding: 96px 20px 0; }
 .empty-state h1 { font-size: 20px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
 .empty-state p { font-size: 13px; line-height: 1.9; }
+/* 首次使用引导（未配置任何 API Key 时显示） */
+.empty-guide {
+  display: inline-flex; align-items: center; gap: 12px; margin-top: 18px;
+  padding: 10px 14px 10px 16px; border: 1px dashed var(--border); border-radius: var(--radius-lg);
+  font-size: 12.5px;
+}
+.empty-guide .eg-btn { min-height: 28px; padding: 0 12px; font-size: 12px; }
+/* 示例提问（已配置时显示）：点击填入输入框 */
+.empty-examples { display: flex; justify-content: center; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+.eg-q {
+  padding: 8px 16px; border: 1px solid var(--border); border-radius: 20px;
+  background: var(--panel); color: var(--muted); font-size: 12.5px;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.eg-q:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
 /* 回到底部悬浮按钮 */
 .scroll-bottom {
@@ -207,8 +251,17 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .ac-name { font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ac-status {
   margin-left: auto; font-size: 11px; color: var(--muted); white-space: nowrap;
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; align-items: center; gap: 5px;
 }
+/* 状态徽章：用时/字数/失败等结构化展示 */
+.badge {
+  display: inline-flex; align-items: center; height: 19px; padding: 0 7px;
+  border-radius: 10px; font-size: 11px; line-height: 1;
+  background: var(--panel-2); color: var(--muted);
+}
+.badge.ok { background: rgba(26,127,78,.12); color: var(--ok); }
+.badge.err { background: var(--danger-soft); color: var(--danger); }
+.badge.muted { background: var(--panel-2); color: var(--muted); }
 .ac-body { padding: 12px 13px; font-size: 13.5px; line-height: 1.75; overflow-x: hidden; word-break: break-word; }
 .ac-body.streaming { white-space: pre-wrap; }
 .ac-error { color: var(--danger); font-size: 12.5px; word-break: break-all; }
@@ -248,13 +301,23 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 #composer { flex-shrink: 0; padding: 6px var(--gut) 16px; }
 #model-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .chip {
-  display: inline-flex; align-items: center; height: 26px; padding: 0 12px;
+  position: relative;
+  display: inline-flex; align-items: center; height: 26px; padding: 0 12px 0 22px;
   font-size: 12px; line-height: 1;
   border: 1px solid var(--border); background: var(--panel); color: var(--muted);
-  border-radius: 20px; cursor: pointer; user-select: none; transition: all .12s;
+  border-radius: 20px; cursor: pointer; user-select: none;
+  transition: background .15s, border-color .15s, color .15s;
+}
+/* 选中态指示点：始终存在，选中时点亮（避免文字跳动） */
+.chip::before {
+  content: ''; position: absolute; left: 9px; top: 50%; transform: translateY(-50%) scale(.6);
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--border);
+  transition: background .15s, transform .15s;
 }
 .chip:hover { border-color: var(--accent); color: var(--text); }
 .chip.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.chip.on::before { background: var(--accent); transform: translateY(-50%) scale(1); }
 .chip .lock { font-size: 10px; margin-left: 3px; }
 .input-row {
   display: flex; gap: 10px; align-items: center;
@@ -272,9 +335,14 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
   display: inline-flex; align-items: center; justify-content: center;
   width: var(--ctl-h); height: var(--ctl-h); border-radius: var(--radius);
   background: var(--accent); color: #fff; font-size: 14px; line-height: 1; flex-shrink: 0;
-  opacity: .55; transition: opacity .15s, background .15s, transform .1s;
+  opacity: .55; transition: opacity .15s, background .15s, transform .12s;
 }
 .btn-send.ready, .btn-send.stop { opacity: 1; }
+/* 有内容可发送时轻微脉冲一次提示（JS 加类），流式期间 ■ 保持呼吸 */
+.btn-send.pulse { animation: sendPulse .3s ease; }
+@keyframes sendPulse { 40% { transform: scale(1.12); } }
+.btn-send.stop { animation: sendBreathe 1.6s ease-in-out infinite; }
+@keyframes sendBreathe { 50% { opacity: .78; } }
 .btn-send:active { transform: scale(.93); }
 .btn-send:hover { background: var(--accent-strong); }
 .btn-send.stop { background: var(--danger); }
@@ -324,7 +392,10 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 @keyframes overlayOut { to { opacity: 0; } }
 .settings-dialog {
   position: relative;
-  width: min(1040px, 94vw); height: min(660px, 92vh); background: var(--panel);
+  width: min(1040px, 94vw);
+  /* 高度随内容自适应：搜索/综合页不空旷，模型页（内容多）可撑到 82vh */
+  height: auto; min-height: 480px; max-height: min(780px, 92vh);
+  background: var(--panel);
   border-radius: var(--radius-lg); display: flex; overflow: hidden;
   animation: dialogIn .2s cubic-bezier(.2, .7, .3, 1);
 }
@@ -352,18 +423,25 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 }
 .settings-nav:hover { background: var(--border); color: var(--text); }
 .settings-nav.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+/* 弹窗是 flex 行容器（align-items 默认 stretch）：左侧导航自动与弹窗同高，
+   spacer 继续把"关闭"按钮顶到底部 */
 .settings-spacer { flex: 1; }
 #btn-settings-close {
   margin-top: 8px; padding: 9px 12px; text-align: left; border-radius: 0;
   border-top: 1px solid var(--border);
 }
-.settings-main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* 弹窗高度自适应（height:auto + max-height）：.settings-main 不能 overflow:hidden，
+   否则内容会被裁掉而不是把弹窗撑高；滚动由各 pane 自己负责（max-height 限制） */
+.settings-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .settings-pane { display: none; }
-/* 非模型页：面板自身滚动（总容器不滚动） */
-.settings-pane.active { display: block; flex: 1; min-height: 0; overflow-y: auto; padding: 22px 24px 24px; }
+/* 非模型页：面板自身滚动，内容少时收缩、内容多时滚动（68vh 约等于弹窗 max-height 减去标题边距） */
+.settings-pane.active { display: block; overflow-y: auto; padding: 22px 24px 24px; max-height: calc(min(780px, 92vh) - 2px); }
+/* 页签切换 / 服务商切换时内容淡入微移（JS 加类，播完留在原地） */
+.settings-pane.pane-in, .pane-in { animation: paneIn .18s ease; }
+@keyframes paneIn { from { opacity: 0; transform: translateY(5px); } }
 
 /* ---------- 模型配置（方案一：常驻标题行 + 分组卡片） ---------- */
-#pane-models.active { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+#pane-models.active { display: flex; flex-direction: column; padding: 0; }
 .pm-head {
   flex-shrink: 0; display: flex; align-items: center; gap: 12px;
   padding: 12px 52px 12px 24px; /* 右侧给弹窗关闭按钮留位 */
@@ -377,7 +455,9 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 }
 .pm-head-ops { flex-shrink: 0; display: flex; align-items: center; gap: 8px; }
 .pm-head-ops .btn-primary, .pm-head-ops .btn-secondary, .pm-head-ops .btn-danger { min-height: 32px; padding: 0 13px; font-size: 12.5px; }
-.pm-body { flex: 1; min-height: 0; overflow-y: auto; padding: 16px 24px 24px; }
+/* 高度自适应结构下 .pm-body 不能 flex 撑满（弹窗 height:auto 时 flex 无高度参照），
+   用 max-height 限制滚动区：内容少时弹窗收缩，内容多时滚动（减去标题行 ~55px） */
+.pm-body { overflow-y: auto; padding: 16px 24px 24px; max-height: calc(min(780px, 92vh) - 57px); }
 
 /* 分组卡片：连接 / 模型 */
 .p-card { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-bottom: 14px; }
@@ -443,12 +523,25 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .model-row {
   display: flex; align-items: center; gap: 8px; padding: 8px 10px;
   border-radius: 6px; cursor: pointer; font-size: 13px;
+  transition: background .12s;
 }
 .model-row:hover { background: var(--panel-2); }
-.model-row.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+/* 选中态与会话列表统一：浅底 + 左侧 3px 竖条 */
+.model-row.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; box-shadow: inset 3px 0 0 var(--accent); }
 .model-row .p-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .model-row .tag { margin-left: auto; flex-shrink: 0; font-size: 11px; color: var(--muted); font-weight: 400; white-space: nowrap; }
+/* 空服务商（无模型）灰度降级：不干扰可用服务商的视觉层级，但仍可点开配置 */
+.model-row.is-empty { opacity: .5; }
+.model-row.is-empty:hover { opacity: .75; }
+.model-row.is-empty.active { opacity: 1; }
+.model-row.is-empty .ac-dot { filter: grayscale(1); }
 .model-list-sep { border-top: 1px solid var(--border); margin: 8px 0; }
+/* 服务商分组小节标题（国内 / 国际 / 自定义） */
+.model-list-group {
+  font-size: 11px; color: var(--muted); font-weight: 500;
+  padding: 10px 10px 4px; letter-spacing: .3px; user-select: none;
+}
+.model-list-group:first-child { padding-top: 2px; }
 .model-form { flex: 1; min-width: 0; }
 
 /* 服务商下的模型条目（行内编辑） */
