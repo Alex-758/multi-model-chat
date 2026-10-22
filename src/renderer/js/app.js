@@ -23,8 +23,8 @@ MM.defaults = {
       id: 'moonshot', name: 'Kimi 月之暗面', provider: 'moonshot',
       apiFormat: 'openai', baseUrl: 'https://api.moonshot.cn/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'kimi-k3', name: 'Kimi K3', enabled: true, contextTokens: 1048576, maxTokens: 131072, multimodal: true },
-        { modelId: 'kimi-k2.6', name: 'Kimi K2.6', enabled: true, contextTokens: 262144, maxTokens: 32768, multimodal: true }
+        { modelId: 'kimi-k3', name: 'Kimi K3', enabled: true, contextTokens: 1048576, maxTokens: 1048576, multimodal: true },
+        { modelId: 'kimi-k2.6', name: 'Kimi K2.6', enabled: true, contextTokens: 262144, maxTokens: 262144, multimodal: true }
       ]
     },
     {
@@ -48,16 +48,16 @@ MM.defaults = {
       id: 'minimax', name: 'MiniMax', provider: 'minimax',
       apiFormat: 'anthropic', baseUrl: 'https://api.minimax.cn/anthropic', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'MiniMax-M3.1-Flash', name: 'MiniMax M3.1 Flash', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true },
-        { modelId: 'MiniMax-M3', name: 'MiniMax M3', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true }
+        { modelId: 'MiniMax-M3.1-Flash', name: 'MiniMax M3.1 Flash', enabled: true, contextTokens: 1000000, maxTokens: 524288, multimodal: true },
+        { modelId: 'MiniMax-M3', name: 'MiniMax M3', enabled: true, contextTokens: 1000000, maxTokens: 524288, multimodal: true }
       ]
     },
     {
       id: 'openai', name: 'OpenAI', provider: 'openai',
       apiFormat: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'gpt-5.6', name: 'GPT-5.6', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true },
-        { modelId: 'gpt-5.5', name: 'GPT-5.5', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true }
+        { modelId: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true },
+        { modelId: 'gpt-5.6', name: 'GPT-5.6', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true }
       ]
     },
     {
@@ -65,8 +65,8 @@ MM.defaults = {
       id: 'anthropic', name: 'Anthropic', provider: 'anthropic',
       apiFormat: 'anthropic', baseUrl: 'https://api.anthropic.com', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'claude-opus-5', name: 'Claude Opus 5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true },
-        { modelId: 'claude-sonnet-5', name: 'Claude Sonnet 5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true }
+        { modelId: 'claude-opus-5-5', name: 'Claude Opus 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true },
+        { modelId: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true }
       ]
     },
     {
@@ -74,16 +74,16 @@ MM.defaults = {
       id: 'google', name: 'Google Gemini', provider: 'google',
       apiFormat: 'openai', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', enabled: true, contextTokens: 1048576, maxTokens: 65536, multimodal: true },
-        { modelId: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', enabled: true, contextTokens: 1048576, maxTokens: 65536, multimodal: true }
+        { modelId: 'gemini-4-argon', name: 'Gemini 4 Argon', enabled: true, contextTokens: 1048576, maxTokens: 32768, multimodal: true },
+        { modelId: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', enabled: true, contextTokens: 1048576, maxTokens: 65536, multimodal: true }
       ]
     },
     {
       id: 'openrouter', name: 'OpenRouter', provider: 'openrouter',
       apiFormat: 'openai', baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'openai/gpt-5.5', name: 'GPT-5.5', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true },
-        { modelId: 'anthropic/claude-sonnet-5', name: 'Claude Sonnet 5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true }
+        { modelId: 'openai/gpt-6.1-sol', name: 'GPT-6.1 Sol', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true },
+        { modelId: 'anthropic/claude-sonnet-5.5', name: 'Claude Sonnet 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true }
       ]
     }
   ],
@@ -145,6 +145,7 @@ MM.defaults = {
   // 复制预置定义并给每个模型打上 fromPreset，供后续迁移区分「预置自带」与「用户手填」
   function withPresetFlags(def) {
     const p = JSON.parse(JSON.stringify(def));
+    delete p.apiKey; // 预置定义里的 apiKey:'' 是占位，不进入渲染层状态
     for (const mo of (p.models || [])) mo.fromPreset = true;
     return p;
   }
@@ -168,9 +169,24 @@ MM.defaults = {
       'qwen-plus': { id: 'qwen3.8-flash', names: ['Qwen Plus'] },
       'qwen-max': { id: 'qwen3.8-max', names: ['Qwen Max'] }
     },
+    openai: {
+      'gpt-5.6': { id: 'gpt-6.1-sol', names: ['GPT-5.6'] },
+      'gpt-5.5': { id: 'gpt-6.1-sol', names: ['GPT-5.5'] }
+    },
+    anthropic: {
+      'claude-opus-5': { id: 'claude-opus-5-5', names: ['Claude Opus 5'] },
+      'claude-sonnet-5': { id: 'claude-sonnet-5-5', names: ['Claude Sonnet 5'] }
+    },
+    google: {
+      'gemini-3.1-pro-preview': { id: 'gemini-4-argon', names: ['Gemini 3.1 Pro'] }
+    },
     openrouter: {
-      'openai/gpt-4o-mini': { id: 'openai/gpt-5.5', names: ['GPT-4.1 Mini'] },
-      'anthropic/claude-sonnet-4.5': { id: 'anthropic/claude-sonnet-5', names: ['Claude Sonnet 4.5'] }
+      'openai/gpt-4o-mini': { id: 'openai/gpt-6.1-sol', names: ['GPT-4.1 Mini'] },
+      'anthropic/claude-sonnet-4.5': { id: 'anthropic/claude-sonnet-5.5', names: ['Claude Sonnet 4.5'] },
+      'openai/gpt-5.5': { id: 'openai/gpt-6.1-sol', names: ['GPT-5.5'] },
+      'openai/gpt-5.6': { id: 'openai/gpt-6.1-sol', names: ['GPT-5.6'] },
+      'anthropic/claude-sonnet-5': { id: 'anthropic/claude-sonnet-5.5', names: ['Claude Sonnet 5'] },
+      'anthropic/claude-opus-5': { id: 'anthropic/claude-opus-5.5', names: ['Claude Opus 5'] }
     }
   };
 
@@ -196,11 +212,37 @@ MM.defaults = {
         mo.fromPreset = true;
       }
       p.models = p.models.filter(mo => mo.modelId);
+      // 升级后可能撞车（两个旧 ID 指向同一个新模型）：按 modelId 去重，保留先出现的条目
+      const seenIds = new Set();
+      p.models = p.models.filter(mo => {
+        if (seenIds.has(mo.modelId)) return false;
+        seenIds.add(mo.modelId);
+        return true;
+      });
       // 只在此前从没配过该服务商时补默认模型，尊重用户主动清空
       if (seedEmpty && !p.models.length && def && !p.seeded) {
         p.models = JSON.parse(JSON.stringify(def.models));
         for (const mo of p.models) mo.fromPreset = true;
         p.seeded = true;
+      }
+    }
+  }
+
+  // 官方模型数据刷新（一次性，presetVersion 4）：
+  // 把预置服务商里「模型 ID 与当前预置一致」的条目，其上下文/最大输出/多模态同步为最新官方值。
+  // 用户自己加的模型（ID 不在预置里）一律不动；改过 ID 的视为自定义，保持原样。
+  function refreshPresetModelMeta(providers) {
+    for (const p of (providers || [])) {
+      if (!p || !p.preset) continue;
+      const def = MM.defaults.PRESET_PROVIDERS.find(x => x.id === p.id);
+      if (!def) continue;
+      for (const mo of (p.models || [])) {
+        if (!mo || !mo.modelId) continue;
+        const target = (def.models || []).find(x => x.modelId === mo.modelId);
+        if (!target) continue;
+        mo.contextTokens = target.contextTokens;
+        mo.maxTokens = target.maxTokens;
+        mo.multimodal = target.multimodal;
       }
     }
   }
@@ -245,6 +287,9 @@ MM.defaults = {
     for (const p of providers) {
       if (!Array.isArray(p.models)) p.models = [];
       if (typeof p.hasKey !== 'boolean') p.hasKey = !!(p.apiKey || '').trim();
+      // 空密钥占位不留在渲染层（预置服务商定义里带 apiKey:''）；
+      // 旧版迁移带来的真实明文密钥仍需保留到保存时，不能一起删掉。
+      if (!p.apiKey) delete p.apiKey;
     }
     // 预置服务商更替（一次性，版本号 2）：硅基流动 → Kimi 月之暗面。
     // 只用版本号判断是否执行过，之后用户主动删掉 Kimi 不会再被加回（踩坑 7）。
@@ -267,6 +312,11 @@ MM.defaults = {
         if (def) providers.push(withPresetFlags(def));
       }
       cfg.presetVersion = 3;
+    }
+    // 官方模型数据刷新（一次性，版本号 4）：预置模型的上下文/最大输出/多模态对齐最新官方值
+    if (!(cfg.presetVersion >= 4)) {
+      refreshPresetModelMeta(providers);
+      cfg.presetVersion = 4;
     }
     // 统一排序：国内 → 国际（预置）→ 自定义。
     // 每次加载都重排，保证老配置里被追加到末尾的预置服务商（如迁移补进来的 Kimi）回到正确位置。
@@ -462,7 +512,7 @@ MM.defaults = {
     pre.textContent = detail;
     const btn = document.createElement('button');
     btn.textContent = '重新加载';
-    btn.setAttribute('style', 'margin-top:14px;background:#4f5bef;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;');
+    btn.setAttribute('style', 'margin-top:14px;background:#18181b;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;');
     btn.addEventListener('click', function () { location.reload(); });
     panel.appendChild(pre);
     panel.appendChild(btn);

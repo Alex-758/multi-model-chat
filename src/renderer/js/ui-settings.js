@@ -83,11 +83,18 @@ window.MM = window.MM || {};
   }
   function allFlatModels() {
     const out = [];
+    const seen = new Set();
     for (const p of providers()) {
       if (!p || typeof p !== 'object') continue;
       for (const mo of (p.models || [])) {
         if (!mo || typeof mo !== 'object') continue;
-        if (mo.enabled !== false && mo.modelId) out.push(flatten(p, mo));
+        if (mo.enabled === false || !mo.modelId) continue;
+        const flat = flatten(p, mo);
+        // 同一服务商下可能出现重复模型 ID（从列表里手选时容易造成）：
+        // 重复的扁平 ID 会让聊天芯片/并发目标重复，事件只更新其中一张卡片。
+        if (seen.has(flat.id)) continue;
+        seen.add(flat.id);
+        out.push(flat);
       }
     }
     return out;
@@ -175,7 +182,7 @@ window.MM = window.MM || {};
     list.appendChild(U.el('button', {
       class: 'btn-secondary', style: 'width:100%;margin-bottom:8px',
       onclick: () => {
-        const p = { id: U.uid(), name: '自定义服务商', provider: 'custom', apiFormat: 'openai', baseUrl: '', apiKey: '', fullUrl: false, preset: false, models: [{ modelId: '', name: '', enabled: true }] };
+        const p = { id: U.uid(), name: '自定义服务商', provider: 'custom', apiFormat: 'openai', baseUrl: '', fullUrl: false, preset: false, models: [{ modelId: '', name: '', enabled: true }] };
         providers().push(p);
         editingId = p.id;
         MM.save({ configOnly: true });
@@ -188,6 +195,7 @@ window.MM = window.MM || {};
         for (const def of MM.defaults.PRESET_PROVIDERS) {
           if (!findProvider(def.id)) {
             const copy = JSON.parse(JSON.stringify(def));
+            delete copy.apiKey; // 预置定义里的 apiKey:'' 是占位
             for (const mo of (copy.models || [])) mo.fromPreset = true;
             providers().push(copy);
           }
@@ -358,7 +366,7 @@ window.MM = window.MM || {};
     if (active && active.tagName === 'INPUT' && box.contains(active)) return;
     const p = findProvider(editingId);
     if (!p) return;
-    if (modelCountEl) modelCountEl.textContent = '📦 模型（' + (p.models || []).length + '）';
+    if (modelCountEl) modelCountEl.textContent = '模型（' + (p.models || []).length + '）';
     box.innerHTML = '';
     const listCache = getCache();
     for (const mo of (p.models || [])) box.appendChild(modelEntryRow(p, mo, listCache));
@@ -428,7 +436,7 @@ window.MM = window.MM || {};
     }
     wrap.appendChild(U.el('div', { class: 'p-card' },
       U.el('div', { class: 'p-card-h' },
-        U.el('span', {}, '🔌 连接'),
+        U.el('span', {}, '连接'),
         U.el('span', { class: 'p-card-note' }, '该服务商下所有模型共用')),
       U.el('div', { class: 'p-card-b' },
         nameRow,
@@ -472,7 +480,7 @@ window.MM = window.MM || {};
       }
     }, U.el('span', { class: 'ico' }, '＋'), '添加模型');
 
-    modelCountEl = U.el('span', {}, '📦 模型（' + (p.models || []).length + '）');
+    modelCountEl = U.el('span', {}, '模型（' + (p.models || []).length + '）');
     const modelCard = U.el('div', { class: 'p-card' },
       U.el('div', { class: 'p-card-h' }, modelCountEl, U.el('div', { class: 'ops' }, getListBtn, addModelBtn)));
     const entries = U.el('div', { id: 'model-entries' });

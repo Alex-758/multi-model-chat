@@ -728,6 +728,10 @@ window.MM = window.MM || {};
       active: Array.isArray(inheritVersions) ? inheritVersions.length - 1 : -1,
       results: models.map(m => ({ modelId: m.id, name: m.name || m.modelId, status: 'streaming', content: '', reasoning: '' }))
     };
+    // 把联网搜索来源挂到每个回答上：卡片里的「📎 搜索来源」从这里读取
+    if (searchResults && searchResults.length) {
+      for (const r of assistantMsg.results) r.sources = searchResults;
+    }
     s.messages.push(assistantMsg);
     s.updatedAt = Date.now();
     // 这里不落盘：所有调用方（send/retryRound/saveEdit/retryUser）在进入本函数前

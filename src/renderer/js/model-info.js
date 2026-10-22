@@ -9,12 +9,13 @@ window.MM = window.MM || {};
   const RULES = [
     // ---- 多模态优先（避免被同系列文本规则截住）----
     { p: /deepseek.*vl|deepseek-vl/i, ctx: 131072, out: 8192, mm: true },
-    { p: /glm-[\d.]*v|glm-4v|cogview|cogvideo/i, ctx: 131072, out: 8192, mm: true },
-    { p: /qwen.*vl|qwen-vl|qvq|qwen.*omni/i, ctx: 131072, out: 8192, mm: true },
+    { p: /cogview|cogvideo/i, ctx: 131072, out: 8192, mm: true },
+    { p: /qwen.*omni/i, ctx: 1000000, out: 131072, mm: true },
+    { p: /qwen.*vl|qvq/i, ctx: 262144, out: 32768, mm: true },
     { p: /llama.*vision/i, ctx: 131072, out: 8192, mm: true },
     { p: /kimi.*vl|kimi-vl/i, ctx: 131072, out: 16384, mm: true },
     { p: /grok.*vision/i, ctx: 131072, out: 16384, mm: true },
-    { p: /doubao.*vision/i, ctx: 262144, out: 16384, mm: true },
+    { p: /doubao.*vision/i, ctx: 256000, out: 256000, mm: true },
 
     // ---- DeepSeek ----
     { p: /deepseek-v4\.1-flash|deepseek-flash/i, ctx: 1048576, out: 393216, mm: true },
@@ -25,7 +26,9 @@ window.MM = window.MM || {};
     { p: /deepseek/i, ctx: 131072, out: 8192, mm: false },
 
     // ---- 智谱 GLM ----
-    { p: /glm-5\.[23]?-?flash|glm-5v/i, ctx: 1000000, out: 131072, mm: true },
+    { p: /glm-5v/i, ctx: 200000, out: 131072, mm: true },
+    { p: /glm-4\.[5-9]v|glm-4v/i, ctx: 128000, out: 32768, mm: true },
+    { p: /glm-5\.[23].*flash/i, ctx: 1000000, out: 131072, mm: true },
     { p: /glm-5\.[23]/i, ctx: 1000000, out: 131072, mm: false },
     { p: /glm-5/i, ctx: 204800, out: 131072, mm: null },
     { p: /glm-4\.[5-9]/i, ctx: 204800, out: 131072, mm: false },
@@ -35,16 +38,20 @@ window.MM = window.MM || {};
 
     // ---- 阿里 Qwen（百炼）----
     { p: /qwen-long/i, ctx: 10000000, out: 8192, mm: false },
+    { p: /qwen3\.[5-9]-(max|plus|flash)/i, ctx: 1000000, out: 131072, mm: true },
     { p: /qwen3\.8/i, ctx: 1000000, out: 131072, mm: true },
-    { p: /qwen3\.[5-7]/i, ctx: 1000000, out: 131072, mm: null },
+    { p: /qwen3-coder/i, ctx: 1048576, out: 65536, mm: false },
+    { p: /qwen3\.[5-8]/i, ctx: 262144, out: 65536, mm: null },
     { p: /qwen3-max/i, ctx: 262144, out: 65536, mm: false },
     { p: /qwen3/i, ctx: 131072, out: 16384, mm: null },
-    { p: /qwen-turbo|qwen-flash/i, ctx: 1048576, out: 32768, mm: false },
+    { p: /qwen-flash/i, ctx: 1000000, out: 32768, mm: false },
+    { p: /qwen-turbo/i, ctx: 1000000, out: 16384, mm: false },
     { p: /qwen-plus/i, ctx: 1000000, out: 32768, mm: false },
     { p: /qwen-max/i, ctx: 32768, out: 8192, mm: false },
     { p: /qwen/i, ctx: 131072, out: 8192, mm: null },
 
     // ---- OpenAI ----
+    { p: /gpt-6/i, ctx: 1050000, out: 128000, mm: true },
     { p: /gpt-5\.[5-9]|gpt-5-pro/i, ctx: 1050000, out: 128000, mm: true },
     { p: /gpt-5\.[1-4]/i, ctx: 400000, out: 128000, mm: true },
     { p: /gpt-5/i, ctx: 409600, out: 131072, mm: true },
@@ -64,24 +71,28 @@ window.MM = window.MM || {};
     { p: /gemini-4|gemini-4-argon/i, ctx: 1048576, out: 32768, mm: true },
     { p: /gemini/i, ctx: 1048576, out: 65536, mm: true },
 
-    // ---- Meta Llama ----
+    // ---- Meta（Muse 系列接替 Llama）----
+    { p: /muse-(wonder|spark)/i, ctx: 1048576, out: 131072, mm: true },
     { p: /llama-?4/i, ctx: 1048576, out: 16384, mm: true },
     { p: /llama-?3\.?[23]?/i, ctx: 131072, out: 8192, mm: null },
 
     // ---- Mistral ----
+    { p: /mistral-large-4/i, ctx: 1048576, out: 262144, mm: true },
+    { p: /mistral-(medium|small)/i, ctx: 262144, out: 262144, mm: true },
     { p: /mistral|mixtral/i, ctx: 131072, out: 8192, mm: null },
 
     // ---- Moonshot Kimi ----
-    { p: /kimi-k3/i, ctx: 1048576, out: 131072, mm: true },
-    { p: /kimi-k2\.[5-9]/i, ctx: 262144, out: 32768, mm: true },
+    { p: /kimi-k3/i, ctx: 1048576, out: 1048576, mm: true },
+    { p: /kimi-k2\.[5-9]/i, ctx: 262144, out: 262144, mm: true },
     { p: /kimi|moonshot/i, ctx: 262144, out: 32768, mm: null },
 
     // ---- MiniMax ----
-    { p: /minimax-m3/i, ctx: 1000000, out: 131072, mm: true },
+    { p: /minimax-m3/i, ctx: 1000000, out: 524288, mm: true },
     { p: /minimax-m2/i, ctx: 204800, out: 131072, mm: false },
     { p: /minimax|abab/i, ctx: 245760, out: 16384, mm: null },
 
-    // ---- 字节 Doubao ----
+    // ---- 字节 Doubao / Seed ----
+    { p: /doubao-seed-2/i, ctx: 256000, out: 256000, mm: true },
     { p: /doubao|skylark/i, ctx: 262144, out: 16384, mm: null },
 
     // ---- 腾讯混元 ----
@@ -94,11 +105,13 @@ window.MM = window.MM || {};
     { p: /spark|xinghuo/i, ctx: 131072, out: 8192, mm: null },
 
     // ---- 阶跃星辰 ----
+    { p: /step-[5-9]/i, ctx: 1000000, out: 65536, mm: true },
+    { p: /step-3\.[5-9]/i, ctx: 256000, out: 256000, mm: true },
     { p: /step-/i, ctx: 131072, out: 8192, mm: null },
 
     // ---- xAI Grok ----
-    { p: /grok-4\.(20|2|3)(?![\d])/i, ctx: 2000000, out: 1800000, mm: true },
-    { p: /grok-4\.[4-9]/i, ctx: 500000, out: 450000, mm: true },
+    { p: /grok-4\.(2|3)\d*/i, ctx: 1000000, out: 30000, mm: true },
+    { p: /grok-4\.[4-9]/i, ctx: 500000, out: 500000, mm: true },
     { p: /grok/i, ctx: 262144, out: 16384, mm: null }
   ];
 

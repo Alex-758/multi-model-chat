@@ -120,6 +120,7 @@ app.whenReady().then(async () => {
     })()`);
     check('密钥遮罩：初始为遮罩、聚焦清空、失焦恢复',
       t0.masked === '••••••••' && t0.focused === '' && t0.blurred === '••••••••', JSON.stringify(t0));
+    await sleep(300); // 等 T0 关闭设置页触发的保存落地，避免串到下一个用例
 
     // ---------- T0b: 设置/全局提示词保存只传 config ----------
     saves = [];
