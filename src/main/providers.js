@@ -55,7 +55,7 @@ function buildBody(m, messages, opts) {
   if (m.apiFormat === 'anthropic') {
     const system = messages.filter(r => r.role === 'system').map(r => r.content).join('\n\n');
     const msgs = messages.filter(r => r.role !== 'system');
-    const body = { model: m.modelId, max_tokens: m.maxTokens || 8192, messages: msgs, stream };
+    const body = { model: m.modelId, max_tokens: Math.floor(m.maxTokens || 8192), messages: msgs, stream };
     if (system) body.system = system;
     return body;
   }

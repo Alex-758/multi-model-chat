@@ -873,11 +873,15 @@ window.MM = window.MM || {};
     U.$('#btn-settings-close').addEventListener('click', close);
     U.$('#btn-settings-x').addEventListener('click', close);
     U.$('#settings-overlay').addEventListener('click', e => { if (e.target.id === 'settings-overlay') close(); });
-    // Esc 关闭设置页
+    // Esc 关闭设置页。确认对话框打开时 Esc 只取消确认框（由 confirm 自己监听处理），
+    // 不能把底下的设置页一起关掉——层级关闭应该从最上层开始
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape' && !U.$('#settings-overlay').classList.contains('hidden')) {
-        close();
-      }
+      if (e.key !== 'Escape') return;
+      const so = U.$('#settings-overlay');
+      if (so.classList.contains('hidden')) return;
+      const cf = U.$('#confirm-overlay');
+      if (cf && !cf.classList.contains('hidden')) return;
+      close();
     });
     for (const nav of U.$$('.settings-nav')) {
       nav.addEventListener('click', () => {

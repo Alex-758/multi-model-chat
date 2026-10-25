@@ -112,20 +112,27 @@ MM.util = {
       ok.className = 'cf-ok ' + (opts.danger ? 'btn-danger' : 'btn-primary');
       ov.classList.remove('hidden');
       let settled = false;
+      // 对话框元素是常驻 DOM：监听器必须在结束时移除，否则每次确认都累积一份闭包
+      const onOk = function () { done(true); };
+      const onCancel = function () { done(false); };
+      const onOverlay = function (e) { if (e.target === ov) done(false); };
       function done(v) {
         if (settled) return;
         settled = true;
         ov.classList.add('hidden');
         document.removeEventListener('keydown', onKey);
+        ok.removeEventListener('click', onOk);
+        cancel.removeEventListener('click', onCancel);
+        ov.removeEventListener('click', onOverlay);
         resolve(v);
       }
       function onKey(e) {
         if (e.key === 'Escape') { e.preventDefault(); done(false); }
         else if (e.key === 'Enter') { e.preventDefault(); done(document.activeElement === cancel ? false : true); }
       }
-      ok.addEventListener('click', function () { done(true); });
-      cancel.addEventListener('click', function () { done(false); });
-      ov.addEventListener('click', function (e) { if (e.target === ov) done(false); });
+      ok.addEventListener('click', onOk);
+      cancel.addEventListener('click', onCancel);
+      ov.addEventListener('click', onOverlay);
       document.addEventListener('keydown', onKey);
       (opts.danger ? cancel : ok).focus();
     });

@@ -1100,7 +1100,8 @@ window.MM = window.MM || {};
     setSendBtn(true);
     MM.sessions.render(); // 呼吸点：单模型重试同样占用全局生成状态
     const reqId = 'rt' + (++seq);
-    const gridEl = document.querySelector('.answers[data-round="' + roundId + '"]');
+    // roundId 可能来自导入数据（含引号等字符），不能拼进 CSS 选择器：用 byRound 逐个比对属性
+    const gridEl = byRound('.answers', roundId);
     const old = gridEl && Array.from(gridEl.querySelectorAll('.answer-card'))
       .find(c => c.getAttribute('data-model-id') === modelId);
     // 替换卡片后必须同步重建事件用的节点缓存：handleEvent 按 ctx.cards.get(modelId)
@@ -1214,10 +1215,18 @@ window.MM = window.MM || {};
   async function doMerge(roundId, opts) {
     opts = opts || {};
     if (streaming) { U.toast('请等待当前任务完成', true); return; }
-    const s = MM.sessions.current();
-    if (!s) return;
-    const idx = s.messages.findIndex(m => m.role === 'assistant' && m.roundId === roundId);
-    if (idx < 0) return;
+    // 轮次可能属于后台会话：自动综合在 all-done 时触发，此刻用户也许已切到别的会话。
+    // 只查当前会话会让后台完成的轮次永远不综合——按 roundId 全局定位所属会话。
+    let s = MM.sessions.current();
+    let idx = s ? s.messages.findIndex(m => m.role === 'assistant' && m.roundId === roundId) : -1;
+    if (idx < 0) {
+      for (const cand of MM.state.sessions) {
+        if (!cand || !Array.isArray(cand.messages) || cand === s) continue;
+        const j = cand.messages.findIndex(m => m && m.role === 'assistant' && m.roundId === roundId);
+        if (j >= 0) { s = cand; idx = j; break; }
+      }
+    }
+    if (idx < 0 || !s) return;
     const am = s.messages[idx];
     const userMsg = s.messages[idx - 1];
     if (!userMsg) return;
@@ -1253,15 +1262,19 @@ window.MM = window.MM || {};
 
     // 渲染实时卡片（先清掉该轮此前失败留下的综合卡片，避免重复堆叠）
     const wrap = U.$('#messages');
-    const staleCard = byRound('.merge-card', roundId, wrap);
-    if (staleCard) staleCard.remove();
-    const oldTools = byRound('.round-tools', roundId, wrap);
-    if (oldTools) oldTools.replaceWith(roundTools(am));
     const card = mergeCard(am.merge, true, roundId);
-    // 插到本轮回答网格之后（而不是消息列表末尾），旧轮次综合时不会跑到页面最下面
-    const gridEl = byRound('.answers', roundId, wrap);
-    if (gridEl) gridEl.after(card); else wrap.appendChild(card);
-    scrollBottom(true);
+    // 卡片只在正查看该会话时挂进 DOM；后台会话时保持游离——流式内容照常写进
+    // mergeMsg（数据），切回该会话时 renderAll 会经 live 上下文重建卡片与绑定
+    if (MM.sessions.current() === s) {
+      const staleCard = byRound('.merge-card', roundId, wrap);
+      if (staleCard) staleCard.remove();
+      const oldTools = byRound('.round-tools', roundId, wrap);
+      if (oldTools) oldTools.replaceWith(roundTools(am));
+      // 插到本轮回答网格之后（而不是消息列表末尾），旧轮次综合时不会跑到页面最下面
+      const gridEl = byRound('.answers', roundId, wrap);
+      if (gridEl) gridEl.after(card); else wrap.appendChild(card);
+      scrollBottom(true);
+    }
 
     if (source === 'frontend') {
       am.merge.content = MM.merge.frontend(okResults);
@@ -1283,7 +1296,7 @@ window.MM = window.MM || {};
       return;
     }
     streaming = s.id;
-    setSendBtn(true);
+    if (MM.sessions.current() === s) setSendBtn(true); // 后台会话综合：不能锁当前视图的输入框
     MM.sessions.render(); // 呼吸点
     const t0 = Date.now();
     const reqId = 'syn' + (++seq);

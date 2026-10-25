@@ -424,9 +424,42 @@ server.listen(0, '127.0.0.1', () => {
       return JSON.stringify({ before: s1.len, after: s2 });
     });
 
+    await run('后台完成的轮次也自动综合（生成中切走会话）', async () => {
+      await setSynth('frontend');
+      await js(`(function(){ var t=document.querySelector('#tgl-auto'); t.checked=true; t.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+      await sleep(150);
+      // 两个会话：旁观会话（切到这里）+ 提问会话（在后台完成）
+      await newSession();
+      await renameActiveDeep('旁观会话');
+      await newSession();
+      await renameActiveDeep('后台综合');
+      await setChips(['p1::m1']);
+      await sendText('这一轮在后台完成');
+      assert(await waitFor("(document.querySelector('.ac-body') && document.querySelector('.ac-body').textContent.length > 2)", 6000), '没有开始输出');
+      await switchToDeep('旁观会话'); // 生成期间切走：不能点「新建会话」，那会先 stopAll
+      const bgDone = "(function(){ var s=MM.state.sessions.find(function(x){return x.title==='后台综合';}); if(!s) return false; var ams=s.messages.filter(function(m){return m.role==='assistant';}); if(!ams.length) return false; return ams[ams.length-1].results.every(function(r){return r.status==='done';}); })()";
+      assert(await waitFor(bgDone, 10000), '后台轮未完成');
+      await sleep(500); // all-done → doMerge（前端合并同步完成）
+      const t = await js(`(function(){
+        var s = MM.state.sessions.find(function(x){return x.title==='后台综合';});
+        var am = s && s.messages.filter(function(m){return m.role==='assistant';}).pop();
+        return { viewingOther: MM.state.currentId !== s.id,
+                 merged: !!(am && am.merge && am.merge.content && am.merge.content.length > 0),
+                 hereCards: document.querySelectorAll('#messages .merge-card').length };
+      })()`);
+      assert(t.viewingOther, '仍在原会话，未形成后台场景');
+      assert(t.merged === true, '后台轮没有自动综合: ' + JSON.stringify(t));
+      assert(t.hereCards === 0, '综合卡片串进了当前查看的会话: ' + JSON.stringify(t));
+      const back = await js(`(function(){ MM.sessions.switchTo(MM.state.sessions.find(function(x){return x.title==='后台综合';}).id); return document.querySelectorAll('#messages .merge-card').length; })()`);
+      assert(back === 1, '切回后综合卡片缺失: ' + back);
+      // 还原套件默认：关掉自动综合
+      await js(`(function(){ var t=document.querySelector('#tgl-auto'); t.checked=false; t.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+      return JSON.stringify(t);
+    });
+
     // ================= D. 设置边界 =================
     await run('自定义服务商：空名/HTML 名/删除当前服务商', async () => {
-      await js(`(function(){ window.confirm=function(){return true;}; MM.settings.open(); document.querySelector('.settings-nav[data-pane="models"]').click();
+      await js(`(function(){ MM.settings.open(); document.querySelector('.settings-nav[data-pane="models"]').click();
         [].slice.call(document.querySelectorAll('#pane-models button')).filter(function(b){return b.textContent.indexOf('添加自定义服务商')>=0;})[0].click(); })()`);
       await sleep(250);
       // 空名回退
@@ -438,16 +471,73 @@ server.listen(0, '127.0.0.1', () => {
       await sleep(200);
       const imgs = await js("document.querySelectorAll('#pane-models img, #model-chips img').length");
       assert(imgs === 0, '服务商名 HTML 被执行');
-      // 删除当前编辑的服务商
-      await js("document.querySelector('.pm-head-ops .btn-danger').click()");
+      // 删除当前编辑的服务商：确认走应用内确认框（.cf-ok 钩子），且必须真的删掉
+      const before = await js(`(function(){ return { n: MM.state.config.providers.length,
+        custom: MM.state.config.providers.filter(function(p){return p.preset===false && p.id!=='p1';}).length }; })()`);
+      assert(before.custom === 1, '删除前自定义服务商数异常: ' + JSON.stringify(before));
+      await js(`(function(){ document.querySelector('.pm-head-ops .btn-danger').click();
+        var ov=document.getElementById('confirm-overlay'); var ok=ov && ov.querySelector('.cf-ok');
+        if (ok && !ov.classList.contains('hidden')) ok.click(); })()`);
       await sleep(250);
-      const t = await js(`({ fatal: !!document.getElementById('fatal-error'),
+      const t = await js(`(function(){ return { fatal: !!document.getElementById('fatal-error'),
                            selected: (document.querySelector('#pane-models .pm-head-name')||{}).textContent || '',
-                           n: document.querySelectorAll('#pane-models .model-row').length })`);
-      assert(!t.fatal && t.selected.length > 0 && t.n >= 1, JSON.stringify(t));
+                           n: MM.state.config.providers.length,
+                           custom: MM.state.config.providers.filter(function(p){return p.preset===false && p.id!=='p1';}).length,
+                           cfHidden: document.getElementById('confirm-overlay').classList.contains('hidden') }; })()`);
+      assert(!t.fatal && t.selected.length > 0 && t.n === before.n - 1 && t.custom === 0 && t.cfHidden,
+        JSON.stringify(t) + ' before=' + JSON.stringify(before));
       await js('MM.settings.close()');
       await sleep(250);
-      return JSON.stringify(t);
+      return 'providers ' + before.n + '->' + t.n;
+    });
+
+    await run('确认框打开时 Esc：只关确认框，不关设置页', async () => {
+      await js(`MM.settings.open()`);
+      await sleep(200);
+      // 点「删除服务商」唤出确认框（点取消，不真正删除）
+      await js(`document.querySelector('.pm-head-ops .btn-danger').click()`);
+      const open = await js(`(function(){ return { cf: !document.getElementById('confirm-overlay').classList.contains('hidden'),
+        so: !document.getElementById('settings-overlay').classList.contains('hidden') }; })()`);
+      assert(open.cf && open.so, '确认框未弹出: ' + JSON.stringify(open));
+      await js(`document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape', bubbles:true}))`);
+      await sleep(50);
+      const t = await js(`(function(){ return { cfHidden: document.getElementById('confirm-overlay').classList.contains('hidden'),
+        soClosing: document.getElementById('settings-overlay').classList.contains('closing'),
+        soHidden: document.getElementById('settings-overlay').classList.contains('hidden') }; })()`);
+      assert(t.cfHidden && !t.soClosing && !t.soHidden, 'Esc 把设置页一起关了: ' + JSON.stringify(t));
+      await js('MM.settings.close()');
+      await sleep(250);
+      return 'ok';
+    });
+
+    await run('导入的恶意 roundId：单模型重试不因选择器抛错', async () => {
+      await newSession();
+      await setChips(['p1::m1']);
+      // 直接构造带引号/尖括号的 roundId（模拟导入数据），重试必须走属性比对而不是字符串拼选择器
+      await js(`(function(){
+        var s = MM.sessions.current();
+        s.messages.push({id:'hu1', role:'user', content:'坏roundId提问', createdAt:Date.now()});
+        s.messages.push({id:'ha1', role:'assistant', roundId:'bad"round<x>', createdAt:Date.now(),
+          results:[{modelId:'p1::m1', name:'M1', status:'error', error:'模拟失败', content:''}], versions:[]});
+        MM.chat.renderAll();
+      })()`);
+      const clicked = await js(`(function(){
+        var c=[].slice.call(document.querySelectorAll('.answer-card')).find(function(x){return x.getAttribute('data-model-id')==='p1::m1';});
+        if(!c) return { card:false };
+        var btn=[].slice.call(c.querySelectorAll('button')).find(function(b){return b.textContent==='重试';});
+        if(!btn) return { card:true, btn:false };
+        btn.click();
+        // 必须在同一同步块里取：mock 请求几十毫秒就完成，事后轮询会错过 pending
+        return { card:true, btn:true, p: MM.chat._pendingForTest() };
+      })()`);
+      assert(clicked.card && clicked.btn, JSON.stringify(clicked));
+      assert(clicked.p && clicked.p.cardIds.indexOf('p1::m1') >= 0 && clicked.p.bodyConnected === true,
+        '重试后节点缓存未指向活跃 DOM: ' + JSON.stringify(clicked));
+      assert(await waitDone(), '重试请求未完成');
+      const st = await js(`(function(){ var s=MM.sessions.current(); var am=s.messages[s.messages.length-1];
+        return { status: am.results[0].status, len: (am.results[0].content||'').length }; })()`);
+      assert(st.status === 'done' && st.len > 0, JSON.stringify(st));
+      return JSON.stringify(st);
     });
 
     await run('模型 ID 含引号/空格：芯片与请求正常', async () => {
@@ -593,10 +683,11 @@ server.listen(0, '127.0.0.1', () => {
       await sendText('流式中清空');
       assert(await waitFor("(document.querySelector('.ac-body') && document.querySelector('.ac-body').textContent.length > 2)", 6000), '没有开始输出');
       await js(`(function(){
-        window.confirm=function(){return true;};
         MM.settings.open();
         document.querySelector('.settings-nav[data-pane="data"]').click();
         [].slice.call(document.querySelectorAll('#pane-data button')).filter(function(b){return b.textContent.indexOf('清空所有会话')>=0;})[0].click();
+        var ov=document.getElementById('confirm-overlay'); var ok=ov && ov.querySelector('.cf-ok');
+        if (ok && !ov.classList.contains('hidden')) ok.click();
       })()`);
       await sleep(600);
       const t = await js(`({ title: document.querySelector('#session-title').textContent,
