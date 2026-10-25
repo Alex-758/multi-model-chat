@@ -653,14 +653,17 @@ server.listen(0, '127.0.0.1', () => {
         secret: false
       })`);
       assert(t.require === 'undefined' && t.process === 'undefined', JSON.stringify(t));
-      assert(t.api.length === 15 && t.api.indexOf('send') >= 0 && t.api.indexOf('setSecret') >= 0, JSON.stringify(t.api));
+      // API 面只允许白名单内的方法（并行开发可能新增导出类方法，逐一核对）
+      const allow = ['clearSecret','exportData','exportText','getAll','getCatalog','importData','listModels','onEvent','saveAll','search','send','setSecret','stop','synthesize','testModel','testSearch'];
+      const unknown = t.api.filter(k => allow.indexOf(k) < 0);
+      assert(unknown.length === 0 && t.api.indexOf('send') >= 0 && t.api.indexOf('setSecret') >= 0, JSON.stringify(t.api));
       assert(/default-src 'self'/.test(t.csp) && /object-src 'none'/.test(t.csp) && /base-uri 'none'/.test(t.csp), t.csp);
       assert(t.keys.length === 0, '渲染层有密钥: ' + JSON.stringify(t.keys));
       const bad = await js("api.setSecret('nonexistent-provider','x')");
       assert(bad === false, '不存在的服务商竟然写入成功');
       const all = await js("api.getAll().then(function(d){ return d.config.providers.some(function(p){ return 'apiKey' in p; }); })");
       assert(all === false, 'store:all 返回了 apiKey');
-      return JSON.stringify({ api: t.api.length, csp: 'ok' });
+      return JSON.stringify({ api: t.api.length, unknown: unknown, csp: 'ok' });
     });
 
     await run('安全：Markdown XSS 与来源链接协议过滤', async () => {

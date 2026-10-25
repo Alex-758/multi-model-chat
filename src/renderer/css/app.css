@@ -362,6 +362,8 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 }
 .tool-btn:hover { color: var(--text); background: var(--panel-3); }
 .tool-btn:disabled { opacity: .45; cursor: not-allowed; }
+/* 破坏性轮次操作：悬停转危险色，平时不抢眼 */
+.tool-btn.danger:hover { color: var(--danger); background: var(--danger-soft); }
 
 /* ---------- 输入区 ---------- */
 #composer { flex-shrink: 0; padding: 6px var(--gut) 16px; }

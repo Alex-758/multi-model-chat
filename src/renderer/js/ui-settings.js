@@ -264,6 +264,12 @@ window.MM = window.MM || {};
     const infoHint = U.el('div', { class: 'hint' });
     // 上一次识别对应的模型 ID：只有 ID 变化时才回填，避免失焦时覆盖用户手填的上下文/最大输出
     let lastAutoId = mo.modelId || '';
+    // 数字解析：Number() 支持 1e6 这类写法；parseInt 会把 '1e6' 解析成 1、把 '1,000' 解析成 1
+    function parseNum(v) {
+      if (v == null || v === '') return undefined;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    }
 
     function applyInfo(persist) {
       const id = midInput.value.trim();
@@ -276,8 +282,8 @@ window.MM = window.MM || {};
       if ((idChanged || !outInput.value) && meta.maxOutputTokens) outInput.value = meta.maxOutputTokens;
       lastAutoId = id;
       mo.modelId = id;
-      mo.contextTokens = ctxInput.value ? parseInt(ctxInput.value, 10) : undefined;
-      mo.maxTokens = outInput.value ? parseInt(outInput.value, 10) : undefined;
+      mo.contextTokens = parseNum(ctxInput.value);
+      mo.maxTokens = parseNum(outInput.value);
       mo.multimodal = meta.multimodal != null ? meta.multimodal : mo.multimodal;
       // 挂载时的自动识别不落盘：打开设置页会为每个模型行触发一次，没必要写盘。
       // 用户真正编辑（失焦/选择下拉）时才保存；关闭设置页也会统一保存一次。
@@ -331,8 +337,8 @@ window.MM = window.MM || {};
       applyInfo();
     });
     nameInput.addEventListener('input', () => { mo.name = nameInput.value.trim(); saveSoon(); });
-    ctxInput.addEventListener('change', () => { mo.contextTokens = ctxInput.value ? parseInt(ctxInput.value, 10) : undefined; saveSoon(); });
-    outInput.addEventListener('change', () => { mo.maxTokens = outInput.value ? parseInt(outInput.value, 10) : undefined; saveSoon(); });
+    ctxInput.addEventListener('change', () => { mo.contextTokens = parseNum(ctxInput.value); saveSoon(); });
+    outInput.addEventListener('change', () => { mo.maxTokens = parseNum(outInput.value); saveSoon(); });
     enCheck.addEventListener('change', () => {
       mo.enabled = enCheck.checked;
       saveSoon();
@@ -524,16 +530,19 @@ window.MM = window.MM || {};
       U.toast('已保存「' + p.name + '」');
     });
 
-    if (!p.preset) {
-      const delBtn = U.el('button', { class: 'btn-danger' }, '删除');
-      delBtn.addEventListener('click', () => {
-        if (!window.confirm('确定删除服务商「' + p.name + '」及其全部模型？')) return;
-        MM.state.config.providers = providers().filter(x => x.id !== p.id);
-        editingId = null;
-        MM.save({ configOnly: true }); renderModels(); syncModelConsumers();
-      });
-      ops.appendChild(delBtn);
-    }
+    // 删除：预置与自定义都允许。预置删除后可用「恢复预置服务商」重新添加，但密钥不会找回。
+    // 注意主进程按 providerId 合并密钥：条目删掉后旧密钥随下次保存一起消失，确认文案里必须讲清楚。
+    const delBtn = U.el('button', { class: 'btn-danger' }, '删除');
+    delBtn.addEventListener('click', () => {
+      const tip = p.preset
+        ? '确定删除预置服务商「' + p.name + '」？\n\n· 该服务商的 API Key 会一并清除\n· 之后可在「恢复预置服务商」里重新添加，但密钥需要重新填写'
+        : '确定删除服务商「' + p.name + '」及其全部模型？';
+      if (!window.confirm(tip)) return;
+      MM.state.config.providers = providers().filter(x => x.id !== p.id);
+      editingId = null;
+      MM.save({ configOnly: true }); renderModels(); syncModelConsumers();
+    });
+    ops.appendChild(delBtn);
     ops.appendChild(testBtn);
     ops.appendChild(saveBtn);
 
@@ -780,6 +789,8 @@ window.MM = window.MM || {};
         try {
           const data = await api.importData();
           if (!data) return;
+          // 导入会整体替换数据：先停掉在途请求，避免旧会话对象继续接收事件
+          if (MM.chat.stopAll) MM.chat.stopAll();
           const cfg = data.config || {};
           // 兼容 1.0 的平铺结构（config.models），交由 MM.normalizeConfig 统一迁移
           if (!Array.isArray(data.sessions) && !Array.isArray(cfg.providers) && !Array.isArray(cfg.models)) {
@@ -815,6 +826,7 @@ window.MM = window.MM || {};
       class: 'btn-secondary', style: 'color:var(--danger)',
       onclick: () => {
         if (!window.confirm('确定清空所有会话？模型配置将保留。')) return;
+        if (MM.chat.stopAll) MM.chat.stopAll();
         MM.state.sessions = [];
         MM.state.currentId = null;
         MM.sessions.create();

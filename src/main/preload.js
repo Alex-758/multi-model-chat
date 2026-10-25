@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('api', {
   clearSecret: (id) => ipcRenderer.invoke('secrets:clear', { id }),
   // 数据
   exportData: (d) => ipcRenderer.invoke('data:export', d),
+  exportText: (p) => ipcRenderer.invoke('data:exportText', p),
   importData: () => ipcRenderer.invoke('data:import'),
   // 事件流
   onEvent: (cb) => {

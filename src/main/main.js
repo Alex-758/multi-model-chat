@@ -346,6 +346,17 @@ ipcMain.handle('data:export', async () => {
   fs.writeFileSync(r.filePath, JSON.stringify({ config: db.config, sessions: db.sessions }, null, 1), 'utf8');
   return r.filePath;
 });
+// 导出单轮对话为 Markdown：内容由渲染层拼好传过来，这里只负责保存对话框与写盘
+ipcMain.handle('data:exportText', async (e, { content, filename }) => {
+  const r = await dialog.showSaveDialog(win, {
+    title: '导出本轮对话',
+    defaultPath: filename || '对话导出.md',
+    filters: [{ name: 'Markdown', extensions: ['md'] }, { name: '文本文件', extensions: ['txt'] }]
+  });
+  if (r.canceled || !r.filePath) return null;
+  fs.writeFileSync(r.filePath, String(content || ''), 'utf8');
+  return r.filePath;
+});
 // 导入在主进程完成：校验后落盘，返回给渲染层的数据剥离密钥
 ipcMain.handle('data:import', async () => {
   const r = await dialog.showOpenDialog(win, {

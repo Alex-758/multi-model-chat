@@ -12,6 +12,8 @@
 - **系统提示词**：全局设定模型角色与回答风格，也可为单个会话单独覆盖（会话设置优先）
 - **token 用量统计**：每张回答卡片显示本轮消耗、每轮显示合计、每个会话显示累计（仅统计服务端回传的真实用量）
 - **编辑重发**：直接修改已发送的提问并重新提问，之后的回答会相应重建
+- **单模型重试**：某个模型失败或超时，可只重试它一个，不必整轮重跑（省掉已成功模型的费用）
+- **导出 / 删除本轮**：一键把本轮问答（含用时与 token 用量）导出为 Markdown 文件；不需要的轮次可整轮删除
 - **预置 9 家服务商**：DeepSeek / Kimi 月之暗面 / 阿里百炼 / 智谱 BigModel / MiniMax / OpenAI / Anthropic / Google Gemini / OpenRouter，填 API Key 即用
   （预置模型：DeepSeek V4 Pro/V4.1 Flash；Kimi K3/K2.6；Qwen3.8 Max/Flash；GLM-5.3/5.3-Flash；MiniMax M3.1-Flash/M3；GPT-5.6/5.5；Claude Opus 5/Sonnet 5；Gemini 3.8 Flash/3.1 Pro；OpenRouter 上为 GPT-5.5、Claude Sonnet 5）
 - **任意自定义端点**：兼容 OpenAI Chat Completions 与 Anthropic Messages 两种 API 格式
