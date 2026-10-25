@@ -474,6 +474,17 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .btn-send:hover { background: var(--ink-2); }
 .btn-send.stop { background: var(--danger); }
 .btn-send.stop:hover { background: #c0271d; }
+/* 「+」附件按钮：输入框左端，细线条加号（与发送按钮同高，视觉上更轻） */
+.btn-attach {
+  flex-shrink: 0; align-self: flex-end;
+  width: var(--ctl-h); height: var(--ctl-h);
+  border: none; border-radius: 9px; background: transparent;
+  color: var(--muted); font-size: 21px; font-weight: 300; line-height: 1;
+  cursor: pointer; padding: 0 0 1px;
+  transition: color .15s, background .15s, transform .12s;
+}
+.btn-attach:hover { color: var(--text); background: var(--panel-2); }
+.btn-attach:active { transform: scale(.9); }
 
 /* ---------- 附件条（发送前） ---------- */
 #attach-bar {

@@ -332,6 +332,36 @@ ipcMain.handle('catalog:get', async (e, force) => {
 ipcMain.handle('images:save', (e, p) => images.saveImage(p));
 // PDF/Word 等文档全文提取（本机 markitdown）
 ipcMain.handle('attach:extractDoc', (e, p) => images.extractDoc(p));
+// 「+」按钮：原生文件选择框。沙箱渲染层读不了任意路径，由主进程读完按 base64 回传
+ipcMain.handle('files:pick', async () => {
+  const r = await dialog.showOpenDialog(win, {
+    title: '选择图片或文档附件',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'] },
+      { name: '文档', extensions: ['txt', 'md', 'markdown', 'csv', 'tsv', 'json', 'log', 'js', 'mjs', 'ts', 'jsx', 'tsx', 'py', 'java', 'c', 'h', 'cpp', 'hpp', 'cs', 'go', 'rs', 'rb', 'php', 'sh', 'bat', 'ps1', 'ini', 'cfg', 'conf', 'yml', 'yaml', 'toml', 'xml', 'sql', 'html', 'htm', 'rtf', 'pdf', 'docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt', 'epub'] },
+      { name: '所有文件', extensions: ['*'] }
+    ]
+  });
+  if (r.canceled || !r.filePaths || !r.filePaths.length) return null;
+  const IMG_MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', bmp: 'image/bmp' };
+  const files = [];
+  const tooLarge = [];
+  for (const p of r.filePaths.slice(0, 6)) { // 一次最多带回 6 个，避免误选整目录拖垮 IPC
+    let st;
+    try { st = fs.statSync(p); } catch (err) { continue; }
+    if (!st.isFile()) continue;
+    if (st.size > 25 * 1024 * 1024) { tooLarge.push(path.basename(p)); continue; }
+    try {
+      files.push({
+        name: path.basename(p),
+        mime: IMG_MIME[path.extname(p).slice(1).toLowerCase()] || '',
+        base64: fs.readFileSync(p).toString('base64')
+      });
+    } catch (err) { /* 单个文件读不了就跳过，不阻断其他文件 */ }
+  }
+  return { files, tooLarge };
+});
 
 // ---------- IPC：联网搜索 ----------
 ipcMain.handle('search:query', (e, { query, count }) => {

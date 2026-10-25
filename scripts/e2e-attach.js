@@ -2,7 +2,7 @@
 // 端到端测试：图片/文档附件（真实 main.js + 本地 mock 模型服务）。
 // 覆盖：图片落盘+mmimg 协议、粘贴后芯片状态、多模态路由（原图 vs OCR 文字）、
 //       后续轮占位不重发原图、纯文本模型跳过、拖入 txt 进上下文、整会话导出结构。
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, dialog } = require('electron');
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
@@ -309,6 +309,42 @@ async function main() {
     })()`);
     assert(t.cards >= 3 && t.hit >= 1, JSON.stringify(t));
     return '兼容 OK';
+  });
+
+  // ---------- 11. 「+」按钮：文件选择框加附件 ----------
+  await run('「+」按钮：选中的文件进入附件链与上下文', async () => {
+    const pickPath = path.join(DATA, 'picked-note.txt');
+    fs.writeFileSync(pickPath, 'PICKED-BY-PLUS-BUTTON-CONTENT', 'utf8');
+    const orig = dialog.showOpenDialog;
+    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [pickPath] });
+    try {
+      await js(`MM.chat.stopAll(); document.querySelector('#btn-new-chat').click()`);
+      await sleep(200);
+      await setChips(['p1::mv']);
+      const clicked = await js(`(function(){ var b = document.querySelector('#btn-attach'); if (!b) return false; b.click(); return true; })()`);
+      assert(clicked, '找不到 #btn-attach 按钮');
+      assert(await waitFor(`(function(){
+        var chips = document.querySelectorAll('#attach-bar .att-chip');
+        if (chips.length !== 1) return false;
+        var st = chips[0].querySelector('.att-status');
+        return st && st.textContent.indexOf('…') < 0;
+      })()`, 10000), '附件芯片未就绪');
+      const chip = await js(`document.querySelector('#attach-bar .att-name').textContent`);
+      assert(chip === 'picked-note.txt', '文件名不符: ' + chip);
+      await sendText('看看这个文件');
+      assert(await waitFor(doneExpr, 15000), '未完成');
+      const mv = requests.filter(r => r.body && r.body.model === 'mv').pop();
+      assert(wire(mv).indexOf('PICKED-BY-PLUS-BUTTON-CONTENT') >= 0, '文件内容应进上下文');
+      // 取消选择框：不应出现附件
+      dialog.showOpenDialog = async () => ({ canceled: true, filePaths: [] });
+      await js(`document.querySelector('#btn-attach').click()`);
+      await sleep(300);
+      const n = await js(`document.querySelectorAll('#attach-bar .att-chip').length`);
+      assert(n === 0, '取消后不应有附件: ' + n);
+      return 'OK';
+    } finally {
+      dialog.showOpenDialog = orig;
+    }
   });
 
   server.close();

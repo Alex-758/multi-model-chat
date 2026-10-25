@@ -299,7 +299,7 @@ window.MM = window.MM || {};
     b.classList.toggle('ready', on || inp.value.trim().length > 0);
     U.$('.input-row').classList.toggle('off', on);
     if (on) inp.placeholder = '生成中，请稍候…';
-    else inp.placeholder = '输入消息…  Enter 发送，Shift+Enter 换行，可粘贴/拖入图片或文档';
+    else inp.placeholder = '输入消息…  Enter 发送，Shift+Enter 换行，可粘贴/拖入或点 + 加附件';
   }
 
   function selectedModels() {
@@ -1867,7 +1867,32 @@ window.MM = window.MM || {};
       if (streamingHere()) stopAll(); else send();
     });
     U.$('#input').addEventListener('input', autoResize);
-    // ---------- 附件：粘贴图片 ----------
+    // 「+」按钮：原生文件选择框加附件
+    const attBtn = U.$('#btn-attach');
+    if (attBtn) attBtn.addEventListener('click', pickAttachments);
+    // 「+」按钮：主进程弹原生文件选择框并读回内容，这里转成 File 对象走同一条附件处理链
+  // （图片压缩/OCR、文档提取、数量与大小上限全部复用）
+  async function pickAttachments() {
+    let r;
+    try {
+      r = await api.pickFiles();
+    } catch (e) {
+      U.toast('选择文件失败：' + ((e && e.message) || e), true);
+      return;
+    }
+    if (!r) return; // 用户取消了选择框
+    for (const name of (r.tooLarge || [])) U.toast('「' + name + '」超过大小上限，已跳过', true);
+    for (const f of (r.files || [])) {
+      const bin = atob(f.base64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      await addDroppedFile(new File([arr], f.name || '附件', { type: f.mime || '' }));
+    }
+    const inp = U.$('#input');
+    if (inp) inp.focus();
+  }
+
+  // ---------- 附件：粘贴图片 ----------
     // 只拦截文件型剪贴板内容（截图工具、复制的图片文件）；纯文本粘贴走默认行为
     U.$('#input').addEventListener('paste', function (e) {
       const items = (e.clipboardData && e.clipboardData.items) || [];

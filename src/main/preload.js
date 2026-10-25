@@ -23,9 +23,10 @@ contextBridge.exposeInMainWorld('api', {
   exportData: (d) => ipcRenderer.invoke('data:export', d),
   exportText: (p) => ipcRenderer.invoke('data:exportText', p),
   importData: () => ipcRenderer.invoke('data:import'),
-  // 附件：图片落盘+OCR，文档全文提取
+  // 附件：图片落盘+OCR，文档全文提取，「+」按钮文件选择
   saveImage: (p) => ipcRenderer.invoke('images:save', p),
   extractDoc: (p) => ipcRenderer.invoke('attach:extractDoc', p),
+  pickFiles: () => ipcRenderer.invoke('files:pick'),
   // 事件流
   onEvent: (cb) => {
     const h = (e, d) => cb(d);
