@@ -198,10 +198,12 @@ server.listen(0, '127.0.0.1', () => {
       await sendText('流式中删除');
       assert(await waitFor("(document.querySelector('.ac-body') && document.querySelector('.ac-body').textContent.length > 2)", 6000), '没有开始输出');
       await js(`(function(){
-        window.confirm=function(){return true;};
         var it=${itemExpr('会话C')};
         [].slice.call(it.querySelectorAll('.s-actions button')).filter(function(x){return x.textContent==='删除';})[0].click();
       })()`);
+      await sleep(200);
+      // 删除确认走应用内确认框（U.confirm），点确认
+      await js("(function(){ var ov=document.getElementById('confirm-overlay'); var ok=ov&&ov.querySelector('.cf-ok'); if(ok&&ov.classList.contains('hidden')===false) ok.click(); })()");
       await sleep(500);
       const t = await js(`({ fatal: !!document.getElementById('fatal-error'),
                            exists: [].slice.call(document.querySelectorAll('#session-list .s-title')).some(function(x){return x.textContent==='会话C';}),
@@ -256,9 +258,12 @@ server.listen(0, '127.0.0.1', () => {
 
     // ---------- 6. 清空所有会话 ----------
     await run('清空所有会话：保留模型配置', async () => {
-      await js(`(function(){ MM.settings.open(); document.querySelector('.settings-nav[data-pane="data"]').click(); window.confirm=function(){return true;}; })()`);
+      await js(`(function(){ MM.settings.open(); document.querySelector('.settings-nav[data-pane="data"]').click(); })()`);
       await sleep(200);
       await js(`[].slice.call(document.querySelectorAll('#pane-data button')).filter(function(b){return b.textContent.indexOf('清空所有会话')>=0;})[0].click()`);
+      await sleep(200);
+      // 清空确认走应用内确认框（U.confirm），点确认
+      await js("(function(){ var ov=document.getElementById('confirm-overlay'); var ok=ov&&ov.querySelector('.cf-ok'); if(ok&&ov.classList.contains('hidden')===false) ok.click(); })()");
       await sleep(400);
       const t = await js(`({ n: MM.state.sessions.length, title: document.querySelector('#session-title').textContent,
                            empty: !!document.querySelector('#messages .empty-state'),

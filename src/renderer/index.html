@@ -21,6 +21,11 @@
         </div>
         <button id="btn-new-chat" class="btn-primary">新建会话</button>
       </div>
+      <div id="session-search">
+        <input id="session-filter" type="text" placeholder="搜索会话标题与内容…"
+          title="按标题或消息内容过滤会话；新建会话时会自动清空" autocomplete="off" spellcheck="false">
+        <button id="btn-filter-clear" class="hidden" title="清除搜索">✕</button>
+      </div>
       <div id="session-list"></div>
       <div class="side-foot">
         <button id="btn-theme" class="btn-ghost" title="切换主题">主题</button>
@@ -88,6 +93,18 @@
         <div id="pane-synth" class="settings-pane"></div>
         <div id="pane-prompt" class="settings-pane"></div>
         <div id="pane-data" class="settings-pane"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 应用内确认对话框（替代原生 window.confirm） -->
+  <div id="confirm-overlay" class="hidden">
+    <div class="confirm-dialog">
+      <div class="cf-title"></div>
+      <div class="cf-msg"></div>
+      <div class="cf-actions">
+        <button class="btn-secondary cf-cancel">取消</button>
+        <button class="btn-primary cf-ok">确定</button>
       </div>
     </div>
   </div>

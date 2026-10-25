@@ -345,10 +345,24 @@ window.MM = window.MM || {};
       syncModelConsumers(); // 启用状态实时反映到聊天页选择器与综合回答下拉
     });
     delBtn.addEventListener('click', () => {
-      p.models = p.models.filter(x => x !== mo);
+      // 静默删除太危险（上下文/最大输出等手填参数会一起丢）：删后给 5 秒撤销窗口
+      const idx = p.models.indexOf(mo);
+      if (idx < 0) return;
+      p.models.splice(idx, 1);
       MM.save({ configOnly: true });
       renderModelEntries();
       syncModelConsumers();
+      U.toast('已删除模型「' + (mo.name || mo.modelId || '未命名') + '」', false, {
+        label: '撤销',
+        fn: function () {
+          // 原对象插回原位置：上下文/最大输出等手填参数原样恢复
+          if (p.models.includes(mo)) return; // 服务商已重建等异常情况不再插回
+          p.models.splice(Math.min(idx, p.models.length), 0, mo);
+          MM.save({ configOnly: true });
+          renderModelEntries();
+          syncModelConsumers();
+        }
+      });
     });
 
     const row = U.el('div', { class: 'm-entry' },
@@ -411,7 +425,13 @@ window.MM = window.MM || {};
     }, '清除');
     clearKeyBtn.addEventListener('click', async () => {
       if (!p.hasKey) return;
-      if (!window.confirm('确定清除已保存的 API 密钥？')) return;
+      const ok = await U.confirm({
+        title: '清除 API 密钥',
+        message: '确定清除已保存的 API 密钥？清除后该服务商的模型将无法调用，需重新填写。',
+        okText: '清除',
+        danger: true
+      });
+      if (!ok) return;
       try { await api.clearSecret(p.id); }
       catch (e) { U.toast('清除失败：' + ((e && e.message) || e), true); return; }
       p.hasKey = false;
@@ -533,11 +553,17 @@ window.MM = window.MM || {};
     // 删除：预置与自定义都允许。预置删除后可用「恢复预置服务商」重新添加，但密钥不会找回。
     // 注意主进程按 providerId 合并密钥：条目删掉后旧密钥随下次保存一起消失，确认文案里必须讲清楚。
     const delBtn = U.el('button', { class: 'btn-danger' }, '删除');
-    delBtn.addEventListener('click', () => {
+    delBtn.addEventListener('click', async () => {
       const tip = p.preset
-        ? '确定删除预置服务商「' + p.name + '」？\n\n· 该服务商的 API Key 会一并清除\n· 之后可在「恢复预置服务商」里重新添加，但密钥需要重新填写'
-        : '确定删除服务商「' + p.name + '」及其全部模型？';
-      if (!window.confirm(tip)) return;
+        ? '确定删除预置服务商「' + p.name + '」？该服务商的 API Key 会一并清除；之后可在「恢复预置服务商」里重新添加，但密钥需要重新填写。'
+        : '确定删除服务商「' + p.name + '」及其全部模型？此操作不可恢复。';
+      const ok = await U.confirm({
+        title: '删除服务商',
+        message: tip,
+        okText: '删除',
+        danger: true
+      });
+      if (!ok) return;
       MM.state.config.providers = providers().filter(x => x.id !== p.id);
       editingId = null;
       MM.save({ configOnly: true }); renderModels(); syncModelConsumers();
@@ -766,14 +792,12 @@ window.MM = window.MM || {};
       class: 'btn-secondary',
       onclick: async () => {
         // 导出文件包含明文 API 密钥，先明确告知风险再让用户确认
-        const msg = [
-          '导出的备份文件包含明文 API 密钥。',
-          '',
-          '请只保存在本机或可信位置，不要上传到网盘、聊天工具或代码仓库。',
-          '',
-          '确定继续导出？'
-        ].join('\n');
-        if (!window.confirm(msg)) return;
+        const ok = await U.confirm({
+          title: '导出数据',
+          message: '导出的备份文件包含明文 API 密钥。请只保存在本机或可信位置，不要上传到网盘、聊天工具或代码仓库。确定继续导出？',
+          okText: '导出'
+        });
+        if (!ok) return;
         try {
           const p = await api.exportData({ config: MM.state.config, sessions: MM.state.sessions });
           if (p) U.toast('已导出到 ' + p + '（含明文 API 密钥，请妥善保管）');
@@ -824,8 +848,14 @@ window.MM = window.MM || {};
 
     box.appendChild(U.el('button', {
       class: 'btn-secondary', style: 'color:var(--danger)',
-      onclick: () => {
-        if (!window.confirm('确定清空所有会话？模型配置将保留。')) return;
+      onclick: async () => {
+        const ok = await U.confirm({
+          title: '清空所有会话',
+          message: '确定清空所有会话？全部聊天记录将删除且不可恢复，模型配置保留。',
+          okText: '清空',
+          danger: true
+        });
+        if (!ok) return;
         if (MM.chat.stopAll) MM.chat.stopAll();
         MM.state.sessions = [];
         MM.state.currentId = null;

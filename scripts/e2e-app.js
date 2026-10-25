@@ -520,7 +520,7 @@ server.listen(0, '127.0.0.1', () => {
 
     // ---------- 16. 自定义服务商增删 ----------
     await run('自定义服务商：添加后出现在列表并可删除', async () => {
-      await js(`(function(){ window.confirm=function(){return true;}; MM.settings.open(); document.querySelector('.settings-nav[data-pane="models"]').click(); })()`);
+      await js(`(function(){ MM.settings.open(); document.querySelector('.settings-nav[data-pane="models"]').click(); })()`);
       await sleep(200);
       const before = await js("document.querySelectorAll('#pane-models .model-row').length");
       await js("[].slice.call(document.querySelectorAll('#pane-models button')).filter(function(b){return b.textContent.indexOf('添加自定义服务商')>=0;})[0].click()");
@@ -528,9 +528,12 @@ server.listen(0, '127.0.0.1', () => {
       const after = await js("document.querySelectorAll('#pane-models .model-row').length");
       assert(after === before + 1, 'before=' + before + ' after=' + after);
       await js("document.querySelector('.pm-head-ops .btn-danger').click()");
+      await sleep(200);
+      // 删除确认走应用内确认框（U.confirm），要点确认按钮而不是原生 window.confirm
+      await js("(function(){ var ov=document.getElementById('confirm-overlay'); var ok=ov&&ov.querySelector('.cf-ok'); if(ok&&ov.classList.contains('hidden')===false) ok.click(); })()");
       await sleep(250);
       const back = await js("document.querySelectorAll('#pane-models .model-row').length");
-      assert(back === before, '删除后=' + back);
+      assert(back === before, 'before=' + before + ' 删除后=' + back);
       await js('MM.settings.close()');
       await sleep(250);
       return JSON.stringify({ before: before, after: after, back: back });
@@ -540,11 +543,19 @@ server.listen(0, '127.0.0.1', () => {
     await run('导出数据：确认提示 + 文件内容', async () => {
       nextSave = path.join(DATA, 'export.json');
       await js(`(function(){
-        window.__confirmMsg='';
-        window.confirm=function(m){ window.__confirmMsg=m; return true; };
         MM.settings.open();
         document.querySelector('.settings-nav[data-pane="data"]').click();
         [].slice.call(document.querySelectorAll('#pane-data button')).filter(function(b){return b.textContent.indexOf('导出数据')>=0;})[0].click();
+      })()`);
+      await sleep(200);
+      // 导出前会弹应用内确认框（提示备份含明文密钥），点确认并读它的文案
+      const confirmMsg = await js(`(function(){
+        var ov = document.getElementById('confirm-overlay');
+        if (!ov || ov.classList.contains('hidden')) return '(无确认框)';
+        var msg = ov.querySelector('.cf-msg');
+        var ok = ov.querySelector('.cf-ok');
+        if (ok) ok.click();
+        return msg ? msg.textContent : '';
       })()`);
       await sleep(800);
       assert(fs.existsSync(nextSave), '导出文件不存在');
@@ -552,8 +563,7 @@ server.listen(0, '127.0.0.1', () => {
       assert(Array.isArray(j.sessions) && j.config && Array.isArray(j.config.providers), '导出结构不对');
       const p1 = j.config.providers.find(p => p.id === 'p1');
       assert(p1 && p1.apiKey === 'k1', '导出应包含明文密钥（用户确认的备份）');
-      const msg = await js('window.__confirmMsg');
-      assert(/明文 API 密钥/.test(msg || ''), '确认文案=' + msg);
+      assert(/明文 API 密钥/.test(confirmMsg || ''), '确认文案=' + confirmMsg);
       await js('MM.settings.close()');
       await sleep(250);
       return JSON.stringify({ sessions: j.sessions.length, providers: j.config.providers.length, hasPlain: p1.apiKey === 'k1' });

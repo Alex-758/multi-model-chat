@@ -69,16 +69,18 @@ app.whenReady().then(async () => {
     o.tools.some(function(t){return t.indexOf('重新生成')>=0;}) && o.tools.some(function(t){return t.indexOf('综合回答')>=0;}), r);
 
   // ===== 删除本轮 =====
-  r = await js(`(function(){
-    window.confirm = function(){ return true; };
-    MM.chat._deleteRoundForTest('r1');
+  r = await js(`(async function(){
+    // deleteRound 用的是 U.confirm 异步对话框（与删除会话一致的交互），
+    // 自动化测试里无法点按钮，直接桩掉让确认恒为真；deleteRound 本身也是 async，要等它跑完
+    MM.util.confirm = function () { return Promise.resolve(true); };
+    await MM.chat._deleteRoundForTest('r1');
     var s = MM.sessions.current();
     return JSON.stringify({len:s.messages.length, roles:s.messages.map(function(m){return m.role;})});
   })()`);
   o = JSON.parse(r);
   check('删除本轮连提问一起移除', o.len === 0, r);
 
-  r = await js(`(function(){
+  r = await js(`(async function(){
     // 多轮场景：只删指定轮，后续轮次不受影响
     var s = MM.sessions.current();
     s.messages = [
@@ -87,7 +89,7 @@ app.whenReady().then(async () => {
       {id:'u2', role:'user', content:'问2'},
       {id:'a2', role:'assistant', roundId:'rB', results:[{modelId:'m1',name:'A',status:'done',content:'答2'}]}
     ];
-    MM.chat._deleteRoundForTest('rA');
+    await MM.chat._deleteRoundForTest('rA');
     return JSON.stringify(s.messages.map(function(m){return m.id;}));
   })()`);
   o = JSON.parse(r);

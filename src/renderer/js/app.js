@@ -282,6 +282,16 @@ MM.defaults = {
       providers = JSON.parse(JSON.stringify(MM.defaults.PRESET_PROVIDERS));
     }
     delete cfg.models;
+    // 芯片勾选记忆（{on:[],off:[]}）：导入/旧数据里可能是任意形状，清洗成合法结构；
+    // 缺失时保持 undefined（渲染层按"全部默认选中"处理，不误建空记录）
+    if (cfg.chipSel != null) {
+      if (typeof cfg.chipSel !== 'object' || !Array.isArray(cfg.chipSel.on) || !Array.isArray(cfg.chipSel.off)) {
+        delete cfg.chipSel;
+      } else {
+        cfg.chipSel.on = cfg.chipSel.on.filter(x => typeof x === 'string');
+        cfg.chipSel.off = cfg.chipSel.off.filter(x => typeof x === 'string');
+      }
+    }
     // 丢弃非法条目，并保证每个服务商都有 models 数组（导入/手改数据可能缺字段）
     providers = providers.filter(p => p && typeof p === 'object');
     for (const p of providers) {
