@@ -475,6 +475,94 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .btn-send.stop { background: var(--danger); }
 .btn-send.stop:hover { background: #c0271d; }
 
+/* ---------- 附件条（发送前） ---------- */
+#attach-bar {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  padding: 6px 2px;
+}
+.att-chip {
+  position: relative; display: flex; align-items: center; gap: 8px;
+  max-width: 280px; padding: 6px 26px 6px 8px;
+  background: var(--panel-2); border: 1px solid var(--border-2); border-radius: 10px;
+  cursor: pointer; transition: border-color .15s;
+}
+.att-chip:hover { border-color: var(--text-2); }
+.att-chip.failed { border-color: var(--danger); }
+.att-thumb { width: 38px; height: 38px; object-fit: cover; border-radius: 7px; flex-shrink: 0; border: 1px solid var(--border); }
+.att-ico { font-size: 20px; flex-shrink: 0; }
+.att-meta { min-width: 0; }
+.att-name {
+  font-size: 12px; color: var(--text); font-weight: 600;
+  max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.att-status { font-size: 11px; color: var(--muted); margin-top: 1px; }
+.att-chip.failed .att-status { color: var(--danger); }
+.att-x {
+  position: absolute; top: 3px; right: 3px;
+  width: 16px; height: 16px; line-height: 14px; text-align: center;
+  border: none; border-radius: 50%; background: var(--border-2); color: var(--text-2);
+  font-size: 11px; cursor: pointer; padding: 0;
+}
+.att-x:hover { background: var(--danger); color: #fff; }
+/* 拖拽悬停时输入区高亮 */
+#main.dragging .input-row { border-color: var(--text); box-shadow: 0 0 0 2px var(--accent-soft); }
+
+/* 消息里的附件展示（用户气泡下方） */
+.msg-attach { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.msg-thumb {
+  width: 72px; height: 72px; object-fit: cover; border-radius: 8px;
+  border: 1px solid var(--border); cursor: zoom-in;
+}
+.msg-file {
+  font-size: 12px; color: var(--text-2); background: var(--panel-2);
+  border: 1px solid var(--border-2); border-radius: 8px; padding: 5px 10px; cursor: pointer;
+}
+.msg-file:hover { border-color: var(--text-2); color: var(--text); }
+
+/* 不支持图片的模型芯片：贴图后加提示点 */
+.chip.no-vision::after {
+  content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--border-2); margin-left: 5px; vertical-align: middle;
+  border: 1px solid var(--muted);
+}
+.chip.no-vision.on::after { background: var(--panel); }
+
+/* 附件预览浮层（图片放大 / 文档全文） */
+#attach-view {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(15, 18, 28, .55);
+  display: flex; align-items: center; justify-content: center; padding: 32px;
+}
+.av-panel {
+  max-width: 920px; max-height: 88vh; width: min(920px, 94vw);
+  display: flex; flex-direction: column;
+  background: var(--panel); border-radius: 14px; overflow: hidden;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .4);
+}
+.av-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-bottom: 1px solid var(--border);
+  font-size: 13px; font-weight: 600; color: var(--text);
+}
+#av-close {
+  border: none; background: transparent; color: var(--muted);
+  font-size: 20px; cursor: pointer; line-height: 1; padding: 2px 6px;
+}
+#av-close:hover { color: var(--text); }
+.av-body { overflow: auto; padding: 14px; display: flex; justify-content: center; }
+.av-img { max-width: 100%; max-height: 74vh; border-radius: 8px; }
+.av-pre {
+  width: 100%; white-space: pre-wrap; word-break: break-word;
+  font-size: 12.5px; line-height: 1.65; color: var(--text);
+  font-family: Consolas, monospace; margin: 0;
+}
+
+/* 图片轮里被跳过的模型卡片 */
+.ac-skipped {
+  color: var(--muted); font-size: 12.5px; line-height: 1.6;
+  padding: 6px 0;
+}
+
 /* ---------- Markdown 内容 ---------- */
 .md > *:first-child { margin-top: 0; }
 .md > *:last-child { margin-bottom: 0; }

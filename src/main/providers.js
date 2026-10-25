@@ -1,6 +1,7 @@
 'use strict';
 // 统一的模型客户端：兼容 OpenAI Chat Completions 与 Anthropic Messages 两种 API 格式
-// 支持流式(SSE)输出、reasoning 思考链、原生联网搜索开关、模型列表、连通性测试
+// 支持流式(SSE)输出、reasoning 思考链、原生联网搜索开关、图片输入、模型列表、连通性测试
+const images = require('./images');
 
 function normalizeBase(url) { return (url || '').trim().replace(/\/+$/, ''); }
 
@@ -50,8 +51,47 @@ function requestModelId(m, searchOn) {
   return m.modelId;
 }
 
+// 带图片引用的用户消息转成各家 API 的多部件 content。
+// 路由由渲染层决定：多模态模型的消息带 images 数组（这里读文件转 base64 部件）；
+// 纯文本模型的消息在渲染层就已把图中文字拼进 content，不会带 images 到这里。
+function withImageParts(m, messages) {
+  let touched = false;
+  const out = messages.map(msg => {
+    if (!msg || !Array.isArray(msg.images) || !msg.images.length) return msg;
+    touched = true;
+    const text = typeof msg.content === 'string' ? msg.content : '';
+    const parts = [];
+    if (text) parts.push({ type: 'text', text: text });
+    let got = 0;
+    for (const im of msg.images) {
+      if (!im || !im.id) continue;
+      const b = images.loadBase64(im.id, im.ext);
+      if (!b) continue; // 文件被清理/换机器丢失：跳过这张图，文字兜底在下面
+      got++;
+      if (m.apiFormat === 'anthropic') {
+        parts.push({ type: 'image', source: { type: 'base64', media_type: b.mime, data: b.base64 } });
+      } else {
+        parts.push({ type: 'image_url', image_url: { url: 'data:' + b.mime + ';base64,' + b.base64 } });
+      }
+    }
+    if (!got) {
+      // 图片文件全部缺失：退回纯文本（带上 OCR 文字），避免空 content 被服务端 400
+      let fallback = text || '（图片文件已失效）';
+      for (const im of msg.images) {
+        if (im && im.text) fallback += '\n\n[图片 ' + (im.name || '') + ' 中的文字]\n' + im.text;
+      }
+      return { role: msg.role, content: fallback };
+    }
+    // 只发图没打字：补一句提示词，部分端点不接受全图片部件的 content
+    if (!text) parts.unshift({ type: 'text', text: '请看图回答用户的问题' });
+    return { role: msg.role, content: parts };
+  });
+  return touched ? out : messages;
+}
+
 function buildBody(m, messages, opts) {
   const { stream, searchOn } = opts;
+  messages = withImageParts(m, messages);
   if (m.apiFormat === 'anthropic') {
     const system = messages.filter(r => r.role === 'system').map(r => r.content).join('\n\n');
     const msgs = messages.filter(r => r.role !== 'system');

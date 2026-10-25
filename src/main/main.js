@@ -5,6 +5,10 @@ const fs = require('fs');
 const store = require('./store');
 const providers = require('./providers');
 const search = require('./search');
+const images = require('./images');
+
+// 自定义协议（mmimg://）必须在 app ready 之前注册
+images.registerScheme();
 
 if (!app.requestSingleInstanceLock()) {
   // 拿不到锁：直接退出，不再注册 IPC / 建窗，避免第二实例读写同一份数据文件
@@ -323,6 +327,12 @@ ipcMain.handle('catalog:get', async (e, force) => {
   }
 });
 
+// ---------- IPC：附件 ----------
+// 渲染层贴图/拖图后把 base64 交给这里：落盘 + 系统 OCR 提取文字，返回引用 id
+ipcMain.handle('images:save', (e, p) => images.saveImage(p));
+// PDF/Word 等文档全文提取（本机 markitdown）
+ipcMain.handle('attach:extractDoc', (e, p) => images.extractDoc(p));
+
 // ---------- IPC：联网搜索 ----------
 ipcMain.handle('search:query', (e, { query, count }) => {
   return search.webSearch((db.config && db.config.search) || {}, query, count);
@@ -346,10 +356,10 @@ ipcMain.handle('data:export', async () => {
   fs.writeFileSync(r.filePath, JSON.stringify({ config: db.config, sessions: db.sessions }, null, 1), 'utf8');
   return r.filePath;
 });
-// 导出单轮对话为 Markdown：内容由渲染层拼好传过来，这里只负责保存对话框与写盘
-ipcMain.handle('data:exportText', async (e, { content, filename }) => {
+// 导出对话文本（单轮 / 整会话共用）：内容由渲染层拼好传过来，这里只负责保存对话框与写盘
+ipcMain.handle('data:exportText', async (e, { content, filename, title }) => {
   const r = await dialog.showSaveDialog(win, {
-    title: '导出本轮对话',
+    title: title || '导出本轮对话',
     defaultPath: filename || '对话导出.md',
     filters: [{ name: 'Markdown', extensions: ['md'] }, { name: '文本文件', extensions: ['txt'] }]
   });
@@ -418,6 +428,10 @@ app.whenReady().then(() => {
         '请勿把数据文件复制到网盘、聊天工具或不可信位置。'
     });
   }
+  // 图片附件目录 + mmimg:// 协议；顺带清理已无会话引用的孤儿图片
+  images.init(store.dir());
+  images.registerProtocol();
+  images.gc(db.sessions);
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

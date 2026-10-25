@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none';">
+        content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: mmimg:; connect-src 'self'; object-src 'none'; base-uri 'none';">
   <title>Multi-Model Chat</title>
   <link rel="stylesheet" href="css/app.css">
 </head>
@@ -39,6 +39,7 @@
         <div id="session-title" title="双击重命名">新会话</div>
         <div class="topbar-actions">
           <button id="btn-session-prompt" class="btn-ghost" title="为当前会话单独设置系统提示词（留空则用全局提示词）">提示词</button>
+          <button id="btn-export-session" class="btn-ghost" title="把整个会话（提问、各模型回答、综合回答、附件全文）导出为 Markdown 文件">导出</button>
           <label class="toggle" id="tgl-search-wrap" title="优先使用各服务商原生联网能力，并可在设置中配置通用搜索 API 注入结果">
             <input type="checkbox" id="tgl-search"><span class="tgl-track"></span><span class="tgl-label">联网搜索</span>
           </label>
@@ -64,6 +65,7 @@
           <textarea id="session-prompt" rows="3"
             placeholder="仅本会话生效；留空则使用「设置 → 系统提示词」里的全局提示词"></textarea>
         </div>
+        <div id="attach-bar" class="hidden"></div>
         <div class="input-row">
           <textarea id="input" rows="1"
             placeholder="输入消息…  Enter 发送，Shift+Enter 换行"></textarea>
@@ -110,6 +112,14 @@
   </div>
 
   <div id="toast" class="hidden"></div>
+
+  <!-- 附件预览浮层：图片放大 / 附件提取文本查看 -->
+  <div id="attach-view" class="hidden">
+    <div class="av-panel">
+      <div class="av-head"><span id="av-title"></span><button id="av-close" title="关闭 (Esc)">×</button></div>
+      <div class="av-body" id="av-body"></div>
+    </div>
+  </div>
 
   <script src="js/util.js"></script>
   <script src="js/model-info.js"></script>

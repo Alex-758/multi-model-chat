@@ -664,7 +664,7 @@ server.listen(0, '127.0.0.1', () => {
       })`);
       assert(t.require === 'undefined' && t.process === 'undefined', JSON.stringify(t));
       // API 面只允许白名单内的方法（并行开发可能新增导出类方法，逐一核对）
-      const allow = ['clearSecret','exportData','exportText','getAll','getCatalog','importData','listModels','onEvent','saveAll','search','send','setSecret','stop','synthesize','testModel','testSearch'];
+      const allow = ['clearSecret','exportData','exportText','extractDoc','getAll','getCatalog','importData','listModels','onEvent','saveAll','saveImage','search','send','setSecret','stop','synthesize','testModel','testSearch'];
       const unknown = t.api.filter(k => allow.indexOf(k) < 0);
       assert(unknown.length === 0 && t.api.indexOf('send') >= 0 && t.api.indexOf('setSecret') >= 0, JSON.stringify(t.api));
       assert(/default-src 'self'/.test(t.csp) && /object-src 'none'/.test(t.csp) && /base-uri 'none'/.test(t.csp), t.csp);
