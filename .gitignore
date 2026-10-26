@@ -15,3 +15,6 @@ catalog.json
 .idea/
 Thumbs.db
 .DS_Store
+
+# 本地代理行为准则（只在本机生效，不入库、不推送）
+AGENTS.md
