@@ -3,7 +3,9 @@
 // - 图片存 userData/images/<id>.<ext>，消息里只存 {id, ext} 引用，store.json 不膨胀
 // - Windows 系统 OCR（PowerShell 调 WinRT OcrEngine）提取图中文字，供纯文本模型使用
 // - mmimg:// 协议把图片安全地喂给渲染层 <img>（id/ext 白名单校验，只能访问 images 目录）
-// - extractDoc：PDF/Word/Excel/PPT 等文档全文提取（本机 markitdown 命令，装了就用，没装给明确提示）
+// - extractDoc：文档全文提取，双通道按格式路由——PDF/Word 走进程内 JS 库
+//   （pdfjs-dist / mammoth），Excel/PPT/RTF/EPUB/HTML 走 markitdown（内置 PyInstaller
+//   转换器优先，回落本机命令）；JS 失败也回落 markitdown
 // - gc：启动时按全部会话的引用清理孤儿图片（删消息/删会话留下的文件最迟下次启动回收）
 const fs = require('fs');
 const path = require('path');
@@ -164,23 +166,44 @@ function ocrFile(file) {
 }
 
 // ---------- 文档全文提取 ----------
-// PDF / Word / Excel / PPT 等格式在 Node 侧没有零依赖的可靠解析方案，
-// 借用本机已安装的 markitdown（pip 安装的命令行工具）。没装时给出可操作的提示。
+// 双通道按扩展名路由，互为兜底：
+// - JS 通道（进程内，快、无外部依赖风险）：pdf → pdfjs-dist，docx → mammoth
+// - markitdown 通道：xlsx / pptx / rtf / epub / html 等；优先用随应用打包的
+//   PyInstaller 内置转换器（build/markitdown，onedir、不用 UPX 以降低杀软误报），
+//   找不到再回落本机安装的 markitdown 命令；JS 通道失败时也回落 markitdown
 const DOC_EXTS = /^(pdf|docx|doc|xlsx|xls|pptx|ppt|rtf|html?|epub)$/i;
+// 这两个老格式 JS 库与 markitdown 都不认：给可操作的提示，不笼统报错
+const LEGACY_HINT = { doc: '.doc 建议先在 Word 里另存为 .docx 再拖入', xls: '.xls 建议先在 Excel 里另存为 .xlsx 再拖入' };
 
-function runCmd(cmd, args, timeoutMs) {
+// 内置转换器 exe：打包后位于 resources/markitdown/；开发态用仓库 build/markitdown/
+function bundledConverter() {
+  const candidates = [];
+  try {
+    const { app } = require('electron');
+    if (app && app.isPackaged && process.resourcesPath) {
+      candidates.push(path.join(process.resourcesPath, 'markitdown', 'markitdown.exe'));
+    }
+  } catch (e) { /* 非 Electron 环境（测试直接 require）忽略 */ }
+  candidates.push(path.join(__dirname, '..', '..', 'build', 'markitdown', 'markitdown.exe'));
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch (e) { /* ignore */ }
+  }
+  return null;
+}
+
+function runCmd(cmd, args, timeoutMs, opts) {
   return new Promise((resolve, reject) => {
+    const spawnOpts = Object.assign({ shell: true, windowsHide: true }, opts);
     let child;
     try {
-      // shell:true 让 Windows 按 PATH/PATHEXT 解析命令；文件路径是我们生成的临时 ASCII 名，加引号即可
-      child = spawn(cmd, args, { shell: true, windowsHide: true });
+      child = spawn(cmd, args, spawnOpts);
     } catch (e) { reject(e); return; }
     const out = [], err = [];
     let settled = false;
     const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
     const timer = setTimeout(() => {
       try { child.kill(); } catch (e) { /* 已退出 */ }
-      finish(reject, new Error('解析超时（文档过大或 markitdown 卡住）'));
+      finish(reject, new Error('解析超时（文档过大或转换器卡住）'));
     }, timeoutMs || 90000);
     child.stdout.on('data', d => out.push(d));
     child.stderr.on('data', d => err.push(d));
@@ -192,27 +215,94 @@ function runCmd(cmd, args, timeoutMs) {
   });
 }
 
+// JS 通道：PDF（pdfjs-dist 惰性加载，避免启动时刷 canvas 警告）
+async function extractPdfJs(file) {
+  const pdfjs = require('pdfjs-dist/legacy/build/pdf.js');
+  const data = new Uint8Array(fs.readFileSync(file));
+  const doc = await pdfjs.getDocument({ data: data, verbosity: 0 }).promise;
+  try {
+    const pages = [];
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const tc = await page.getTextContent();
+      let s = '';
+      for (const it of tc.items) {
+        if (typeof it.str === 'string') {
+          s += it.str;
+          if (it.hasEOL) s += '\n';
+        }
+      }
+      pages.push(s.trim());
+      if (page.cleanup) page.cleanup();
+    }
+    const text = pages.filter(Boolean).join('\n\n');
+    if (!text.trim()) throw new Error('PDF 中没有可提取的文字');
+    return text;
+  } finally {
+    try { if (doc.destroy) doc.destroy(); } catch (e) { /* ignore */ }
+  }
+}
+
+// JS 通道：Word（mammoth）
+async function extractDocxJs(file) {
+  const mammoth = require('mammoth');
+  const r = await mammoth.extractRawText({ buffer: fs.readFileSync(file) });
+  const text = String((r && r.value) || '').trim();
+  if (!text) throw new Error('docx 中没有可提取的文字');
+  return text;
+}
+
+async function extractMarkitdown(file) {
+  const bundled = bundledConverter();
+  if (bundled) {
+    // 绝对路径直启（shell:false，参数数组由 Node 负责转义，路径含空格也安全）
+    try {
+      return await runCmd(bundled, [file], 90000, { shell: false });
+    } catch (e) {
+      // 内置转换器对该文件失败：回落系统命令再试一次
+    }
+  }
+  const quoted = '"' + file + '"';
+  try {
+    return await runCmd('markitdown', [quoted]);
+  } catch (e1) {
+    try {
+      return await runCmd('python', ['-m', 'markitdown', quoted]);
+    } catch (e2) {
+      throw new Error('文档解析失败：' + (e1.message || e2.message).slice(0, 120) +
+        '。也可安装 markitdown 增强（pip install "markitdown[all]"）');
+    }
+  }
+}
+
 async function extractDoc(payload) {
   const p = payload || {};
   const name = String(p.name || 'file');
   const b64 = String(p.base64 || '');
   const ext = (name.split('.').pop() || '').toLowerCase();
   if (!DOC_EXTS.test(ext)) throw new Error('暂不支持该格式（PDF / Word / Excel / PPT / RTF / HTML）');
+  if (LEGACY_HINT[ext]) throw new Error(LEGACY_HINT[ext]);
   if (b64.length > 28000000) throw new Error('文件过大（上限 20MB）');
   const tmp = path.join(os.tmpdir(), 'mmc-attach-' + crypto.randomBytes(6).toString('hex') + '.' + ext);
   fs.writeFileSync(tmp, Buffer.from(b64, 'base64'));
-  const quoted = '"' + tmp + '"';
   try {
-    try {
-      return { text: await runCmd('markitdown', [quoted]) };
-    } catch (e1) {
+    let text;
+    if (ext === 'pdf') {
       try {
-        return { text: await runCmd('python', ['-m', 'markitdown', quoted]) };
-      } catch (e2) {
-        throw new Error('本机未找到 markitdown，无法解析 ' + ext.toUpperCase() +
-          ' 文档。安装方法：pip install markitdown；或把内容另存为 txt/md 后再拖入');
+        text = await extractPdfJs(tmp);
+      } catch (e) {
+        text = await extractMarkitdown(tmp); // JS 解不开（如扫描/加密）：回落 markitdown
       }
+    } else if (ext === 'docx') {
+      try {
+        text = await extractDocxJs(tmp);
+      } catch (e) {
+        text = await extractMarkitdown(tmp);
+      }
+    } else {
+      text = await extractMarkitdown(tmp);
     }
+    return { text: text };
   } finally {
     try { fs.unlinkSync(tmp); } catch (e) { /* 清理失败不影响结果 */ }
   }

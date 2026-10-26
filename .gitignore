@@ -18,3 +18,7 @@ Thumbs.db
 
 # 本地代理行为准则（只在本机生效，不入库、不推送）
 AGENTS.md
+
+# markitdown 内置转换器（PyInstaller 产物，171MB 二进制，prebuild 脚本可随时重建）
+build/markitdown/
+build/_pyinstaller/
