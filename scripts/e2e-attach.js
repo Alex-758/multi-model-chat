@@ -210,7 +210,7 @@ async function main() {
     let open = await js(`!document.querySelector('#attach-view').classList.contains('hidden') && !!document.querySelector('#attach-view .av-img')`);
     assert(open, '浮层未打开');
     await js(`document.querySelector('#av-close').click()`);
-    await sleep(120);
+    await sleep(250); // 关闭走 150ms 淡出动画，之后才加 hidden
     open = await js(`document.querySelector('#attach-view').classList.contains('hidden')`);
     assert(open, '浮层未关闭');
     return 'OK';
@@ -345,6 +345,146 @@ async function main() {
     } finally {
       dialog.showOpenDialog = orig;
     }
+  });
+
+  // ---------- 12. GBK 编码文本文件：不乱码（放在末尾，避免新建会话影响前面的状态断言） ----------
+  await run('拖入 GBK 编码 txt：回退 GBK 解码，不乱码', async () => {
+    await js(`MM.chat.stopAll(); document.querySelector('#btn-new-chat').click()`);
+    await sleep(200);
+    await setChips(['p1::mt']);
+    await js(`(function(){
+      // 字节 = '测试' 的 GBK 编码（B2E2 CAD4，对严格 UTF-8 是非法序列）+ ASCII 标记
+      var bytes = new Uint8Array([0xB2,0xE2,0xCA,0xD4,0x2D,0x47,0x42,0x4B,0x2D,0x4D,0x41,0x52,0x4B,0x2D,0x6F,0x6B]);
+      var f = new File([bytes], 'gbk.txt', { type: 'text/plain' });
+      var dt = new DataTransfer(); dt.items.add(f);
+      document.querySelector('#main').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    })()`);
+    assert(await waitFor(`(function(){
+      var chips = document.querySelectorAll('#attach-bar .att-chip');
+      if (chips.length !== 1) return false;
+      var st = chips[0].querySelector('.att-status');
+      return st && st.textContent.indexOf('…') < 0;
+    })()`, 10000), 'GBK 附件芯片未就绪');
+    await sendText('读取这个文件');
+    assert(await waitFor(doneExpr, 15000), '未完成');
+    const mt = reqsFor('mt').pop();
+    const w = wire(mt);
+    assert(w.indexOf('GBK-MARK-ok') >= 0, 'GBK 内容未被解码出 ASCII 标记');
+    assert(w.indexOf('\uFFFD') < 0, '内容含替换符（乱码）');
+    return 'GBK 解码 OK';
+  });
+
+  // ---------- 13. 附件就绪后同一同步块双击发送：重入锁 ----------
+  await run('附件就绪后同步双击发送：只发一条（重入锁）', async () => {
+    await js(`MM.chat.stopAll(); document.querySelector('#btn-new-chat').click()`);
+    await sleep(200);
+    await setChips(['p1::mt']);
+    assert(await pastePNG(), '粘贴未就绪');
+    requests.length = 0;
+    // 两击在同一同步块里执行：第一击停在附件 await 上（streaming 尚未置位），
+    // 第二击必须被重入锁拦住，否则恢复后会重复入列消息、重复发请求
+    await js(`(function(){
+      var i = document.querySelector('#input');
+      i.value = '双击重入测试';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#btn-send').click();
+      document.querySelector('#btn-send').click();
+    })()`);
+    assert(await waitFor(doneExpr, 15000), '未完成');
+    const n = reqsFor('mt').length;
+    assert(n === 1, '双击应只发一次请求，实际 ' + n);
+    const msgs = await js(`MM.sessions.current().messages.filter(function(m){return m.role==='user';}).length`);
+    assert(msgs === 1, '用户消息应只有一条，实际 ' + msgs);
+    return '重入锁 OK';
+  });
+
+  // ---------- 14. 文档双通道：PDF(JS) / docx(JS) / xlsx(内置markitdown) / .doc(明确报错) ----------
+  // 手工构造的最小合法 PDF（ASCII 内容，xref 偏移精确计算）
+  function makePdf(text) {
+    const content = 'BT /F1 14 Tf 72 720 Td (' + text + ') Tj ET';
+    const objs = [
+      '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+      '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+      '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n',
+      '4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+      '5 0 obj\n<< /Length ' + content.length + ' >>\nstream\n' + content + '\nendstream\nendobj\n'
+    ];
+    let pdf = '%PDF-1.4\n';
+    const offsets = [];
+    for (const o of objs) { offsets.push(pdf.length); pdf += o; }
+    const xrefStart = pdf.length;
+    pdf += 'xref\n0 ' + (objs.length + 1) + '\n0000000000 65535 f \n';
+    for (const off of offsets) pdf += String(off).padStart(10, '0') + ' 00000 n \n';
+    pdf += 'trailer\n<< /Size ' + (objs.length + 1) + ' /Root 1 0 R >>\nstartxref\n' + xrefStart + '\n%%EOF';
+    return pdf;
+  }
+  const docxB64 = fs.readFileSync(path.join(ROOT, 'scripts', 'fixtures', 'sample.docx')).toString('base64');
+  const xlsxB64 = fs.readFileSync(path.join(ROOT, 'scripts', 'fixtures', 'sample.xlsx')).toString('base64');
+
+  async function dropDoc(name, b64) {
+    await js(`(function(){
+      var bin = atob(${JSON.stringify(b64)});
+      var arr = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      var f = new File([arr], ${JSON.stringify(name)}, { type: '' });
+      var dt = new DataTransfer(); dt.items.add(f);
+      document.querySelector('#main').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+    })()`);
+    return waitFor(`(function(){
+      var chips = document.querySelectorAll('#attach-bar .att-chip');
+      if (chips.length !== 1) return false;
+      var st = chips[0].querySelector('.att-status');
+      return st && st.textContent.indexOf('…') < 0;
+    })()`, 30000);
+  }
+
+  await run('PDF 拖入：JS 通道（pdfjs）提取进上下文', async () => {
+    await js(`MM.chat.stopAll(); document.querySelector('#btn-new-chat').click()`);
+    await sleep(200);
+    await setChips(['p1::mv']);
+    const bytes = Array.from(makePdf('PDFJS-EXTRACT-MARK hello world'), c => c.charCodeAt(0));
+    assert(await dropDoc('report.pdf', btoa(String.fromCharCode.apply(null, bytes))), 'PDF 附件芯片未就绪');
+    await sendText('总结这份 PDF');
+    assert(await waitFor(doneExpr, 20000), '未完成');
+    const mv = requests.filter(r => r.body && r.body.model === 'mv').pop();
+    assert(wire(mv).indexOf('PDFJS-EXTRACT-MARK') >= 0, 'PDF 文本应进上下文');
+    return 'OK';
+  });
+
+  await run('docx 拖入：JS 通道（mammoth）提取进上下文', async () => {
+    await js(`MM.chat.stopAll(); document.querySelector('#btn-new-chat').click()`);
+    await sleep(200);
+    await setChips(['p1::mv']);
+    assert(await dropDoc('sample.docx', docxB64), 'docx 附件芯片未就绪');
+    await sendText('总结这个文档');
+    assert(await waitFor(doneExpr, 20000), '未完成');
+    const mv = requests.filter(r => r.body && r.body.model === 'mv').pop();
+    assert(wire(mv).indexOf('MAMMOTH-DOCX-MARK') >= 0, 'docx 文本应进上下文');
+    return 'OK';
+  });
+
+  await run('xlsx 拖入：内置 markitdown 通道转表格', async () => {
+    await js(`MM.chat.stopAll(); document.querySelector('#btn-new-chat').click()`);
+    await sleep(200);
+    await setChips(['p1::mv']);
+    assert(await dropDoc('sample.xlsx', xlsxB64), 'xlsx 附件芯片未就绪');
+    await sendText('看这个表格');
+    assert(await waitFor(doneExpr, 30000), '未完成');
+    const mv = requests.filter(r => r.body && r.body.model === 'mv').pop();
+    assert(wire(mv).indexOf('OPENPYXL-XLSX-MARK') >= 0, 'xlsx 表格内容应进上下文');
+    return 'OK';
+  });
+
+  await run('不支持的老格式 .doc：附件芯片标记失败', async () => {
+    await js(`MM.chat.stopAll(); document.querySelector('#btn-new-chat').click()`);
+    await sleep(200);
+    const ok = await dropDoc('old.doc', btoa('just garbage bytes'));
+    const t = await js(`({
+      failed: !!document.querySelector('#attach-bar .att-chip.failed'),
+      status: (document.querySelector('#attach-bar .att-status') || {}).textContent || ''
+    })`);
+    assert(t.failed, JSON.stringify(t));
+    return 'OK';
   });
 
   server.close();
