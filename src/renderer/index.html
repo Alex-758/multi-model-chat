@@ -24,7 +24,7 @@
       <div id="session-search">
         <input id="session-filter" type="text" placeholder="搜索会话标题与内容…"
           title="按标题或消息内容过滤会话；新建会话时会自动清空" autocomplete="off" spellcheck="false">
-        <button id="btn-filter-clear" class="hidden" title="清除搜索">✕</button>
+        <button id="btn-filter-clear" class="hidden" title="清除搜索"><svg class="ico-svg" width="8" height="8" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.2 2.2l7.6 7.6M9.8 2.2l-7.6 7.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg></button>
       </div>
       <div id="session-list"></div>
       <div class="side-foot">
@@ -51,7 +51,7 @@
 
       <div id="messages"></div>
 
-      <button id="btn-scroll-bottom" class="scroll-bottom" title="回到底部">↓</button>
+      <button id="btn-scroll-bottom" class="scroll-bottom" title="回到底部"><svg class="ico-svg" width="13" height="13" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2.2v7M2.9 6.1L6 9.2l3.1-3.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></button>
 
       <footer id="composer">
         <div id="model-chips" title="选择要同时调用的模型（可多选）"></div>
@@ -67,10 +67,10 @@
         </div>
         <div id="attach-bar" class="hidden"></div>
         <div class="input-row">
-          <button id="btn-attach" class="btn-attach" title="添加图片 / 文档附件（也可直接粘贴或拖入）">+</button>
+          <button id="btn-attach" class="btn-attach" title="添加图片 / 文档附件（也可直接粘贴或拖入）"><svg class="ico-svg" width="14" height="14" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2.2v7.6M2.2 6h7.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg></button>
           <textarea id="input" rows="1"
             placeholder="输入消息…  Enter 发送，Shift+Enter 换行，可粘贴/拖入或点 + 加附件"></textarea>
-          <button id="btn-send" class="btn-send" title="发送">➤</button>
+          <button id="btn-send" class="btn-send" title="发送"><svg class="ico-svg" width="13" height="13" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.6v8.8l7.6-4.4z" fill="currentColor"/></svg></button>
         </div>
       </footer>
     </main>
@@ -79,7 +79,7 @@
   <!-- 设置页 -->
   <div id="settings-overlay" class="hidden">
     <div class="settings-dialog">
-      <button id="btn-settings-x" class="settings-close" title="关闭 (Esc)">×</button>
+      <button id="btn-settings-x" class="settings-close" title="关闭 (Esc)"><svg class="ico-svg" width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.2 2.2l7.6 7.6M9.8 2.2l-7.6 7.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg></button>
       <div class="settings-side">
         <div class="settings-title">设置</div>
         <button class="settings-nav active" data-pane="models">模型配置</button>
@@ -117,7 +117,7 @@
   <!-- 附件预览浮层：图片放大 / 附件提取文本查看 -->
   <div id="attach-view" class="hidden">
     <div class="av-panel">
-      <div class="av-head"><span id="av-title"></span><button id="av-close" title="关闭 (Esc)">×</button></div>
+      <div class="av-head"><span id="av-title"></span><button id="av-close" title="关闭 (Esc)"><svg class="ico-svg" width="11" height="11" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.2 2.2l7.6 7.6M9.8 2.2l-7.6 7.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/></svg></button></div>
       <div class="av-body" id="av-body"></div>
     </div>
   </div>

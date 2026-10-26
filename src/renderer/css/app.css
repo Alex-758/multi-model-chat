@@ -72,6 +72,8 @@ html.theme-anim, html.theme-anim *, html.theme-anim *::before, html.theme-anim *
   transition: background-color .25s ease, border-color .25s ease, color .25s ease, box-shadow .25s ease !important;
 }
 button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
+/* 几何图标（SVG）：块级显示交给按钮的 flex 居中，不做任何字形修正 */
+.ico-svg { display: block; flex-shrink: 0; }
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 input, textarea, select {
   font-family: inherit; font-size: 13px; color: var(--text);
@@ -99,6 +101,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 .btn-danger { border: 1px solid var(--border-2); background: var(--panel); color: var(--danger); }
 .btn-danger:hover { border-color: var(--danger); background: var(--danger-soft); }
 .btn-secondary:disabled, .btn-danger:disabled, .btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+/* 按压反馈：所有实体按钮统一轻微缩放（btn-send 已有更明显的 .93） */
+.btn-primary:active, .btn-secondary:active, .btn-danger:active,
+.tool-btn:active, .btn-ghost:active, .chip:active, .eg-q:active { transform: scale(.97); }
+/* 动画可关：系统开了「减少动态效果」时全部退化为瞬时切换（旋转 spinner 也停） */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
 .btn-ghost {
   border-radius: var(--radius); padding: 8px 12px; font-size: 13px; color: var(--muted);
   text-align: center; transition: background .15s, color .15s;
@@ -132,9 +145,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 #session-filter::placeholder { color: var(--muted); }
 /* 清除按钮：叠在输入框右缘（按 id 定位——按钮的类名只有 hidden 切换，别绑到类上） */
 #btn-filter-clear {
-  position: absolute; right: 20px; top: 50%; transform: translateY(-50%);
+  position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 20px;
+  display: inline-flex; align-items: center; justify-content: center;
   border: none; background: transparent; color: var(--muted); cursor: pointer;
-  font-size: 11px; padding: 2px 4px; line-height: 1;
+  font-size: 11px; padding: 0; line-height: 1; border-radius: 50%;
 }
 #btn-filter-clear:hover { color: var(--text); }
 /* 搜索无结果：明确反馈 + 一键清除 */
@@ -320,16 +335,35 @@ details.reasoning {
 }
 details.reasoning summary { cursor: pointer; user-select: none; }
 details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height: 1.6; max-height: 280px; overflow-y: auto; }
+/* 思考过程 / 搜索来源展开时内容轻微淡入（原生 details 是瞬跳的） */
+details.sources[open] > :not(summary), details.reasoning[open] > :not(summary) {
+  animation: detIn .15s ease;
+}
+@keyframes detIn { from { opacity: 0; transform: translateY(-2px); } }
 
-/* 模型回答网格：方案A去卡片化——无描边无底色，栏间发丝线分隔 */
+/* 模型回答网格：方案A去卡片化——无描边无底色，栏间发丝线分隔。
+   入场动画只给带 .anim-in 的元素（JS 只标最新一轮），
+   大会话切换时不再对几十个历史网格重播动画（动画数量 O(N)→O(1)） */
 .answers {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 0 0;
-  margin-bottom: 12px; animation: cardIn .18s cubic-bezier(.2, .7, .3, 1);
+  margin-bottom: 12px;
 }
+.anim-in { animation: cardIn .18s cubic-bezier(.2, .7, .3, 1); }
 @keyframes cardIn { from { opacity: 0; transform: translateY(6px); } }
 /* 版本切换：该轮内容轻微 crossfade（由 setVersion 加类，替代整页 fade） */
 .answers.ver-swap, .merge-card.ver-swap { animation: verSwap .16s ease; }
 @keyframes verSwap { from { opacity: .25; } }
+/* 布局隔离：卡片内部（流式正文）重排不影响外部布局计算，长会话滚动/更新更稳 */
+.answer-card, .merge-card { contain: layout style; }
+/* 长会话性能：离屏轮次跳过排版与绘制（intrinsic-size 用 auto 记住真实高度，
+   与轮次 DOM 回收配合：复用节点连上次渲染的尺寸都直接复用）。
+   首屏估算值取常见轮高，滚动到时以实际尺寸替换 */
+.answers, .user-msg, .merge-card, .round-tools {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 500px;
+}
+.round-tools { contain-intrinsic-size: auto 40px; }
+.user-msg { contain-intrinsic-size: auto 80px; }
 .answer-card {
   background: transparent; border: none; border-radius: 0;
   display: flex; flex-direction: column; min-width: 0;
@@ -381,18 +415,16 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* 合并回答卡片：无框，仅左侧墨条标识；出现时与回答卡片同节奏淡入 */
+/* 合并回答卡片：无框，仅左侧墨条标识 */
 .merge-card {
   background: transparent; border: none; border-left: 2px solid var(--ink);
   border-radius: 0; margin-bottom: 12px; padding-left: 16px;
-  animation: cardIn .18s cubic-bezier(.2, .7, .3, 1);
 }
 .merge-card .ac-name { color: var(--text); }
 
-/* 轮次工具栏：入场与卡片同节奏 */
+/* 轮次工具栏 */
 .round-tools {
   display: flex; align-items: center; gap: 8px; margin: 0 0 22px; flex-wrap: wrap;
-  animation: cardIn .18s cubic-bezier(.2, .7, .3, 1);
 }
 .ver-label { font-size: 11px; color: var(--muted); user-select: none; }
 .tool-btn {
@@ -476,11 +508,11 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .btn-send.stop:hover { background: #c0271d; }
 /* 「+」附件按钮：输入框左端，细线条加号（与发送按钮同高，视觉上更轻） */
 .btn-attach {
-  flex-shrink: 0; align-self: flex-end;
+  flex-shrink: 0;
   width: var(--ctl-h); height: var(--ctl-h);
+  display: inline-flex; align-items: center; justify-content: center;
   border: none; border-radius: 9px; background: transparent;
-  color: var(--muted); font-size: 21px; font-weight: 300; line-height: 1;
-  cursor: pointer; padding: 0 0 1px;
+  color: var(--muted); cursor: pointer; padding: 0;
   transition: color .15s, background .15s, transform .12s;
 }
 .btn-attach:hover { color: var(--text); background: var(--panel-2); }
@@ -510,7 +542,8 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .att-chip.failed .att-status { color: var(--danger); }
 .att-x {
   position: absolute; top: 3px; right: 3px;
-  width: 16px; height: 16px; line-height: 14px; text-align: center;
+  width: 16px; height: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
   border: none; border-radius: 50%; background: var(--border-2); color: var(--text-2);
   font-size: 11px; cursor: pointer; padding: 0;
 }
@@ -543,12 +576,16 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
   position: fixed; inset: 0; z-index: 60;
   background: rgba(15, 18, 28, .55);
   display: flex; align-items: center; justify-content: center; padding: 32px;
+  animation: overlayIn .16s ease;
 }
+#attach-view.closing { animation: overlayOut .15s ease forwards; }
+#attach-view.closing .av-panel { animation: dialogOut .15s ease forwards; }
 .av-panel {
   max-width: 920px; max-height: 88vh; width: min(920px, 94vw);
   display: flex; flex-direction: column;
   background: var(--panel); border-radius: 14px; overflow: hidden;
   box-shadow: 0 24px 80px rgba(0, 0, 0, .4);
+  animation: dialogIn .2s cubic-bezier(.2, .7, .3, 1);
 }
 .av-head {
   display: flex; align-items: center; justify-content: space-between;
@@ -556,10 +593,12 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
   font-size: 13px; font-weight: 600; color: var(--text);
 }
 #av-close {
+  width: 28px; height: 28px; border-radius: 7px;
+  display: inline-flex; align-items: center; justify-content: center;
   border: none; background: transparent; color: var(--muted);
-  font-size: 20px; cursor: pointer; line-height: 1; padding: 2px 6px;
+  font-size: 20px; cursor: pointer; line-height: 1; padding: 0;
 }
-#av-close:hover { color: var(--text); }
+#av-close:hover { color: var(--text); background: var(--panel-3); }
 .av-body { overflow: auto; padding: 14px; display: flex; justify-content: center; }
 .av-img { max-width: 100%; max-height: 74vh; border-radius: 8px; }
 .av-pre {
@@ -619,8 +658,10 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .settings-dialog {
   position: relative;
   width: min(1040px, 94vw);
-  /* 高度随内容自适应：搜索/综合页不空旷，模型页（内容多）可撑到 82vh */
-  height: auto; min-height: 480px; max-height: min(780px, 92vh);
+  /* 固定高度取各页签的中间值：模型配置（最高 ~780）与系统提示词（最矮 ~480）之间，
+     切换页签时弹窗不再忽高忽矮；内容少的页签留白、内容多的页签内部滚动 */
+  --dlg-h: min(640px, 92vh);
+  height: var(--dlg-h);
   background: var(--panel);
   border-radius: var(--radius-lg); display: flex; overflow: hidden;
   animation: dialogIn .2s cubic-bezier(.2, .7, .3, 1);
@@ -632,7 +673,8 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
   font-size: 18px; line-height: 1; color: var(--muted);
   transition: background .12s, color .12s, transform .12s;
 }
-.settings-close:hover { background: var(--border); color: var(--text); transform: rotate(90deg); }
+/* 悬停旋转作用在按钮上，内层 .gx 的下移修正不受影响 */
+.settings-close:hover { background: var(--border); color: var(--text); }
 #settings-overlay.closing .settings-dialog { animation: dialogOut .15s ease forwards; }
 @keyframes dialogIn { from { opacity: 0; transform: translateY(14px) scale(.985); } }
 @keyframes dialogOut { to { opacity: 0; transform: translateY(8px) scale(.99); } }
@@ -662,7 +704,7 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .settings-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .settings-pane { display: none; }
 /* 非模型页：面板自身滚动，内容少时收缩、内容多时滚动（68vh 约等于弹窗 max-height 减去标题边距） */
-.settings-pane.active { display: block; overflow-y: auto; padding: 22px 24px 24px; max-height: calc(min(780px, 92vh) - 2px); }
+.settings-pane.active { display: block; overflow-y: auto; padding: 22px 24px 24px; max-height: calc(var(--dlg-h) - 2px); }
 /* 页签切换 / 服务商切换时内容淡入微移（JS 加类，播完留在原地） */
 .settings-pane.pane-in, .pane-in { animation: paneIn .18s ease; }
 @keyframes paneIn { from { opacity: 0; transform: translateY(5px); } }
@@ -684,7 +726,7 @@ details.reasoning .r-body { white-space: pre-wrap; margin-top: 6px; line-height:
 .pm-head-ops .btn-primary, .pm-head-ops .btn-secondary, .pm-head-ops .btn-danger { min-height: 32px; padding: 0 13px; font-size: 12.5px; }
 /* 高度自适应结构下 .pm-body 不能 flex 撑满（弹窗 height:auto 时 flex 无高度参照），
    用 max-height 限制滚动区：内容少时弹窗收缩，内容多时滚动（减去标题行 ~55px） */
-.pm-body { overflow-y: auto; padding: 16px 24px 24px; max-height: calc(min(780px, 92vh) - 57px); }
+.pm-body { overflow-y: auto; padding: 16px 24px 24px; max-height: calc(var(--dlg-h) - 57px); }
 
 /* 分组小节（连接 / 模型）：方案A去卡片化——小节标题 + 发丝线，正文直接排版 */
 .p-card { border: none; border-radius: 0; overflow: visible; margin-bottom: 18px; }

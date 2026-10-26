@@ -252,7 +252,7 @@ window.MM = window.MM || {};
   // 单个模型条目行（行内编辑，直接修改 provider.models 中的对象）
   function modelEntryRow(p, mo, listCache) {
     const midInput = U.el('input', { type: 'text', value: mo.modelId || '', placeholder: '模型 ID', autocomplete: 'off', style: 'width:100%;padding-right:28px' });
-    const dropBtn = U.el('button', { type: 'button', class: 'mid-drop', title: '从模型列表选择', onmousedown: e => e.preventDefault() }, '▾');
+    const dropBtn = U.el('button', { type: 'button', class: 'mid-drop', title: '从模型列表选择', html: U.svgIcon('caret', 9), onmousedown: e => e.preventDefault() });
     const dropPanel = U.el('div', { class: 'dropdown-panel hidden' });
     const idWrap = U.el('div', { class: 'mid-wrap' }, midInput, dropBtn, dropPanel);
 
@@ -260,7 +260,7 @@ window.MM = window.MM || {};
     const ctxInput = U.el('input', { type: 'number', value: mo.contextTokens || '', placeholder: '自动', style: 'width:90px' });
     const outInput = U.el('input', { type: 'number', value: mo.maxTokens || '', placeholder: '自动', style: 'width:90px' });
     const enCheck = U.el('input', { type: 'checkbox', title: '启用', ...(mo.enabled !== false ? { checked: '' } : {}) });
-    const delBtn = U.el('button', { class: 'm-del', title: '删除此模型' }, '✕');
+    const delBtn = U.el('button', { class: 'm-del', title: '删除此模型', html: U.svgIcon('x', 10) });
     const infoHint = U.el('div', { class: 'hint' });
     // 上一次识别对应的模型 ID：只有 ID 变化时才回填，避免失焦时覆盖用户手填的上下文/最大输出
     let lastAutoId = mo.modelId || '';
@@ -504,7 +504,7 @@ window.MM = window.MM || {};
         p.models.push({ modelId: '', name: '', enabled: true });
         renderModelEntries();
       }
-    }, U.el('span', { class: 'ico' }, '＋'), '添加模型');
+    }, U.el('span', { class: 'ico', html: U.svgIcon('plus', 10) }), '添加模型');
 
     modelCountEl = U.el('span', {}, '模型（' + (p.models || []).length + '）');
     const modelCard = U.el('div', { class: 'p-card' },

@@ -44,6 +44,20 @@ window.MM = window.MM || {};
     return btoa(b64);
   }
 
+  // 文本附件解码：file.text() 固定按 UTF-8，Windows 上常见的 GBK 编码 txt（旧版记事本
+  // ANSI 默认）与 UTF-16 导出文件会整篇乱码发给模型。策略：按 BOM 识别 UTF-16 →
+  // 严格 UTF-8（非法序列即抛错，绝不误判）→ GBK 兜底 → 都不行按 UTF-8 有损解码。
+  async function decodeTextFile(file) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) return new TextDecoder('utf-16le').decode(buf);
+    if (buf.length >= 2 && buf[0] === 0xFE && buf[1] === 0xFF) return new TextDecoder('utf-16be').decode(buf);
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+    catch (e) {
+      try { return new TextDecoder('gbk').decode(buf); }
+      catch (e2) { return new TextDecoder('utf-8').decode(buf); }
+    }
+  }
+
   // 大图等比压缩（长边 2048），控制 vision token 与请求体积；BMP/WebP 统一转 PNG。
   // 小于阈值的 PNG/JPG 原样发送，不重复编码。
   async function prepareImage(file, mime) {
@@ -117,7 +131,7 @@ window.MM = window.MM || {};
       try {
         let text = '';
         if (isText) {
-          text = await file.text();
+          text = await decodeTextFile(file);
           if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); // 去 BOM
         } else {
           const r = await api.extractDoc({ name: a.name, base64: bufToBase64(new Uint8Array(await file.arrayBuffer())) });
@@ -138,13 +152,13 @@ window.MM = window.MM || {};
 
   function attachChip(a) {
     const remove = U.el('button', {
-      class: 'att-x', title: '移除',
+      class: 'att-x', title: '移除', html: U.svgIcon('x', 7),
       onclick: function (e) {
         e.stopPropagation();
         pendingAttach = pendingAttach.filter(x => x !== a);
         renderAttachBar();
       }
-    }, '×');
+    });
     let status;
     if (a.failed) status = '处理失败';
     else if (a.kind === 'image') status = a.ocrState === 'done' ? (a.text ? '图中 ' + a.text.length + ' 字' : '图中无文字') : '识别文字中…';
@@ -188,12 +202,21 @@ window.MM = window.MM || {};
       body.appendChild(U.el('pre', { class: 'av-pre' }, a.text || ''));
     }
     U.$('#av-title').textContent = a.name || (a.kind === 'image' ? '图片' : '附件文本');
-    ov.classList.remove('hidden');
+    // 淡出动画进行中再次打开：清掉 closing 态和挂起的隐藏定时器，否则浮层看不见
+    clearTimeout(closeAttachView._t);
+    ov.classList.remove('closing', 'hidden');
   }
 
   function closeAttachView() {
     const ov = U.$('#attach-view');
-    if (ov) ov.classList.add('hidden');
+    if (!ov || ov.classList.contains('hidden') || ov.classList.contains('closing')) return;
+    // 与设置弹窗同款的淡出（150ms 后再隐藏；定时器挂函数上，连点/Esc 连按不会叠）
+    ov.classList.add('closing');
+    clearTimeout(closeAttachView._t);
+    closeAttachView._t = setTimeout(function () {
+      ov.classList.add('hidden');
+      ov.classList.remove('closing');
+    }, 150);
   }
 
   // 贴了图之后，给不支持看图的模型芯片加「仅文字」提示：发送前就知道谁能看图、谁只能读字
@@ -294,7 +317,7 @@ window.MM = window.MM || {};
     const inp = U.$('#input');
     inp.readOnly = on; // 生成中禁改（内容保留可复制）
     b.classList.toggle('stop', on);
-    b.textContent = on ? '■' : '➤';
+    b.innerHTML = on ? U.svgIcon('stop', 10) : U.svgIcon('send', 13);
     b.title = on ? '停止生成' : '发送';
     b.classList.toggle('ready', on || inp.value.trim().length > 0);
     U.$('.input-row').classList.toggle('off', on);
@@ -659,17 +682,19 @@ window.MM = window.MM || {};
     }
   }
 
-  function roundTools(am) {
+  // anim=true 时给工具栏加入场动画类（renderAll 里由调用方统一标记最后一轮，避免历史轮次重播动画）
+  function roundTools(am, anim) {
     const hasMerge = !!(am.merge && am.merge.content);
-    const tools = U.el('div', { class: 'round-tools', 'data-round': am.roundId });
+    const tools = U.el('div', { class: 'round-tools' + (anim ? ' anim-in' : ''), 'data-round': am.roundId });
     if (am.versions && am.versions.length > 1) {
       const idx = typeof am.active === 'number' ? am.active : am.versions.length - 1;
       const snap = am.versions[idx] || {};
       const timeStr = snap.at ? U.fmtTime(snap.at) : '';
       tools.appendChild(U.el('button', {
-        class: 'tool-btn', title: '上一版本', onclick: function () { setVersion(am, idx - 1); },
+        class: 'tool-btn', title: '上一版本', html: U.svgIcon('left', 9),
+        onclick: function () { setVersion(am, idx - 1); },
         disabled: idx <= 0
-      }, '‹'));
+      }));
       tools.appendChild(U.el('span', {
         class: 'ver-label',
         title: snap.at ? '此版本生成于 ' + new Date(snap.at).toLocaleString('zh-CN') : ''
@@ -678,12 +703,13 @@ window.MM = window.MM || {};
         (timeStr ? ' · ' + timeStr : '') +
         (idx === am.versions.length - 1 ? '（最新）' : '')));
       tools.appendChild(U.el('button', {
-        class: 'tool-btn', title: '下一版本', onclick: function () { setVersion(am, idx + 1); },
+        class: 'tool-btn', title: '下一版本', html: U.svgIcon('right', 9),
+        onclick: function () { setVersion(am, idx + 1); },
         disabled: idx >= am.versions.length - 1
-      }, '›'));
+      }));
     }
-    tools.appendChild(U.el('button', { class: 'tool-btn', onclick: function () { retryRound(am.roundId); } },
-      U.el('span', { class: 'ico' }, '↻'), '重新生成'));
+    tools.appendChild(U.el('button', { class: 'tool-btn', title: '只重新调用本轮全部模型', onclick: function () { retryRound(am.roundId); } },
+      U.el('span', { class: 'ico', html: U.svgIcon('redo', 11) }), '重新生成'));
     // 综合入口常驻：已有综合时变成「重新综合」（旧综合保留在版本历史中）
     tools.appendChild(U.el('button', {
       class: 'tool-btn',
@@ -719,9 +745,28 @@ window.MM = window.MM || {};
     return null;
   }
 
+  // ---------- 轮次 DOM 回收 ----------
+  // 实测（2.8MB 会话库）：renderAll 全量重建 360 张卡片约 270-330ms，切换会话/版本可感卡顿。
+  // 签名未变的轮次直接复用上一次的节点（还保留思考过程/来源的展开状态），只重建变化的轮。
+  // 池按会话分（key=sessionId），LRU 只保留最近 2 个会话，内存有界；
+  // 流式进行中的轮次不进池（每次 renderAll 都要重建事件绑定，见 live 分支）。
+  const roundDom = new Map(); // sessionId -> Map(roundId -> { sig, userEl, mids: [gridEl, mergeEl?, toolsEl] })
+  const roundDomLru = [];
+
+  function roundSig(m, am) {
+    const u = m.id + '|' + m.content + '|' + (m.images || []).length + '|' + (m.files || []).length;
+    if (!am) return 'U:' + u;
+    const rs = (am.results || []).map(r =>
+      r.status + ',' + (r.content || '').length + ',' + (r.reasoning || '').length +
+      ',' + (r.sources ? r.sources.length : 0) + ',' + (r.usage && (r.usage.input || r.usage.output) ? 1 : 0) +
+      ',' + (r.error ? 1 : 0) + ',' + (r.ms || 0)
+    ).join(';');
+    const mg = am.merge ? am.merge.content.length + ',' + am.merge.mode + ',' + (am.merge.usage ? 1 : 0) : '-';
+    return 'A:' + u + '|' + am.active + ',' + ((am.versions || []).length) + '|' + rs + '|' + mg;
+  }
+
   function renderAll() {
     const wrap = U.$('#messages');
-    wrap.innerHTML = '';
     const s = MM.sessions.current();
     U.$('#composer').style.display = s ? '' : 'none';
     // 先同步按钮状态：空会话会提前 return，放在末尾会漏掉
@@ -730,19 +775,32 @@ window.MM = window.MM || {};
     refreshPromptBadge();
     syncPromptBox();
     if (!s || !s.messages.length) {
+      wrap.innerHTML = '';
       wrap.appendChild(emptyState());
       return;
     }
+    // 回收池：当前会话置顶，最多留 2 个会话的缓存
+    let pool = roundDom.get(s.id);
+    if (!pool) { pool = new Map(); roundDom.set(s.id, pool); }
+    roundDomLru.unshift(s.id);
+    if (roundDomLru.length > 8) roundDomLru.length = 8; // 只用前 2 位判存活，尾部截掉防无限增长
+    for (const k of Array.from(roundDom.keys())) {
+      const keep = roundDomLru.slice(0, 2).indexOf(k) >= 0;
+      if (!keep) roundDom.delete(k);
+    }
+    wrap.innerHTML = ''; // 旧节点detach但不销毁：池里持有引用的直接搬回来
     let i = 0;
     // 统一在文档片段中构建，最后一次挂载（整列表只触发一次重排）
     const frag = document.createDocumentFragment();
     let seenUser = false; // 除第一条提问外，每条用户消息上方加轮次分隔线
+    // 入场动画只标最后一轮：大会话（几十轮）切进来时不再给每轮重播动画（O(N)→O(1)）
+    let lastRoundEls = null;
     while (i < s.messages.length) {
       const m = s.messages[i];
       if (m.role === 'user') {
         if (seenUser) frag.appendChild(U.el('div', { class: 'round-sep' }));
         seenUser = true;
-        frag.appendChild(renderUser(m));
+        lastRoundEls = [];
         i++;
         // 收集该轮的 assistant（兼容旧格式：独立 merge 消息在迁移时已折叠，此处兜底忽略）
         let am = null;
@@ -751,43 +809,71 @@ window.MM = window.MM || {};
           i++;
         }
         if (am) {
-          // 该轮若有进行中的流式请求：以流式样式重建卡片，并把事件绑定切到新 DOM
           const live = liveCtxFor(am);
-          let grid;
-          if (live && live.type === 'round') {
-            grid = U.el('div', { class: 'answers', 'data-round': am.roundId });
-            // 已完成的模型按渲染态显示，仍在生成的才显示流式样式
-            const cards = new Map();
-            for (const r of am.results) {
-              const card = answerCard(r, r.status === 'streaming', am.roundId);
-              grid.appendChild(card);
-              cards.set(r.modelId, cardRefs(card));
-            }
-            live.ctx.grid = grid;
-            live.ctx.cards = cards; // 重建后事件分发要用新的节点引用
+          const sig = roundSig(m, am);
+          const hit = live ? null : pool.get(am.roundId);
+          if (hit && hit.sig === sig) {
+            // 轮次内容没变：整轮节点原样搬回（含展开状态），跳过重建
+            frag.appendChild(hit.userEl);
+            for (const el of hit.mids) frag.appendChild(el);
+            lastRoundEls.push(hit.userEl);
+            for (const el of hit.mids) lastRoundEls.push(el);
           } else {
-            grid = answersGrid(am);
-          }
-          frag.appendChild(grid);
-          const liveMerge = live && live.type === 'merge';
-          if (liveMerge || (am.merge && am.merge.content)) {
-            const card = mergeCard(am.merge, !!liveMerge, am.roundId);
-            frag.appendChild(card);
-            if (liveMerge) {
-              live.ctx.mergeBody = card.querySelector('.ac-body');
-              live.ctx.mergeStatus = card.querySelector('.ac-status');
+            const userEl = renderUser(m);
+            frag.appendChild(userEl);
+            const mids = [];
+            // 该轮若有进行中的流式请求：以流式样式重建卡片，并把事件绑定切到新 DOM
+            let grid;
+            if (live && live.type === 'round') {
+              grid = U.el('div', { class: 'answers', 'data-round': am.roundId });
+              // 已完成的模型按渲染态显示，仍在生成的才显示流式样式
+              const cards = new Map();
+              for (const r of am.results) {
+                const card = answerCard(r, r.status === 'streaming', am.roundId);
+                grid.appendChild(card);
+                cards.set(r.modelId, cardRefs(card));
+              }
+              live.ctx.grid = grid;
+              live.ctx.cards = cards; // 重建后事件分发要用新的节点引用
+            } else {
+              grid = answersGrid(am);
             }
+            frag.appendChild(grid);
+            mids.push(grid);
+            const liveMerge = live && live.type === 'merge';
+            if (liveMerge || (am.merge && am.merge.content)) {
+              const card = mergeCard(am.merge, !!liveMerge, am.roundId);
+              frag.appendChild(card);
+              mids.push(card);
+              if (liveMerge) {
+                live.ctx.mergeBody = card.querySelector('.ac-body');
+                live.ctx.mergeStatus = card.querySelector('.ac-status');
+              }
+            }
+            const tools = roundTools(am, false);
+            mids.push(tools);
+            frag.appendChild(tools);
+            lastRoundEls.push(userEl);
+            for (const el of mids) lastRoundEls.push(el);
+            // 流式轮次不入池：下一次 renderAll 必须重建绑定
+            if (!live) pool.set(am.roundId, { sig: sig, userEl: userEl, mids: mids });
           }
-          frag.appendChild(roundTools(am));
         } else if (i >= s.messages.length) {
           // 这一轮没有回答（例如联网搜索阶段被停止）：补一个「重新生成」入口，
-          // 否则这条提问只能删掉重发
-          frag.appendChild(userRetryTools(m));
+          // 否则这条提问只能删掉重发（临时态不入池）
+          frag.appendChild(renderUser(m));
+          const t = userRetryTools(m);
+          lastRoundEls.push(t);
+          frag.appendChild(t);
+        } else {
+          // 中间的无回答轮次（历史遗留格式）：只渲染提问
+          frag.appendChild(renderUser(m));
         }
       } else {
         i++;
       }
     }
+    for (const el of lastRoundEls || []) el.classList.add('anim-in');
     wrap.appendChild(frag);
     scrollBottom(true);
     // 会话切换/重建后整体淡入一次；版本切换已抑制（走局部 ver-swap）
@@ -991,6 +1077,9 @@ window.MM = window.MM || {};
   }
 
   // ---------- 发送 ----------
+  // 发送重入锁：附件 OCR/文档提取期间 send() 停在 await 上，此时 streaming 尚未置位，
+  // 再次点击发送会完整通过上面的全部检查，恢复后重复入列消息、重复发起请求（双重计费）。
+  let sendLock = false;
   async function send() {
     if (streamingHere()) { stopAll(); return; }
     if (streaming) {
@@ -1004,44 +1093,50 @@ window.MM = window.MM || {};
     if (!text && !pendingAttach.length) return;
     const models = selectedModels();
     if (!models.length) { U.toast('请先在输入框上方选择至少一个模型', true); return; }
-    // OCR/文档提取可能还在跑：等它们完成，否则图片会被静默丢掉
-    await Promise.all(pendingAttach.map(a => a.ready).filter(Boolean));
-    const atts = pendingAttach.filter(a => !a.failed && (a.kind !== 'image' || a.id));
-    if (!text && !atts.length) { U.toast('附件处理失败，请移除后重试', true); return; }
+    if (sendLock) return;
+    sendLock = true;
+    try {
+      // OCR/文档提取可能还在跑：等它们完成，否则图片会被静默丢掉
+      await Promise.all(pendingAttach.map(a => a.ready).filter(Boolean));
+      const atts = pendingAttach.filter(a => !a.failed && (a.kind !== 'image' || a.id));
+      if (!text && !atts.length) { U.toast('附件处理失败，请移除后重试', true); return; }
 
-    const s = MM.sessions.current() || MM.sessions.createSilent();
-    const userMsg = { id: U.uid(), role: 'user', content: text, createdAt: Date.now() };
-    const imgs = atts.filter(a => a.kind === 'image')
-      .map(a => ({ id: a.id, ext: a.ext, name: a.name, w: a.w, h: a.h, size: a.size, text: a.text || '' }));
-    if (imgs.length) userMsg.images = imgs;
-    const files = atts.filter(a => a.kind === 'file' && a.text)
-      .map(a => ({ name: a.name, chars: a.chars, text: a.text }));
-    if (files.length) userMsg.files = files;
-    s.messages.push(userMsg);
-    if (s.title === '新会话') s.title = (text || (imgs.length ? '图片提问' : '附件提问')).slice(0, 30);
-    s.updatedAt = Date.now();
-    MM.save();
-    MM.sessions.render();
-    renderTitle();
+      const s = MM.sessions.current() || MM.sessions.createSilent();
+      const userMsg = { id: U.uid(), role: 'user', content: text, createdAt: Date.now() };
+      const imgs = atts.filter(a => a.kind === 'image')
+        .map(a => ({ id: a.id, ext: a.ext, name: a.name, w: a.w, h: a.h, size: a.size, text: a.text || '' }));
+      if (imgs.length) userMsg.images = imgs;
+      const files = atts.filter(a => a.kind === 'file' && a.text)
+        .map(a => ({ name: a.name, chars: a.chars, text: a.text }));
+      if (files.length) userMsg.files = files;
+      s.messages.push(userMsg);
+      if (s.title === '新会话') s.title = (text || (imgs.length ? '图片提问' : '附件提问')).slice(0, 30);
+      s.updatedAt = Date.now();
+      MM.save();
+      MM.sessions.render();
+      renderTitle();
 
-    // 清空空状态
-    const wrap = U.$('#messages');
-    const es = wrap.querySelector('.empty-state');
-    if (es) es.remove();
-    // 上一条"无回答"提问留下的重新生成入口已经过期（后面有新消息了），先移除
-    for (const t of Array.from(wrap.querySelectorAll('.round-tools.retry-only'))) t.remove();
-    wrap.appendChild(renderUser(userMsg));
-    scrollBottom(true);
-    input.value = '';
-    autoResize();
-    pendingAttach = [];
-    renderAttachBar();
+      // 清空空状态
+      const wrap = U.$('#messages');
+      const es = wrap.querySelector('.empty-state');
+      if (es) es.remove();
+      // 上一条"无回答"提问留下的重新生成入口已经过期（后面有新消息了），先移除
+      for (const t of Array.from(wrap.querySelectorAll('.round-tools.retry-only'))) t.remove();
+      wrap.appendChild(renderUser(userMsg));
+      scrollBottom(true);
+      input.value = '';
+      autoResize();
+      pendingAttach = [];
+      renderAttachBar();
 
-    // 立即锁定状态：联网搜索 await 期间不允许再次发送/重试（防竞态）
-    streaming = s.id;
-    setSendBtn(true);
-    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, true)
-      .catch(e => { streaming = null; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
+      // 立即锁定状态：联网搜索 await 期间不允许再次发送/重试（防竞态）
+      streaming = s.id;
+      setSendBtn(true);
+      dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, true)
+        .catch(e => { streaming = null; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
+    } finally {
+      sendLock = false; // dispatchRound 已发起，streaming 已置位，后续点击由 streaming 守卫拦住
+    }
   }
 
   // 发起一轮多模型请求并渲染占位卡片（inheritVersions：重试时继承的历史版本池）
@@ -1057,7 +1152,7 @@ window.MM = window.MM || {};
       if (!searchResults && String(userMsg.content || '').trim()) {
         // 搜索要等 1~3 秒甚至更久：先挂一排「搜索中…」占位卡片，让用户立刻看到进展
         if (MM.sessions.current() === s) {
-          preGrid = U.el('div', { class: 'answers' });
+          preGrid = U.el('div', { class: 'answers anim-in' });
           for (const m of models) {
             preGrid.appendChild(answerCard(
               { modelId: m.id, name: m.name || m.modelId, status: 'searching', content: '' }, true, ''));
@@ -1125,7 +1220,7 @@ window.MM = window.MM || {};
     setSendBtn(true);
     MM.sessions.render(); // 会话列表立刻出现"生成中"呼吸点（切到别的会话也能看到后台在跑）
 
-    const grid = U.el('div', { class: 'answers', 'data-round': roundId });
+    const grid = U.el('div', { class: 'answers anim-in', 'data-round': roundId });
     // 缓存每张卡片的节点引用：流式期间每个 delta 都要更新状态/正文，
     // 逐个事件 querySelector 会在 4 模型并发时放大成大量 DOM 查询
     const cards = new Map();
@@ -1201,7 +1296,7 @@ window.MM = window.MM || {};
       // 重建轮次工具栏（版本导航 / 重新生成 / 综合回答入口）
       const oldTools = byRound('.round-tools', am.roundId, wrap);
       if (oldTools) oldTools.remove();
-      if (ctx.grid) ctx.grid.after(roundTools(am));
+      if (ctx.grid) ctx.grid.after(roundTools(am, true));
       MM.save();
       MM.sessions.render();
       // 整轮全失败时没有可合并的内容，不要弹「没有可合并的成功回答」；
@@ -1231,7 +1326,7 @@ window.MM = window.MM || {};
           ctx.am.merge = null;
           syncMergeToVersion(ctx.am);
           const oldTools = byRound('.round-tools', ctx.roundId, wrap);
-          if (oldTools) oldTools.replaceWith(roundTools(ctx.am));
+          if (oldTools) oldTools.replaceWith(roundTools(ctx.am, true));
         }
       }
       return;
@@ -1321,7 +1416,7 @@ window.MM = window.MM || {};
   // ---------- 重新生成 ----------
   // 没有回答的提问（搜索阶段被停止）用这个临时工具栏重发；回答开始后工具栏会被移除
   function userRetryTools(msg) {
-    return U.el('div', { class: 'round-tools retry-only' },
+    return U.el('div', { class: 'round-tools retry-only anim-in' },
       U.el('button', { class: 'tool-btn', onclick: function () { retryUser(msg); } },
         U.el('span', { class: 'ico' }, '↻'), '重新生成'));
   }
@@ -1677,13 +1772,14 @@ window.MM = window.MM || {};
     // 渲染实时卡片（先清掉该轮此前失败留下的综合卡片，避免重复堆叠）
     const wrap = U.$('#messages');
     const card = mergeCard(am.merge, true, roundId);
+    card.classList.add('anim-in');
     // 卡片只在正查看该会话时挂进 DOM；后台会话时保持游离——流式内容照常写进
     // mergeMsg（数据），切回该会话时 renderAll 会经 live 上下文重建卡片与绑定
     if (MM.sessions.current() === s) {
       const staleCard = byRound('.merge-card', roundId, wrap);
       if (staleCard) staleCard.remove();
       const oldTools = byRound('.round-tools', roundId, wrap);
-      if (oldTools) oldTools.replaceWith(roundTools(am));
+      if (oldTools) oldTools.replaceWith(roundTools(am, true));
       // 插到本轮回答网格之后（而不是消息列表末尾），旧轮次综合时不会跑到页面最下面
       const gridEl = byRound('.answers', roundId, wrap);
       if (gridEl) gridEl.after(card); else wrap.appendChild(card);
@@ -1743,7 +1839,7 @@ window.MM = window.MM || {};
         syncMergeToVersion(am);
       }
       const oldTools = byRound('.round-tools', roundId, wrap);
-      if (oldTools) oldTools.replaceWith(roundTools(am));
+      if (oldTools) oldTools.replaceWith(roundTools(am, true));
       const body = card && card.querySelector('.ac-body'), st = card && card.querySelector('.ac-status');
       if (body) { body.classList.remove('streaming'); body.innerHTML = '<div class="ac-error">✗ ' + U.esc(e.message) + '</div>'; }
       if (st) st.innerHTML = '<span style="color:var(--danger)">✗</span>';
@@ -1776,7 +1872,7 @@ window.MM = window.MM || {};
     if (oldTools) oldTools.remove();
     // 与 renderAll 的顺序保持一致：回答网格 → 综合卡片 → 工具栏
     const anchor = mergeEl || grid;
-    if (anchor && ctx.am) anchor.after(roundTools(ctx.am));
+    if (anchor && ctx.am) anchor.after(roundTools(ctx.am, true));
   }
 
   // ---------- 滚动：贴底检测 + 智能跟随 ----------
@@ -1999,6 +2095,7 @@ window.MM = window.MM || {};
     _modelSkippedForTest: modelSkippedForRound,
     _deleteRoundForTest: deleteRound,
     _retryOneForTest: retryOne,
+    _setVersionForTest: setVersion,
     _handleEventForTest: handleEvent,
     // 最近一次挂载的请求上下文概要（验证重试后节点缓存是否指向活跃 DOM）
     _pendingForTest: function () {

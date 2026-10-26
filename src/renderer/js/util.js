@@ -92,6 +92,25 @@ MM.util = {
     }, life);
   },
 
+  // 几何图标（内联 SVG，currentColor 着色）：替代 ×/➤/■/↓ 等图标字。
+  // 字形在 em 框里的墨迹偏移随字号变化（× 在 18px 偏上 1.5px、20px 偏上 3px），
+  // 静态 translate 修不准；SVG 以 viewBox 几何居中，任何尺寸/主题/DPI 都严格居中。
+  svgIcon(name, size) {
+    size = size || 12;
+    var paths = {
+      x: '<path d="M2.2 2.2l7.6 7.6M9.8 2.2l-7.6 7.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>',
+      send: '<path d="M3 1.6v8.8l7.6-4.4z" fill="currentColor"/>',
+      stop: '<rect x="2.2" y="2.2" width="7.6" height="7.6" rx="1.4" fill="currentColor"/>',
+      down: '<path d="M6 2.2v7M2.9 6.1L6 9.2l3.1-3.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+      left: '<path d="M7.6 2.2L3.8 6l3.8 3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+      right: '<path d="M4.4 2.2L8.2 6l-3.8 3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>',
+      plus: '<path d="M6 2.2v7.6M2.2 6h7.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>',
+      caret: '<path d="M2.8 4.4h6.4L6 8.6z" fill="currentColor"/>',
+      redo: '<path d="M10.3 6a4.3 4.3 0 1 1-4.3-4.3c1.2 0 2.3.44 3.1 1.2l1.2 1.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/><path d="M10.5 1.4v2.8H7.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/>'
+    };
+    return '<svg class="ico-svg" width="' + size + '" height="' + size + '" viewBox="0 0 12 12" aria-hidden="true">' + (paths[name] || '') + '</svg>';
+  },
+
   // 应用内确认对话框（替代原生 window.confirm）：返回 Promise<boolean>。
   // Esc / 点击遮罩 = 取消；Enter = 确认（焦点在取消上时 Enter = 取消）。
   confirm(opts) {
