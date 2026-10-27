@@ -22,3 +22,6 @@ AGENTS.md
 # markitdown 内置转换器（PyInstaller 产物，171MB 二进制，prebuild 脚本可随时重建）
 build/markitdown/
 build/_pyinstaller/
+
+# 打包临时输出（dist 被锁时绕行用的目录）
+dist_build/
