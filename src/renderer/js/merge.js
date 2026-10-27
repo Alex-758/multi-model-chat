@@ -153,31 +153,241 @@
     return out.trim();
   }
 
-  // ---------- 模型二次综合提示词 ----------
-  function synthesisPrompt(question, results, maxChars) {
-    let p = '下面是多个 AI 模型对同一个问题的回答。请把它们融合改写为一份完整的最终回答：\n' +
-      '要求：\n' +
-      '- 直接输出最终回答本身（使用 Markdown），不要提及任何模型名称，不要对比各回答，不要逐条罗列“某模型说了什么”\n' +
-      '- 按逻辑组织内容（先直接回答，再展开详细说明与必要的补充），语言连贯自然，像一篇由你独立撰写的答案\n' +
-      '- 合并所有正确且有用的信息，去除重复；各回答有冲突时，采用更可信的说法\n' +
-      '- 保留重要的细节、数据、时间线和代码示例\n' +
-      '- 不要寒暄，不要“欢迎继续提问”之类的收尾语\n\n' +
-      '【原始问题】\n' + question + '\n\n';
-    // 控制总长度，避免多个长回答把综合请求顶出模型上下文窗口
-    const budget = Math.max(2000, Number(maxChars) || 48000);
-    let used = 0;
-    results.forEach((r, i) => {
-      if (used >= budget) return;
-      let content = String(r.content || '');
-      const remain = budget - used;
-      if (content.length > remain) content = content.slice(0, remain) + '\n…（内容过长，已截断）';
-      used += content.length;
-      p += '【回答 ' + (i + 1) + '】\n' + content + '\n\n';
+  // ---------- 结构化分析（模型综合的本地脚手架，零 token） ----------
+  // 把各模型回答拆要点、聚类，产出三分类（共识/独有）与数值冲突候选。
+  // 共识清单进综合提示词防漏要点，冲突候选要求模型在「分歧」小节明说；
+  // 聚类结果同时是渲染层"来源角标"的匹配依据。
+  const NUM_RE = /(?<![第\d])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(%|％|亿|万|千|倍|年|个月|月|天|日|小时|分钟|秒|元|美元|GB|MB|KB|TB|公里|千米|米)?/g;
+
+  function numsOf(s) {
+    const out = [];
+    String(s).replace(NUM_RE, (m, num, unit) => {
+      out.push({ v: num.replace(/,/g, ''), u: unit || '' });
+      return m;
     });
+    return out;
+  }
+
+  // 同单位数值完全错开才算疑似冲突（部分重叠不算：B 比 A 多说一个数不是矛盾）
+  function numsConflict(a, b) {
+    if (!a.length || !b.length) return false;
+    const ga = {}, gb = {};
+    for (const n of a) (ga[n.u] = ga[n.u] || new Set()).add(n.v);
+    for (const n of b) (gb[n.u] = gb[n.u] || new Set()).add(n.v);
+    for (const u of Object.keys(ga)) {
+      if (!gb[u]) continue;
+      const sa = ga[u], sb = gb[u];
+      if (![...sa].some(v => sb.has(v))) return true;
+    }
+    return false;
+  }
+
+  function analyze(results) {
+    const points = [];
+    for (const r of (results || [])) {
+      for (const p of splitPoints(r.content || '')) {
+        if (p.startsWith('|')) continue;
+        // 句子粒度：段落级要点会把整段答案压成一条，共识/独有/冲突三分类会退化
+        const pieces = p.match(/[^。！？!?.;；]+[。！？!?.;；]?/g) || [p];
+        for (const s of pieces) {
+          const t = s.trim();
+          if (t.length < 6) continue;
+          points.push({ modelId: r.modelId, name: r.name, text: t, v: vecOf(t), nums: numsOf(t) });
+        }
+      }
+    }
+    const clusters = [];
+    for (const pt of points) {
+      let best = null, bestSim = 0;
+      for (const c of clusters) {
+        const s = cos(pt.v, c.centroid);
+        if (s > bestSim) { bestSim = s; best = c; }
+      }
+      if (best && bestSim >= 0.34) {
+        best.members.push(pt);
+        for (const [k, v] of pt.v) best.centroid.set(k, (best.centroid.get(k) || 0) + v);
+      } else {
+        clusters.push({ members: [pt], centroid: new Map(pt.v) });
+      }
+    }
+    const consensus = [], unique = [];
+    for (const c of clusters) {
+      const models = [];
+      for (const m of c.members) {
+        if (!models.some(x => x.modelId === m.modelId)) models.push({ modelId: m.modelId, name: m.name });
+      }
+      if (models.length === 1) {
+        const rep = c.members.reduce((a, b) => a.text.length >= b.text.length ? a : b);
+        unique.push({ text: rep.text, models: models });
+        continue;
+      }
+      // 簇内跨模型数值冲突的不算共识（如 2048 vs 2030）：它们留给冲突清单，
+      // 提示词里要求模型在「分歧」小节分辨，而不是当成两家都认可的共识
+      const hasNumConflict = c.members.some((a, i) =>
+        c.members.slice(i + 1).some(b => a.modelId !== b.modelId && numsConflict(a.nums, b.nums)));
+      if (!hasNumConflict) {
+        const rep = c.members.reduce((a, b) => a.text.length >= b.text.length ? a : b);
+        consensus.push({ text: rep.text, models: models });
+      }
+    }
+    // 排序：支持模型多的共识在前
+    consensus.sort((a, b) => b.models.length - a.models.length);
+    // 数值冲突候选：同簇内来自不同模型、数值错开的要点配对
+    const conflicts = [];
+    outer:
+    for (const c of clusters) {
+      for (let i = 0; i < c.members.length; i++) {
+        for (let j = i + 1; j < c.members.length; j++) {
+          const a = c.members[i], b = c.members[j];
+          if (a.modelId === b.modelId || !numsConflict(a.nums, b.nums)) continue;
+          conflicts.push({ texts: [a.text, b.text] });
+          if (conflicts.length >= 6) break outer;
+        }
+      }
+    }
+    return { consensus: consensus, unique: unique, conflicts: conflicts, clusters: clusters };
+  }
+
+  // 按句子边界截断（替换旧的硬 slice，避免拦腰砍断）
+  function cutSentences(text, maxLen) {
+    if (text.length <= maxLen) return text;
+    const sents = text.match(/[^。！？!?.;；\n]+[。！？!?.;；]*/g) || [text];
+    let out = '';
+    for (const s of sents) {
+      if (out && (out + s).length > maxLen) break;
+      out += s;
+    }
+    if (!out) out = sents[0] || '';
+    return out.trimEnd() + '\n…（内容过长，已按句子截断）';
+  }
+
+  // 回答块预算：未超预算全量保留；超了按「独有信息量」加权分配（与其它回答重复的要点不计权重），
+  // 每份保底，截断落在句子边界——解决"排在后面的回答被硬砍甚至整体丢失"
+  function buildAnswersBlock(results, budget) {
+    const total = Math.max(2000, Number(budget) || 48000);
+    const raw = (results || []).map(r => String(r.content || ''));
+    const sumRaw = raw.reduce((a, c) => a + c.length, 0);
+    if (!raw.length) return '';
+    if (sumRaw <= total) {
+      return raw.map((c, i) => '【回答 ' + (i + 1) + '】\n' + c + '\n\n').join('');
+    }
+    const pts = raw.map(c => splitPoints(c).map(t => ({ t: t, v: vecOf(t) })));
+    const uniqWeight = pts.map((list, i) => list.reduce((a, p) => {
+      const dup = pts.some((other, j) => j !== i && other.some(q => cos(q.v, p.v) >= 0.5));
+      return a + (dup ? 0 : Math.min(p.t.length, 400));
+    }, 0));
+    const wSum = uniqWeight.reduce((a, b) => a + b, 0) || 1;
+    const floor = Math.min(800, Math.floor(total / raw.length));
+    let quotas = uniqWeight.map(w => floor + Math.floor((total - floor * raw.length) * w / wSum));
+    quotas = quotas.map((q, i) => Math.min(q, raw[i].length));
+    let diff = total - quotas.reduce((a, b) => a + b, 0);
+    for (let i = 0; diff > 0 && i < raw.length; i++) {
+      const give = Math.min(raw[i].length - quotas[i], diff);
+      quotas[i] += give; diff -= give;
+    }
+    return raw.map((c, i) => {
+      const part = c.length > quotas[i] ? cutSentences(c, quotas[i]) : c;
+      return '【回答 ' + (i + 1) + '】\n' + part + '\n\n';
+    }).join('');
+  }
+
+  // ---------- 模型二次综合提示词（结构化报告） ----------
+  function synthesisPrompt(question, results, maxChars) {
+    const an = analyze(results);
+    let p = '下面是多个 AI 模型对同一个问题的回答。请分析这些素材，输出一份结构化综合报告。\n' +
+      '输出格式（Markdown，使用以下固定的小节标题；某一节没有实质内容时整节省略，不要输出空标题）：\n' +
+      '## 结论\n（先直接回答问题，再展开理由，简明扼要）\n' +
+      '## 共同点\n（多个模型一致认可的信息，逐条列出）\n' +
+      '## 分歧\n（各模型说法不同的地方：分别陈述每种说法及其前提条件或适用范围，给出能帮助判断的事实依据；禁止把不同说法揉成一句话，没有实质分歧就省略本节）\n' +
+      '## 关键证据\n（支撑结论的具体数据、代码示例、时间线等）\n' +
+      '## 待验证问题\n（这些回答无法确认、需要进一步核实的问题；没有就省略）\n\n' +
+      '写作要求：\n' +
+      '- 语言自然连贯，像一篇独立撰写的分析报告；不要提及任何模型名称，不要写「某模型说」之类的句式\n' +
+      '- 引用各回答中的原句时直接融入正文，不要加引号或任何引用标记\n' +
+      '- 合并所有正确且有用的信息，去除重复；数字、日期等关键数据以多数一致的说法为准，存在分歧的放进「分歧」小节\n' +
+      '- 不要寒暄，不要「欢迎继续提问」之类的收尾语\n\n' +
+      '【原始问题】\n' + question + '\n\n';
+    if (an.consensus.length) {
+      p += '【本地预分析 · 多模型一致的要点（报告必须全部覆盖）】\n' +
+        an.consensus.slice(0, 12).map(c => '- ' + c.text).join('\n') + '\n\n';
+    }
+    if (an.conflicts.length) {
+      p += '【本地预分析 · 疑似数据分歧（请核实后写入「分歧」小节，分别陈述）】\n' +
+        an.conflicts.map(c => '- 说法一：' + c.texts[0] + '\n  说法二：' + c.texts[1]).join('\n') + '\n\n';
+    }
+    p += buildAnswersBlock(results, maxChars);
     return p;
   }
 
-  const api = { frontend, synthesisPrompt };
+  // ---------- 来源匹配（图2：观点可点击查看来自哪些模型） ----------
+  // 把报告按展示块（段落/列表项）拆开，再按句子与各模型要点比相似度；
+  // 命中的块记下来自哪些模型，渲染成可点击角标。模型改写幅度大的段落可能匹配不上——
+  // 匹配不到就不显示角标（尽力而为，不依赖模型遵守输出格式）。
+  function reportBlocks(content) {
+    const blocks = [];
+    for (const para of String(content || '').split(/\n{2,}/)) {
+      let buf = [];
+      const flush = () => { if (buf.length) { blocks.push(buf.join('\n').trim()); buf = []; } };
+      for (const l of para.split('\n')) {
+        if (!l.trim()) continue;
+        if (/^\s*(?:[-*+•]|\d{1,3}[.、)])\s/.test(l) || /^#{1,6}\s/.test(l) || /^\s*\|/.test(l)) {
+          flush();
+          blocks.push(l.replace(/^\s*[-*+•]\s+/, '').replace(/^#{1,6}\s+/, '').trim());
+        } else buf.push(l);
+      }
+      flush();
+    }
+    return blocks.filter(b => b.length >= 12);
+  }
+
+  function buildPool(results) {
+    const pool = [];
+    const seen = new Set();
+    for (const r of (results || [])) {
+      for (const t of splitPoints(r.content || '')) {
+        if (t.startsWith('|')) continue;
+        // 整段要点 + 段内句子都进池：报告里改写的短句要能对上段中某一句，
+        // 否则短句对整段的相似度会被段落长度稀释而漏配
+        const pieces = t.match(/[^。！？!?.;；]+[。！？!?.;；]?/g) || [];
+        for (const s of [t].concat(pieces)) {
+          const key = s.trim();
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const v = vecOf(s);
+          if (v.size) pool.push({ modelId: r.modelId, name: r.name, text: s, v: v });
+        }
+      }
+    }
+    return pool;
+  }
+
+  // 一段报告文本来自哪些模型（句子级匹配后聚合，避免长段落稀释相似度）
+  function blockModels(text, pool) {
+    const sents = String(text).match(/[^。！？!?.;；]+[。！？!?.;；]?/g) || [text];
+    const models = [];
+    for (const s of sents) {
+      const v = vecOf(s);
+      if (!v.size) continue;
+      for (const p of pool) {
+        if (models.some(m => m.modelId === p.modelId)) continue;
+        if (cos(v, p.v) >= 0.42) models.push({ modelId: p.modelId, name: p.name });
+      }
+    }
+    return models;
+  }
+
+  function matchSources(content, results) {
+    const pool = buildPool(results);
+    if (!pool.length) return [];
+    const out = [];
+    for (const b of reportBlocks(content)) {
+      const models = blockModels(b, pool);
+      if (models.length) out.push({ text: b, models: models });
+    }
+    return out;
+  }
+
+  const api = { frontend, synthesisPrompt, analyze, matchSources, buildPool, blockModels };
   if (typeof window !== 'undefined') {
     window.MM = window.MM || {};
     window.MM.merge = api;

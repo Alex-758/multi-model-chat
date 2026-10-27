@@ -914,3 +914,26 @@ details.sources[open] > :not(summary), details.reasoning[open] > :not(summary) {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 综合报告：来源角标 / 分歧小节标识 / 跳转闪烁 ---------- */
+.merge-src {
+  display: inline-flex; align-items: center; gap: 2px;
+  margin-left: 6px; vertical-align: super; cursor: pointer;
+  opacity: .75; transition: opacity .15s;
+}
+.merge-src:hover { opacity: 1; }
+.src-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, .12);
+}
+[data-theme='dark'] .src-dot { border-color: rgba(255, 255, 255, .2); }
+/* 点击来源角标后对应模型卡片闪烁 */
+.answer-card.src-flash { animation: srcFlash 1.6s ease; border-radius: 8px; }
+@keyframes srcFlash {
+  0%, 55% { box-shadow: 0 0 0 2px var(--accent), 0 0 20px var(--accent-soft); }
+  100% { box-shadow: none; }
+}
+/* 分歧 / 待验证小节标题：一眼看出哪些内容存在争议 */
+.md h2.sec-flag, .md h3.sec-flag { color: var(--danger); }
+.md h2.sec-flag::before, .md h3.sec-flag::before { content: '⚠ '; }
+.md h2.sec-soft::before, .md h3.sec-soft::before { content: '🔍 '; }

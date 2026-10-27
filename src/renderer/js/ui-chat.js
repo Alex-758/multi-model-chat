@@ -616,7 +616,7 @@ window.MM = window.MM || {};
     return grid;
   }
 
-  function mergeCard(msg, live, roundId) {
+  function mergeCard(msg, live, roundId, results) {
     const card = U.el('div', { class: 'merge-card', 'data-role': 'merge', 'data-round': roundId || '' });
     const label = msg.mode === 'model' ? '综合回答 · 模型二次综合' : '综合回答';
     const mStatus = U.el('span', { class: 'ac-status' });
@@ -631,10 +631,59 @@ window.MM = window.MM || {};
     if (live) body.textContent = msg.content || '';
     else body.innerHTML = mdHtml(msg, msg.content);
     card.appendChild(body);
+    // 非流式（历史重绘/前端合并完成）：渲染来源角标与分歧小节标识
+    if (!live) decorateMergeSources(body, msg, results, roundId);
     card.appendChild(U.el('div', { class: 'card-foot' },
       U.el('button', { class: 'ac-copy', onclick: function () { U.copyTextFrom(body); U.toast('已复制'); } }, '复制')));
     MM.md.bindCopy(card);
     return card;
+  }
+
+  // ---------- 综合报告的来源角标（观点可点击查来源） ----------
+  // 报告的每个段落/列表项与各模型原回答做本地相似度匹配，命中的块尾加小色点，
+  // 点击滚动到对应模型卡片并闪烁。匹配是尽力而为：改写幅度大的块不显示角标。
+  function decorateMergeSources(body, msg, results, roundId) {
+    if (!msg || !msg.content || !results || !results.length) return;
+    const pool = MM.merge.buildPool(results);
+    if (!pool.length) return;
+    for (const el of Array.from(body.querySelectorAll('p, li'))) {
+      if (el.querySelector('.merge-src')) continue;
+      const text = (el.innerText || '').trim();
+      if (text.length < 12) continue; // 短标题类不标
+      const models = MM.merge.blockModels(text, pool);
+      if (!models.length) continue;
+      el.appendChild(U.el('sup', {
+        class: 'merge-src',
+        title: '来自：' + models.map(m => m.name).join('、'),
+        onclick: function (e) {
+          e.stopPropagation();
+          jumpToSource(roundId, models);
+        }
+      }, models.map(m => U.el('span', { class: 'src-dot', style: 'background:' + MM.settings.dotColor(m.modelId) }))));
+    }
+    // 分歧 / 待验证小节的视觉标识（按模型输出的小节标题文本识别）
+    for (const h of Array.from(body.querySelectorAll('h1, h2, h3, h4, h5, h6'))) {
+      const t = h.textContent || '';
+      if (/分歧|不一致|争议/.test(t)) h.classList.add('sec-flag');
+      else if (/待验证|需核实|未确认/.test(t)) h.classList.add('sec-soft');
+    }
+  }
+
+  function jumpToSource(roundId, models) {
+    const grid = byRound('.answers', roundId);
+    if (!grid) { U.toast('未找到本轮回答卡片'); return; }
+    let card = null;
+    for (const m of models) {
+      card = Array.from(grid.querySelectorAll('.answer-card'))
+        .find(c => c.getAttribute('data-model-id') === m.modelId);
+      if (card) break;
+    }
+    if (!card) { U.toast('原回答卡片不在当前视图'); return; }
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.remove('src-flash');
+    void card.offsetWidth; // 重启动画
+    card.classList.add('src-flash');
+    setTimeout(function () { card.classList.remove('src-flash'); }, 1800);
   }
 
   // ---------- 版本历史 ----------
@@ -842,7 +891,7 @@ window.MM = window.MM || {};
             mids.push(grid);
             const liveMerge = live && live.type === 'merge';
             if (liveMerge || (am.merge && am.merge.content)) {
-              const card = mergeCard(am.merge, !!liveMerge, am.roundId);
+              const card = mergeCard(am.merge, !!liveMerge, am.roundId, am.results);
               frag.appendChild(card);
               mids.push(card);
               if (liveMerge) {
@@ -1587,6 +1636,18 @@ window.MM = window.MM || {};
         L.push('');
       }
       L.push(am.merge.content);
+      // 来源对照：报告里匹配到原回答的块，逐条注明来自哪些模型（尽力匹配）
+      const srcs = MM.merge.matchSources(am.merge.content, am.results || []);
+      if (srcs.length) {
+        L.push('');
+        L.push('---');
+        L.push('');
+        L.push('*来源对照（报告要点 ↔ 各模型原回答）*：');
+        for (const s of srcs.slice(0, 24)) {
+          L.push('- ' + (s.text.length > 60 ? s.text.slice(0, 60) + '…' : s.text) +
+            ' —— 来自 ' + s.models.map(m => m.name).join('、'));
+        }
+      }
     }
     // 文档附件全文放附录，导出文件拿到别处也能读到附件内容
     for (const f of ((userMsg && userMsg.files) || [])) {
@@ -1859,6 +1920,8 @@ window.MM = window.MM || {};
     body.classList.remove('streaming');
     body.classList.add('md');
     body.innerHTML = MM.md.render(ctx.mergeMsg.content || '（空）');
+    // 综合完成：渲染来源角标与分歧/待验证小节标识（前端合并同样生效）
+    decorateMergeSources(body, ctx.mergeMsg, ctx.am && ctx.am.results, ctx.roundId);
     // 失败/已停止时保留失败标记，不能被覆盖成完成状态；
     // 综合请求的 token 用量一并显示（用量存在 mergeMsg 上，会随版本快照一起保留）
     const mu = ctx.mergeMsg.usage;

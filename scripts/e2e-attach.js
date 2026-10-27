@@ -487,6 +487,52 @@ async function main() {
     return 'OK';
   });
 
+  // ---------- 15. 综合报告：来源角标 / 点击跳转闪烁 / 分歧小节标识 / 导出来源对照 ----------
+  await run('综合报告：来源角标渲染、点击跳转闪烁、分歧标识、导出来源对照', async () => {
+    await js(`MM.chat.stopAll(); document.querySelector('#btn-new-chat').click()`);
+    await sleep(200);
+    // 手工构造一轮带综合报告的会话（不实际发模型请求）
+    const ok = await js(`(function(){
+      var s = MM.sessions.current();
+      var msg = { id: 'u1', role: 'user', content: '量子计算何时商用？', createdAt: Date.now() };
+      var am = { id: 'a1', role: 'assistant', roundId: 'r9', createdAt: Date.now(), active: 0, versions: [],
+        results: [
+          { modelId: 'p1::mv', name: '多模态模型', status: 'done', content: '量子计算使用量子比特进行运算。它可以在 2048 年实现商用。' },
+          { modelId: 'p1::mt', name: '纯文本模型', status: 'done', content: '量子计算使用量子比特进行运算。它可以在 2030 年实现商用。' }
+        ],
+        merge: { content: '## 结论\\n\\n量子计算使用量子比特进行运算，这是两家共同的判断。\\n\\n## 分歧\\n\\n一种说法是 2048 年实现商用。另一种说法是 2030 年。', mode: 'model', createdAt: Date.now() }
+      };
+      s.messages.push(msg, am);
+      MM.chat.renderAll();
+      return true;
+    })()`);
+    assert(ok, '构造会话失败');
+    const t1 = await js(`({
+      badges: document.querySelectorAll('.merge-card .merge-src').length,
+      dots: document.querySelectorAll('.merge-card .src-dot').length,
+      flag: !!document.querySelector('.merge-card h2.sec-flag'),
+      badgeTitle: (document.querySelector('.merge-card .merge-src') || {}).title || ''
+    })`);
+    assert(t1.badges >= 2 && t1.dots >= t1.badges, JSON.stringify(t1));
+    assert(t1.flag, '分歧小节未加 sec-flag 标识');
+    assert(t1.badgeTitle.indexOf('来自：') === 0, '角标悬停应显示来源: ' + t1.badgeTitle);
+    // 点击角标：跳到含 2048 的模型卡片并闪烁
+    await js(`document.querySelector('.merge-card .merge-src').click()`);
+    await sleep(200);
+    const t2 = await js(`!!document.querySelector('.answer-card.src-flash')`);
+    assert(t2, '点击角标后应出现闪烁卡片');
+    // 导出：roundToMarkdown 含来源对照
+    const md = await js(`(function(){
+      var s = MM.sessions.current();
+      var am = s.messages[1];
+      return MM.chat._roundToMarkdownForTest(am, s, s.messages[0]);
+    })()`);
+    assert(md.indexOf('来源对照') >= 0 && md.indexOf('来自 多模态模型') >= 0, '导出应含来源对照: ' + md.slice(-200));
+    // 复制综合回答仍是纯文本（角标 innerText 只有色点无文字，复制不带入杂音）
+    await js(`MM.util.copyTextFrom(document.querySelector('.merge-card .ac-body'))`);
+    return '角标=' + t1.badges;
+  });
+
   server.close();
   const fail = rows.filter(r => !r.pass).length;
   console.log('\n== 附件 e2e：' + (rows.length - fail) + '/' + rows.length + ' 通过 ==');
