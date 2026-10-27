@@ -1,7 +1,7 @@
 {
   "name": "multi-model-chat",
   "productName": "Multi-Model Chat",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "同时调用多个大模型并展示、合并回答的本地聊天应用",
   "main": "src/main/main.js",
   "author": "MMC",
