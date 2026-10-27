@@ -1052,7 +1052,7 @@ window.MM = window.MM || {};
   }
 
   function saveEdit(msg) {
-    if (streaming) { U.toast('请等待当前任务完成', true); return; }
+    if (streaming || sendLock) { U.toast('请等待当前任务完成', true); return; }
     const s = MM.sessions.current();
     if (!s) return;
     const bubble = findUserBubble(msg);
@@ -1173,7 +1173,10 @@ window.MM = window.MM || {};
       for (const t of Array.from(wrap.querySelectorAll('.round-tools.retry-only'))) t.remove();
       wrap.appendChild(renderUser(userMsg));
       scrollBottom(true);
-      input.value = '';
+      // 只清掉发送时快照的内容：OCR/文档提取等待期间用户又打的字保留在输入框里，不能静默丢掉
+      if (input.value.trim() === text) {
+        input.value = '';
+      }
       autoResize();
       pendingAttach = [];
       renderAttachBar();
@@ -1467,11 +1470,11 @@ window.MM = window.MM || {};
   function userRetryTools(msg) {
     return U.el('div', { class: 'round-tools retry-only anim-in' },
       U.el('button', { class: 'tool-btn', onclick: function () { retryUser(msg); } },
-        U.el('span', { class: 'ico' }, '↻'), '重新生成'));
+        U.el('span', { class: 'ico', html: U.svgIcon('redo', 11) }), '重新生成'));
   }
 
   async function retryUser(userMsg) {
-    if (streaming) { U.toast('请等待当前任务完成', true); return; }
+    if (streaming || sendLock) { U.toast('请等待当前任务完成', true); return; }
     const s = MM.sessions.current();
     if (!s) return;
     const idx = s.messages.indexOf(userMsg);
@@ -1496,7 +1499,7 @@ window.MM = window.MM || {};
   }
 
   async function retryRound(roundId) {
-    if (streaming) { U.toast('请等待当前任务完成', true); return; }
+    if (streaming || sendLock) { U.toast('请等待当前任务完成', true); return; }
     const s = MM.sessions.current();
     if (!s) return;
     const idx = s.messages.findIndex(m => m.role === 'assistant' && m.roundId === roundId);
@@ -1526,7 +1529,7 @@ window.MM = window.MM || {};
   // 只重发失败/被停止的那一个模型，结果原位更新：已成功的模型不用再花钱重跑。
   // 历史按当前会话状态重建（与 dispatchRound 同一来源），搜索结果沿用该轮已保存的来源。
   async function retryOne(roundId, modelId) {
-    if (streaming) { U.toast('请等待当前任务完成', true); return; }
+    if (streaming || sendLock) { U.toast('请等待当前任务完成', true); return; }
     const s = MM.sessions.current();
     if (!s) return;
     const idx = s.messages.findIndex(m => m.role === 'assistant' && m.roundId === roundId);
@@ -1784,7 +1787,7 @@ window.MM = window.MM || {};
   // ---------- 综合回答 ----------
   async function doMerge(roundId, opts) {
     opts = opts || {};
-    if (streaming) { U.toast('请等待当前任务完成', true); return; }
+    if (streaming || sendLock) { U.toast('请等待当前任务完成', true); return; }
     // 轮次可能属于后台会话：自动综合在 all-done 时触发，此刻用户也许已切到别的会话。
     // 只查当前会话会让后台完成的轮次永远不综合——按 roundId 全局定位所属会话。
     let s = MM.sessions.current();
