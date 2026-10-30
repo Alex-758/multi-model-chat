@@ -292,7 +292,9 @@ async function streamChat(m, messages, opts) {
       bumpIdle(); // 收到数据，重置空闲计时
       const text = dec.decode(value, { stream: true });
       buf += text;
-      if (!sawData) rawText += text;
+      // 回退解析缓冲设上限：异常端点一直不发 data: 行时不能无限吃内存
+      //（正常聊天 JSON 远小于 10MB；超限后按截断文本走既有的解析失败路径）
+      if (!sawData && rawText.length < 10 * 1024 * 1024) rawText += text;
       let idx;
       while ((idx = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, idx).trim();

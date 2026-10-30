@@ -264,9 +264,10 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 }
 .eg-q:hover { border-color: var(--text); color: var(--text); background: var(--panel-2); }
 
-/* 回到底部悬浮按钮 */
+/* 回到底部悬浮按钮：锚定在输入区正上方（bottom:100%），输入区被附件条/提示词面板
+   撑高时自动跟随，任何状态下都不叠压输入区。按钮 DOM 在 #composer 内 */
 .scroll-bottom {
-  position: absolute; right: calc(var(--gut) + 4px); bottom: 156px; z-index: 6;
+  position: absolute; right: 4px; bottom: calc(100% + 12px); z-index: 6;
   width: 34px; height: 34px; border-radius: 50%;
   display: inline-flex; align-items: center; justify-content: center;
   background: var(--panel); border: 1px solid var(--border-2); color: var(--muted);
@@ -316,7 +317,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 }
 .edit-box .btn-primary:hover { background: var(--ink-2); }
 
-/* 搜索来源 / 思考过程：与卡片正文左边缘对齐 */
+/* 搜索来源 / 思考过程：相对正文缩进 13px，作为卡片正文的附属信息块
+   （虚线框/弱化色已足够表达从属关系，不与正文左缘对齐） */
 .sources { margin: 0 13px 10px; font-size: 12px; }
 .sources summary { cursor: pointer; color: var(--muted); user-select: none; }
 .sources a {
@@ -439,7 +441,7 @@ details.sources[open] > :not(summary), details.reasoning[open] > :not(summary) {
 .tool-btn.danger:hover { color: var(--danger); background: var(--danger-soft); }
 
 /* ---------- 输入区 ---------- */
-#composer { flex-shrink: 0; padding: 6px var(--gut) 16px; }
+#composer { flex-shrink: 0; padding: 6px var(--gut) 16px; position: relative; }
 #model-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 /* 会话提示词面板：可收起，收起时只留「提示词」按钮 */
 #session-prompt-box {

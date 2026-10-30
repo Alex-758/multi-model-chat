@@ -121,6 +121,79 @@ app.whenReady().then(async () => {
   o = JSON.parse(r);
   check('预置服务商也有删除按钮', o.delBtns === 1, r);
 
+  // ===== 重新综合：版本快照去重（token 统计不翻倍） =====
+  // 复刻真实流程的状态：回答完成入池（all-done）→ 综合完成写入当前快照（syncMergeToVersion）
+  r = await js(`(async function(){
+    MM.state.config = MM.normalizeConfig({}); // 综合方式默认 frontend（纯本地，测试无需 IPC）
+    var s = MM.sessions.createSilent();
+    s.messages = [
+      {id:'u1', role:'user', content:'问', createdAt:Date.now()},
+      {id:'a1', role:'assistant', roundId:'rM', createdAt:Date.now(), active:0,
+       results:[
+         {modelId:'m1', name:'A', status:'done', usage:{input:1000, output:500}, content:'回答A的内容'},
+         {modelId:'m2', name:'B', status:'done', usage:{input:0, output:400}, content:'回答B的内容'}
+       ],
+       versions:[{results:null, merge:null, at:Date.now()}]}
+    ];
+    var am = s.messages[1];
+    am.versions[0].results = JSON.parse(JSON.stringify(am.results));
+    am.merge = {content:'旧综合', mode:'frontend', createdAt:Date.now()};
+    am.versions[0].merge = JSON.parse(JSON.stringify(am.merge));
+    MM.chat.renderAll();
+    var tokens0 = MM.sessions._sessionTokensForTest(s);
+    MM.util.confirm = function(){ return Promise.resolve(true); };
+    await MM.chat._doMergeForTest('rM', {redo:true});
+    return JSON.stringify({
+      tokens0:tokens0,
+      tokens1:MM.sessions._sessionTokensForTest(s),
+      v:am.versions.length,
+      merged:!!(am.merge && am.merge.content && am.merge.content !== '旧综合'),
+      oldKept:am.versions[0].merge && am.versions[0].merge.content === '旧综合'});
+  })()`);
+  o = JSON.parse(r);
+  check('重综合压栈副本并保留旧综合（可回滚）', o.v === 2 && o.oldKept === true, r);
+  check('token 统计不因重综合翻倍', o.tokens0 === 1900 && o.tokens1 === 1900, r);
+  check('重综合生成新内容', o.merged === true, r);
+
+  // 结果在快照之后发生过变化（模拟单模型重试：all-done 已把新结果入池，未标记）：
+  // 再重综合 → 副本压栈。结果两批各计一次，副本批只计综合
+  r = await js(`(async function(){
+    var s = MM.sessions.current();
+    var am = s.messages[1];
+    am.results[1].content = '回答B（重试后）';
+    am.results[1].usage = {input:0, output:600};
+    am.versions.push({results:JSON.parse(JSON.stringify(am.results)),
+      merge:JSON.parse(JSON.stringify(am.merge)), at:Date.now()});
+    am.active = am.versions.length - 1;
+    await MM.chat._doMergeForTest('rM', {redo:true});
+    return JSON.stringify({
+      v:am.versions.length,
+      tokens:MM.sessions._sessionTokensForTest(s),
+      v0Intact:am.versions[0].results[1].content === '回答B的内容',
+      v2Intact:am.versions[2].results[1].content === '回答B（重试后）',
+      v3Inherited:am.versions[3].inherited === true});
+  })()`);
+  o = JSON.parse(r);
+  check('重试后重综合：两批结果各计一次、副本只计综合', o.v === 4 && o.tokens === 4000, r);
+  check('重试前后两版结果均可回滚', o.v0Intact === true && o.v2Intact === true, r);
+  check('重综合副本带 inherited 标记', o.v3Inherited === true, r);
+
+  // ===== 历史数据迁移：旧版重综合副本（无标记）补 inherited =====
+  r = await js(`(function(){
+    var rs = [{modelId:'m', status:'done', usage:{input:1, output:2}, content:'c'}];
+    var s = {id:'mg1', messages:[{role:'assistant', roundId:'x', results:JSON.parse(JSON.stringify(rs)),
+      versions:[
+        {results:JSON.parse(JSON.stringify(rs)), merge:null, at:1},
+        {results:JSON.parse(JSON.stringify(rs)), merge:{content:'新'}, at:2},
+        {results:[{modelId:'m', status:'done', usage:{input:1, output:3}, content:'c2'}], merge:null, at:3}
+      ]}]};
+    MM.migrateSessions([s]);
+    var vs = s.messages[0].versions;
+    return JSON.stringify({f0:!!vs[0].inherited, f1:!!vs[1].inherited, f2:!!vs[2].inherited});
+  })()`);
+  o = JSON.parse(r);
+  check('迁移为历史重复快照补 inherited 标记（真实新结果不受影响）', o.f0 === false && o.f1 === true && o.f2 === false, r);
+
   console.log('\nRESULT pass=' + pass + ' fail=' + fail);
   w.destroy(); app.exit(fail ? 1 : 0);
 });

@@ -429,6 +429,16 @@ MM.defaults = {
         if (typeof am.active !== 'number' || am.active < 0) {
           am.active = am.versions.length - 1;
         }
+        // 旧版「重新综合」压入的副本没有 inherited 标记（标记是后加的）：
+        // 与上一份快照结果完全相同的按副本处理，token 统计不重复计这批结果。
+        // 幂等重算、不置 changed：只为统计服务，不值得为它写一次盘
+        let prevSig = null;
+        for (const v of am.versions) {
+          if (!v || !Array.isArray(v.results)) { prevSig = null; continue; }
+          const sig = JSON.stringify(v.results);
+          if (prevSig !== null && sig === prevSig && !v.inherited) v.inherited = true;
+          prevSig = sig;
+        }
       }
     }
     return changed;

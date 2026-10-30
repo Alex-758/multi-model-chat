@@ -51,8 +51,6 @@
 
       <div id="messages"></div>
 
-      <button id="btn-scroll-bottom" class="scroll-bottom" title="回到底部"><svg class="ico-svg" width="13" height="13" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2.2v7M2.9 6.1L6 9.2l3.1-3.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></button>
-
       <footer id="composer">
         <div id="model-chips" title="选择要同时调用的模型（可多选）"></div>
         <div id="session-prompt-box" class="hidden">
@@ -72,6 +70,9 @@
             placeholder="输入消息…  Enter 发送，Shift+Enter 换行，可粘贴/拖入或点 + 加附件"></textarea>
           <button id="btn-send" class="btn-send" title="发送"><svg class="ico-svg" width="13" height="13" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 1.6v8.8l7.6-4.4z" fill="currentColor"/></svg></button>
         </div>
+        <!-- 回到底部悬浮按钮：锚在输入区上方（bottom:100%），附件条/提示词面板展开把输入区
+             撑高时自动跟随，不会叠压输入区（此前写死 bottom:156px，面板展开会盖住输入区） -->
+        <button id="btn-scroll-bottom" class="scroll-bottom" title="回到底部"><svg class="ico-svg" width="13" height="13" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2.2v7M2.9 6.1L6 9.2l3.1-3.1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg></button>
       </footer>
     </main>
   </div>

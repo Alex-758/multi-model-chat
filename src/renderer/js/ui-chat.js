@@ -1811,10 +1811,15 @@ window.MM = window.MM || {};
         okText: '重新综合'
       });
       if (!okc) return;
-      // 当前内容先存为新版本快照：重综合完成后写入最新快照，旧综合留在上一份里可回滚
+      // 当前内容先存为新版本快照：重综合完成后写入最新快照，旧综合留在上一份里可回滚。
+      // 副本打 inherited 标记：结果与上一份快照是同一批请求，sessionTokens 不重复计结果用量
+      //（入池必须无条件——若因「与上一份相同」跳过，下面的 syncMergeToVersion 会把
+      // 新综合直接覆盖进唯一那份快照，旧综合就丢了）
       if (hasUsefulResults(am.results)) {
         am.versions = am.versions || [];
-        am.versions.push(snapshotOf(am));
+        const snap = snapshotOf(am);
+        snap.inherited = true;
+        am.versions.push(snap);
         if (am.versions.length > 10) am.versions.splice(0, am.versions.length - 10);
         am.active = am.versions.length - 1;
       }
@@ -2161,6 +2166,7 @@ window.MM = window.MM || {};
     _modelSkippedForTest: modelSkippedForRound,
     _deleteRoundForTest: deleteRound,
     _retryOneForTest: retryOne,
+    _doMergeForTest: doMerge,
     _setVersionForTest: setVersion,
     _handleEventForTest: handleEvent,
     // 最近一次挂载的请求上下文概要（验证重试后节点缓存是否指向活跃 DOM）

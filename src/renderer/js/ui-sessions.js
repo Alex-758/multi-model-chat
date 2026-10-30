@@ -17,6 +17,7 @@ window.MM = window.MM || {};
   // 只统计服务端真实回传的用量，历史数据没有该字段时返回 0，界面就不显示，绝不估算。
   // 按版本快照累加：重新生成后旧版本消耗仍计入（版本池里的每份快照都代表一次真实请求），
   // 当前显示内容已包含在最后一份快照里，不能再额外加一遍。
+  // inherited 快照（重综合压栈的副本）与上一份共享同一批回答请求：只计综合、不重复计结果。
   function sessionTokens(s) {
     let total = 0;
     const add = u => { if (u) total += (u.input || 0) + (u.output || 0); };
@@ -25,8 +26,9 @@ window.MM = window.MM || {};
       const versions = Array.isArray(m.versions) && m.versions.length ? m.versions : null;
       if (versions) {
         for (const v of versions) {
-          for (const r of (v && v.results) || []) if (r) add(r.usage);
-          if (v && v.merge) add(v.merge.usage);
+          if (!v) continue;
+          if (!v.inherited) for (const r of (v.results || [])) if (r) add(r.usage);
+          if (v.merge) add(v.merge.usage);
         }
       } else {
         for (const r of (m.results) || []) if (r) add(r.usage);
