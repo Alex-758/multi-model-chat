@@ -383,7 +383,7 @@ server.listen(0, '127.0.0.1', () => {
       return 'ok';
     });
 
-    await run('综合回答中停止：回滚并可再次综合', async () => {
+    await run('综合回答中停止：保留半成品并可重新综合', async () => {
       await setSynth('p1::med');
       await newSession();
       await setChips(['p1::m1']);
@@ -394,10 +394,12 @@ server.listen(0, '127.0.0.1', () => {
       await js("document.querySelector('#btn-send').click()");
       assert(await waitFor("!document.querySelector('#btn-send').classList.contains('stop')", 6000), '停止未复位');
       const t = await js(`({ st: document.querySelector('.merge-card .ac-status').textContent,
-                            again: [].slice.call(document.querySelectorAll('.round-tools button')).some(function(x){return x.textContent.indexOf('综合回答')>=0;}) })`);
-      assert(/失败/.test(t.st) && t.again === true, JSON.stringify(t));
+                            body: document.querySelector('.merge-card .ac-body').textContent,
+                            redo: [].slice.call(document.querySelectorAll('.round-tools button')).some(function(x){return x.textContent.indexOf('重新综合')>=0;}) })`);
+      // 停止不再整份回滚：保留半份报告并标「已停止」，工具栏给出「重新综合」入口
+      assert(/已停止/.test(t.st) && /已停止，内容不完整/.test(t.body) && t.redo === true, JSON.stringify({ st: t.st, redo: t.redo }));
       await setSynth('frontend');
-      return JSON.stringify(t);
+      return JSON.stringify({ st: t.st, redo: t.redo });
     });
 
     await run('综合回答中切换会话：切回继续并完成', async () => {

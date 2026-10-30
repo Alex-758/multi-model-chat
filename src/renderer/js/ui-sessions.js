@@ -18,6 +18,7 @@ window.MM = window.MM || {};
   // 按版本快照累加：重新生成后旧版本消耗仍计入（版本池里的每份快照都代表一次真实请求），
   // 当前显示内容已包含在最后一份快照里，不能再额外加一遍。
   // inherited 快照（重综合压栈的副本）与上一份共享同一批回答请求：只计综合、不重复计结果。
+  // prunedTokens：版本池超 10 份被裁掉的旧版本用量，裁剪时折算保存（否则累计会越转越少）。
   function sessionTokens(s) {
     let total = 0;
     const add = u => { if (u) total += (u.input || 0) + (u.output || 0); };
@@ -34,6 +35,7 @@ window.MM = window.MM || {};
         for (const r of (m.results) || []) if (r) add(r.usage);
         if (m.merge) add(m.merge.usage);
       }
+      total += m.prunedTokens || 0;
     }
     return total;
   }

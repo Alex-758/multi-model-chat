@@ -222,6 +222,11 @@ async function extractPdfJs(file) {
   const doc = await pdfjs.getDocument({ data: data, verbosity: 0 }).promise;
   try {
     const pages = [];
+    // 文本量早停：渲染层拿到全文后只取前 3 万字符进上下文（MAX_DOC_CHARS），
+    // 再往后逐页提取是纯浪费；几千页的文本型 PDF 会在主进程长时间空转。
+    // 60k = 上限的 2 倍余量，保证截断点之前的内容与全量提取完全一致。
+    const MAX_CHARS = 60000;
+    let acc = 0;
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
       const tc = await page.getTextContent();
@@ -233,7 +238,9 @@ async function extractPdfJs(file) {
         }
       }
       pages.push(s.trim());
+      acc += s.length;
       if (page.cleanup) page.cleanup();
+      if (acc >= MAX_CHARS) break;
     }
     const text = pages.filter(Boolean).join('\n\n');
     if (!text.trim()) throw new Error('PDF 中没有可提取的文字');

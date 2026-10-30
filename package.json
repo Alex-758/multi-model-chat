@@ -10,7 +10,7 @@
     "start": "electron .",
     "icon": "node scripts/gen-icon.js",
     "prebuild:markitdown": "node scripts/prebuild-markitdown.js",
-    "dist": "npm run prebuild:markitdown && electron-builder --win"
+    "dist": "npm run prebuild:markitdown && node scripts/dist-safe.js"
   },
   "build": {
     "appId": "com.local.multimodelchat",

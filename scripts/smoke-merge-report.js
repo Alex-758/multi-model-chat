@@ -1,7 +1,7 @@
 'use strict';
 // 单元测试：模型综合的结构化报告支持层（merge.js，纯 node 直跑，无需 Electron）
-// 覆盖：三分类（共识/独有）、数值冲突检测、提示词（固定小节/预分析/无引号要求）、
-//       句界截断、来源匹配（matchSources / buildPool / blockModels）
+// 覆盖：三分类（共识/独有）、数值冲突检测、提示词（固定小节/预分析/无引号要求/多轮上下文）、
+//       token 口径的预算分配与句界截断、来源匹配（matchSources / buildPool / blockModels）
 const path = require('path');
 const M = require(path.join(__dirname, '..', 'src', 'renderer', 'js', 'merge.js'));
 
@@ -68,6 +68,30 @@ check('无关文本不匹配', M.blockModels('今天天气不错适合出去走�
 
 // 8. 边界：空输入
 check('空结果不抛错', M.analyze([]).consensus.length === 0 && M.matchSources('', []).length === 0);
+
+// 9. token 粗估（预算口径的基础：CJK≈1/字，其余≈4字符/token）
+check('tokensOf 中文按字计', M.tokensOf('四字测试') === 4);
+check('tokensOf 英文按4字符计', M.tokensOf('abcdefgh') === 2);
+check('tokensOf 混合文本', M.tokensOf('中文abc') === 3, String(M.tokensOf('中文abc')));
+
+// 10. 多轮上下文进提示词
+const hist = { question: '上一轮问了哪些优化点？', synthesis: '上一轮的综合结论内容，用于理解追问背景。' };
+const ph = M.synthesisPrompt('那第二个方案呢？', rs, 48000, hist);
+check('上下文节进提示词', ph.indexOf('【对话上下文') >= 0 && ph.indexOf('上一轮问了哪些优化点') >= 0);
+check('上下文标注不参与综合', ph.indexOf('不要综合其内容') >= 0);
+check('无上下文不出该节', M.synthesisPrompt('q', rs, 48000).indexOf('【对话上下文') < 0);
+check('上下文过长被节选', M.synthesisPrompt('q', rs, 48000,
+  { question: 'q', synthesis: Array.from({ length: 2000 }, () => '长').join('') }).indexOf('…\n') >= 0);
+
+// 11. 预算按 token 口径：英文长文不再被按字符过度截断
+//（约 19200 字符 ≈ 4800 token，预算 8000 token 应全量保留；旧字符口径会在 8000 字符处砍断）
+const en = { modelId: 'e::1', name: 'EN', content: Array.from({ length: 300 }, (_, i) => 'This is sentence number ' + i + ' of the English test answer content. ').join('') };
+const pe = M.synthesisPrompt('q', [en], 8000);
+check('英文按 token 口径不截断', pe.indexOf('已按句子截断') < 0 && pe.indexOf('sentence number 299') >= 0);
+
+// 12. 提示词总量尊重 token 预算：脚手架+回答块合计不超（防中文长回答顶爆上下文）
+const pBudget = M.synthesisPrompt('q', [long], 3000);
+check('提示词总量不超预算（含脚手架）', M.tokensOf(pBudget) <= 3200, 'actual=' + M.tokensOf(pBudget));
 
 console.log('\n== merge 报告单元：' + pass + '/' + (pass + fail) + ' 通过 ==');
 process.exit(fail ? 1 : 0);

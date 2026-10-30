@@ -420,8 +420,21 @@ server.listen(0, '127.0.0.1', () => {
       const req = lastReq();
       assert(req.body.tools && req.body.tools[0].type === 'web_search', JSON.stringify(req.body.tools));
       assert(req.body.stream_options && req.body.stream_options.include_usage === true, JSON.stringify(req.body.stream_options));
+      // 单模型重试保持原轮联网条件：先把开关关掉（该轮也没有 sources 可依赖），
+      // 重试请求仍要带 web_search 工具——联网状态记在 assistantMsg.searchOn 上
       await js(`(function(){ var t=document.querySelector('#tgl-search'); if(t.checked){ t.checked=false; t.dispatchEvent(new Event('change',{bubbles:true})); } })()`);
-      return JSON.stringify({ tools: req.body.tools[0].type });
+      const round = await js(`(function(){
+        var s = MM.state.sessions.find(function(x){ return x.id === MM.state.currentId; });
+        var am = s.messages.find(function(m){ return m.role === 'assistant'; });
+        return { roundId: am.roundId, searchOn: am.searchOn };
+      })()`);
+      assert(round.searchOn === true, 'assistantMsg 未记录 searchOn');
+      await js(`MM.chat._retryOneForTest(${JSON.stringify(round.roundId)}, 'p3::z1')`);
+      assert(await waitFor(`document.querySelector('#btn-send').classList.contains('stop')`, 3000), '重试未开始');
+      assert(await waitDone(), '重试未完成');
+      const retryReq = lastReq();
+      assert(retryReq.body.tools && retryReq.body.tools[0].type === 'web_search', '重试丢失原生搜索：' + JSON.stringify(retryReq.body && retryReq.body.tools));
+      return JSON.stringify({ tools: req.body.tools[0].type, retryTools: retryReq.body.tools[0].type });
     });
 
     // ---------- 12b. 联网搜索来源展示 ----------

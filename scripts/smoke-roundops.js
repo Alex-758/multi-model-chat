@@ -194,6 +194,36 @@ app.whenReady().then(async () => {
   o = JSON.parse(r);
   check('迁移为历史重复快照补 inherited 标记（真实新结果不受影响）', o.f0 === false && o.f1 === true && o.f2 === false, r);
 
+  // ===== 版本池裁剪：被裁版本的用量折进 prunedTokens，会话累计不缩水 =====
+  // 复刻真实序列：11 次重新生成触发「只保留最近 10 版」，最旧一份被裁——
+  // 它代表一次真实请求，裁掉不能让会话累计 token 变小
+  r = await js(`(async function(){
+    var s = MM.sessions.createSilent();
+    var res = [{modelId:'m1', name:'A', status:'done', usage:{input:100, output:0}, content:'回答内容'}];
+    var mg = {content:'旧综合', mode:'frontend', usage:{input:0, output:10}, createdAt:Date.now()};
+    var versions = [];
+    for (var i = 0; i < 10; i++) {
+      versions.push({results:JSON.parse(JSON.stringify(res)), merge:JSON.parse(JSON.stringify(mg)), at:Date.now()});
+    }
+    s.messages = [
+      {id:'u9', role:'user', content:'问', createdAt:Date.now()},
+      {id:'a9', role:'assistant', roundId:'rPrune', createdAt:Date.now(),
+       results:JSON.parse(JSON.stringify(res)), merge:JSON.parse(JSON.stringify(mg)),
+       versions:versions, active:9}
+    ];
+    var am = s.messages[1];
+    var tokens0 = MM.sessions._sessionTokensForTest(s); // 10 × (100 结果 + 10 综合) = 1100
+    await MM.chat._doMergeForTest('rPrune', {redo:true}); // 压栈第 11 份 → 裁掉最旧一份
+    return JSON.stringify({
+      tokens0:tokens0,
+      tokens1:MM.sessions._sessionTokensForTest(s),
+      pruned:am.prunedTokens || 0,
+      v:am.versions.length});
+  })()`);
+  o = JSON.parse(r);
+  // 裁剪后：剩 9 份整版(990) + inherited 副本只计综合(综合被新综合覆盖为无用量) + prunedTokens(110) = 1100
+  check('版本池裁剪后累计不缩水（prunedTokens 接账）', o.tokens0 === 1100 && o.tokens1 === 1100 && o.pruned === 110 && o.v === 10, r);
+
   console.log('\nRESULT pass=' + pass + ' fail=' + fail);
   w.destroy(); app.exit(fail ? 1 : 0);
 });

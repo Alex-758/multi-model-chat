@@ -248,51 +248,69 @@
     return { consensus: consensus, unique: unique, conflicts: conflicts, clusters: clusters };
   }
 
-  // 按句子边界截断（替换旧的硬 slice，避免拦腰砍断）
-  function cutSentences(text, maxLen) {
-    if (text.length <= maxLen) return text;
+  // ---------- token 粗估 ----------
+  // 只用于预算分配，不要求精确：CJK 字符 ≈ 1 token/字，其余 ≈ 4 字符/token。
+  // 旧版把按 token 算出的预算直接当字符花：中文长回答会顶爆上下文，英文则大量浪费。
+  function tokensOf(s) {
+    const t = String(s || '');
+    const cjk = (t.match(/[一-鿿]/g) || []).length;
+    return Math.ceil(cjk + (t.length - cjk) / 4);
+  }
+
+  function clip(s, maxLen) {
+    const t = String(s || '').trim();
+    return t.length > maxLen ? t.slice(0, maxLen) + '…' : t;
+  }
+
+  // 按句子边界截断到 token 配额（替换旧的硬 slice，避免拦腰砍断）
+  function cutSentences(text, maxTokens) {
+    if (tokensOf(text) <= maxTokens) return text;
     const sents = text.match(/[^。！？!?.;；\n]+[。！？!?.;；]*/g) || [text];
-    let out = '';
+    let out = '', used = 0;
     for (const s of sents) {
-      if (out && (out + s).length > maxLen) break;
-      out += s;
+      const tk = tokensOf(s);
+      if (out && used + tk > maxTokens) break;
+      out += s; used += tk;
     }
     if (!out) out = sents[0] || '';
     return out.trimEnd() + '\n…（内容过长，已按句子截断）';
   }
 
-  // 回答块预算：未超预算全量保留；超了按「独有信息量」加权分配（与其它回答重复的要点不计权重），
-  // 每份保底，截断落在句子边界——解决"排在后面的回答被硬砍甚至整体丢失"
+  // 回答块预算（单位：token）：未超预算全量保留；超了按「独有信息量」加权分配
+  //（与其它回答重复的要点不计权重），每份保底，截断落在句子边界——
+  // 解决"排在后面的回答被硬砍甚至整体丢失"
   function buildAnswersBlock(results, budget) {
-    const total = Math.max(2000, Number(budget) || 48000);
+    const total = Math.max(500, Number(budget) || 32000);
     const raw = (results || []).map(r => String(r.content || ''));
-    const sumRaw = raw.reduce((a, c) => a + c.length, 0);
     if (!raw.length) return '';
-    if (sumRaw <= total) {
+    const tks = raw.map(tokensOf);
+    const sumTk = tks.reduce((a, b) => a + b, 0);
+    if (sumTk <= total) {
       return raw.map((c, i) => '【回答 ' + (i + 1) + '】\n' + c + '\n\n').join('');
     }
-    const pts = raw.map(c => splitPoints(c).map(t => ({ t: t, v: vecOf(t) })));
+    const pts = raw.map(c => splitPoints(c).map(t => ({ t: t, v: vecOf(t), tk: tokensOf(t) })));
     const uniqWeight = pts.map((list, i) => list.reduce((a, p) => {
       const dup = pts.some((other, j) => j !== i && other.some(q => cos(q.v, p.v) >= 0.5));
-      return a + (dup ? 0 : Math.min(p.t.length, 400));
+      return a + (dup ? 0 : p.tk);
     }, 0));
     const wSum = uniqWeight.reduce((a, b) => a + b, 0) || 1;
     const floor = Math.min(800, Math.floor(total / raw.length));
     let quotas = uniqWeight.map(w => floor + Math.floor((total - floor * raw.length) * w / wSum));
-    quotas = quotas.map((q, i) => Math.min(q, raw[i].length));
+    quotas = quotas.map((q, i) => Math.min(q, tks[i]));
     let diff = total - quotas.reduce((a, b) => a + b, 0);
     for (let i = 0; diff > 0 && i < raw.length; i++) {
-      const give = Math.min(raw[i].length - quotas[i], diff);
+      const give = Math.min(tks[i] - quotas[i], diff);
       quotas[i] += give; diff -= give;
     }
     return raw.map((c, i) => {
-      const part = c.length > quotas[i] ? cutSentences(c, quotas[i]) : c;
+      const part = tks[i] > quotas[i] ? cutSentences(c, quotas[i]) : c;
       return '【回答 ' + (i + 1) + '】\n' + part + '\n\n';
     }).join('');
   }
 
   // ---------- 模型二次综合提示词（结构化报告） ----------
-  function synthesisPrompt(question, results, maxChars) {
+  // budget 单位是 token（调用方按综合模型上下文算出）；history 是上一轮问答背景（可空）
+  function synthesisPrompt(question, results, budget, history) {
     const an = analyze(results);
     let p = '下面是多个 AI 模型对同一个问题的回答。请分析这些素材，输出一份结构化综合报告。\n' +
       '输出格式（Markdown，使用以下固定的小节标题；某一节没有实质内容时整节省略，不要输出空标题）：\n' +
@@ -305,8 +323,14 @@
       '- 语言自然连贯，像一篇独立撰写的分析报告；不要提及任何模型名称，不要写「某模型说」之类的句式\n' +
       '- 引用各回答中的原句时直接融入正文，不要加引号或任何引用标记\n' +
       '- 合并所有正确且有用的信息，去除重复；数字、日期等关键数据以多数一致的说法为准，存在分歧的放进「分歧」小节\n' +
-      '- 不要寒暄，不要「欢迎继续提问」之类的收尾语\n\n' +
-      '【原始问题】\n' + question + '\n\n';
+      '- 不要寒暄，不要「欢迎继续提问」之类的收尾语\n\n';
+    // 上一轮背景放在【原始问题】之前：追问轮的提问往往单独看不懂（"那第二种方案呢"）
+    if (history && (history.question || history.synthesis)) {
+      p += '【对话上下文 · 上一轮（只用于理解本轮问题，不要综合其内容）】\n' +
+        '用户问：' + clip(history.question, 400) + '\n' +
+        (history.synthesis ? '上一轮综合结论（节选）：\n' + clip(history.synthesis, 1600) + '\n' : '') + '\n';
+    }
+    p += '【原始问题】\n' + question + '\n\n';
     if (an.consensus.length) {
       p += '【本地预分析 · 多模型一致的要点（报告必须全部覆盖）】\n' +
         an.consensus.slice(0, 12).map(c => '- ' + c.text).join('\n') + '\n\n';
@@ -315,7 +339,8 @@
       p += '【本地预分析 · 疑似数据分歧（请核实后写入「分歧」小节，分别陈述）】\n' +
         an.conflicts.map(c => '- 说法一：' + c.texts[0] + '\n  说法二：' + c.texts[1]).join('\n') + '\n\n';
     }
-    p += buildAnswersBlock(results, maxChars);
+    // 脚手架（格式说明+上下文+预分析清单）已占的部分先扣掉，剩下的 token 预算给回答块
+    p += buildAnswersBlock(results, Math.max(500, (Number(budget) || 32000) - tokensOf(p)));
     return p;
   }
 
@@ -387,7 +412,7 @@
     return out;
   }
 
-  const api = { frontend, synthesisPrompt, analyze, matchSources, buildPool, blockModels };
+  const api = { frontend, synthesisPrompt, analyze, matchSources, buildPool, blockModels, tokensOf };
   if (typeof window !== 'undefined') {
     window.MM = window.MM || {};
     window.MM.merge = api;

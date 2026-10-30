@@ -622,7 +622,8 @@ window.MM = window.MM || {};
     const mStatus = U.el('span', { class: 'ac-status' });
     // 非流式（历史快照）也要带上完成标记与用量，否则重开会话后综合卡片的头部是空的
     mStatus.innerHTML = live ? '<span class="spinner"></span>'
-      : '✓ ' + (msg.mode === 'model' ? '完成' : '已合并') + usageBadge(msg.usage);
+      : (msg.stopped ? '<span class="badge muted">⏹ 已停止</span>'
+        : '✓ ' + (msg.mode === 'model' ? '完成' : '已合并')) + usageBadge(msg.usage);
     card.appendChild(U.el('div', { class: 'ac-head' },
       U.el('span', { class: 'ac-name' }, label),
       mStatus
@@ -642,16 +643,38 @@ window.MM = window.MM || {};
   // ---------- 综合报告的来源角标（观点可点击查来源） ----------
   // 报告的每个段落/列表项与各模型原回答做本地相似度匹配，命中的块尾加小色点，
   // 点击滚动到对应模型卡片并闪烁。匹配是尽力而为：改写幅度大的块不显示角标。
+  // 匹配结果按 merge 对象缓存（WeakMap，不进 JSON 序列化/落盘）：renderAll 每次重绘
+  // 都会对每轮综合重跑 buildPool+blockModels，长会话切回时是纯重复计算。
+  const srcCache = new WeakMap();
+  function srcCacheEntry(msg, results) {
+    let sig = 5381;
+    for (const r of (results || [])) {
+      const c = String((r && r.content) || '');
+      const key = (r && r.modelId) + '\u0000' + c.length + '\u0000' + c;
+      for (let i = 0; i < key.length; i++) sig = ((sig << 5) + sig + key.charCodeAt(i)) | 0;
+    }
+    let e = srcCache.get(msg);
+    if (!e || e.sig !== sig) {
+      e = { sig: sig, pool: MM.merge.buildPool(results), match: new Map() };
+      srcCache.set(msg, e);
+    }
+    return e;
+  }
+
   function decorateMergeSources(body, msg, results, roundId) {
     if (!msg || !msg.content || !results || !results.length) return;
-    const pool = MM.merge.buildPool(results);
-    if (!pool.length) return;
+    const entry = srcCacheEntry(msg, results);
+    if (!entry.pool.length) return;
     for (const el of Array.from(body.querySelectorAll('p, li'))) {
       if (el.querySelector('.merge-src')) continue;
       const text = (el.innerText || '').trim();
       if (text.length < 12) continue; // 短标题类不标
-      const models = MM.merge.blockModels(text, pool);
+      let models = entry.match.get(text);
+      if (!models) { models = MM.merge.blockModels(text, entry.pool); entry.match.set(text, models); }
       if (!models.length) continue;
+      // 每个模型的色点各自可点，多来源块不再只能跳到第一家；
+      // sup 上的点击兜底保持旧行为（点中色点间缝隙时跳第一个可用来源，
+      // 色点自身 onclick 已 stopPropagation，不会双触发）
       el.appendChild(U.el('sup', {
         class: 'merge-src',
         title: '来自：' + models.map(m => m.name).join('、'),
@@ -659,7 +682,15 @@ window.MM = window.MM || {};
           e.stopPropagation();
           jumpToSource(roundId, models);
         }
-      }, models.map(m => U.el('span', { class: 'src-dot', style: 'background:' + MM.settings.dotColor(m.modelId) }))));
+      }, models.map(m => U.el('span', {
+        class: 'src-dot',
+        style: 'background:' + MM.settings.dotColor(m.modelId),
+        title: '来自：' + m.name,
+        onclick: function (e) {
+          e.stopPropagation();
+          jumpToSource(roundId, [m]);
+        }
+      }))));
     }
     // 分歧 / 待验证小节的视觉标识（按模型输出的小节标题文本识别）
     for (const h of Array.from(body.querySelectorAll('h1, h2, h3, h4, h5, h6'))) {
@@ -697,6 +728,19 @@ window.MM = window.MM || {};
   }
   function hasUsefulResults(results) {
     return (results || []).some(r => (r.status === 'done' || r.status === 'stopped') && r.content);
+  }
+  // 一批版本快照里已被计入会话累计的真实用量（结果 + 综合；inherited 副本的结果与
+  // 上一份共享，不计）。版本池裁剪前折进 am.prunedTokens，sessionTokens 会把它
+  // 加回来——否则每轮换掉最旧版本，会话累计 token 反而变小。
+  function prunedTokensOf(versions) {
+    let sum = 0;
+    const add = u => { if (u) sum += (u.input || 0) + (u.output || 0); };
+    for (const v of (versions || [])) {
+      if (!v) continue;
+      if (v.merge) add(v.merge.usage);
+      if (!v.inherited) for (const r of (v.results || [])) if (r) add(r.usage);
+    }
+    return sum;
   }
   function inheritVersionsOf(am) {
     // 仅继承含有效回答的版本；当前显示全失败时不入池
@@ -1191,8 +1235,9 @@ window.MM = window.MM || {};
     }
   }
 
-  // 发起一轮多模型请求并渲染占位卡片（inheritVersions：重试时继承的历史版本池）
-  async function dispatchRound(s, userMsg, models, searchOn, appendUserDom, inheritVersions) {
+  // 发起一轮多模型请求并渲染占位卡片（inheritVersions：重试时继承的历史版本池；
+  // carriedPruned：上一轮已累计的版本裁剪用量，轮次重建后要接着记，不能凭空消失）
+  async function dispatchRound(s, userMsg, models, searchOn, appendUserDom, inheritVersions, carriedPruned) {
     const myToken = ++runToken;
     const wrap = U.$('#messages');
     // 关闭联网搜索时不能沿用上一轮缓存的来源（旧结果可能已过时，还会把 searchOn 抬成 true）
@@ -1250,6 +1295,8 @@ window.MM = window.MM || {};
 
     const assistantMsg = {
       id: U.uid(), role: 'assistant', roundId: roundId, createdAt: Date.now(),
+      // 记下本轮是否带了联网（原生搜索的服务商重试时要保持同样条件；前端搜索看 sources）
+      searchOn: !!searchOn,
       versions: Array.isArray(inheritVersions) ? inheritVersions : [],
       active: Array.isArray(inheritVersions) ? inheritVersions.length - 1 : -1,
       results: models.map(m => {
@@ -1258,6 +1305,7 @@ window.MM = window.MM || {};
         return r;
       })
     };
+    if (carriedPruned) assistantMsg.prunedTokens = carriedPruned;
     // 把联网搜索来源挂到每个回答上：卡片里的「📎 搜索来源」从这里读取
     if (searchResults && searchResults.length) {
       for (const r of assistantMsg.results) r.sources = searchResults;
@@ -1340,7 +1388,10 @@ window.MM = window.MM || {};
         if (!am.versions.length || JSON.stringify(am.versions[am.versions.length - 1].results) !== JSON.stringify(snap.results)) {
           am.versions.push(snap);
         }
-        if (am.versions.length > 10) am.versions.splice(0, am.versions.length - 10); // 只保留最近 10 版
+        if (am.versions.length > 10) {
+          // 只保留最近 10 版；被裁版本的用量折进 prunedTokens，会话累计不缩水
+          am.prunedTokens = (am.prunedTokens || 0) + prunedTokensOf(am.versions.splice(0, am.versions.length - 10));
+        }
         am.active = am.versions.length - 1;
       } else if (typeof am.active !== 'number' || am.active < 0) {
         am.active = Array.isArray(am.versions) ? am.versions.length - 1 : -1;
@@ -1354,6 +1405,13 @@ window.MM = window.MM || {};
       // 整轮全失败时没有可合并的内容，不要弹「没有可合并的成功回答」；
       // 单模型重试不自动重跑综合：用户只是补一个失败的模型，重写全部综合既慢又费钱
       if (!ctx.singleRetry && U.$('#tgl-auto').checked && hasUsefulResults(am.results)) doMerge(am.roundId);
+      else if (ctx.singleRetry && am.merge && am.merge.content && hasUsefulResults(am.results)) {
+        // 重试成功后旧综合容易被当成最新结论，提醒一句（重试失败则旧综合仍准确，不打扰）
+        const retried = (am.results || []).find(r => r.modelId === ctx.retryModelId);
+        if (retried && (retried.status === 'done' || retried.status === 'stopped')) {
+          U.toast('回答已更新，综合回答仍是旧版，可点「重新综合」更新');
+        }
+      }
       return;
     }
 
@@ -1370,16 +1428,26 @@ window.MM = window.MM || {};
         status.innerHTML = '✓ 完成' + usageBadge(ev.usage);
       }
       else if (ev.type === 'error') {
-        // 综合失败：回滚 merge 状态，允许用户再次点击“综合回答”
-        ctx.mergeFailed = true; // 标记失败，随后的 all-done 不能把状态改回“完成”
-        ctx.mergeMsg.content += '\n\n（综合失败：' + ev.message + '）';
-        status.innerHTML = '<span style="color:var(--danger)">✗</span>';
+        if (/已停止/.test(ev.message || '')) {
+          // 停止与普通回答口径一致：保留已生成的半份报告并标“已停止”，不整份回滚
+          //（模型综合一次几十秒，误停全丢太伤）；重出完整版用「重新综合」
+          ctx.mergeMsg.stopped = true;
+          if (ev.usage) ctx.mergeMsg.usage = ev.usage;
+          ctx.mergeMsg.content += '\n\n（已停止，内容不完整，可点「重新综合」重出完整版）';
+          status.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(ctx.mergeMsg.usage);
+        } else {
+          // 综合失败：回滚 merge 状态，允许用户再次点击“综合回答”
+          ctx.mergeFailed = true; // 标记失败，随后的 all-done 不能把状态改回“完成”
+          ctx.mergeMsg.content += '\n\n（综合失败：' + ev.message + '）';
+          status.innerHTML = '<span style="color:var(--danger)">✗</span>';
+        }
         if (ctx.am) {
-          ctx.am.merge = null;
+          if (!ctx.mergeMsg.stopped) ctx.am.merge = null;
           syncMergeToVersion(ctx.am);
           const oldTools = byRound('.round-tools', ctx.roundId, wrap);
           if (oldTools) oldTools.replaceWith(roundTools(ctx.am, true));
         }
+        addMergeRetryBtn(status && status.closest('.merge-card'), ctx.roundId);
       }
       return;
     }
@@ -1521,7 +1589,7 @@ window.MM = window.MM || {};
     // 立即锁定状态（防搜索 await 期间重复触发）
     streaming = s.id;
     setSendBtn(true);
-    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, false, versions)
+    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, false, versions, am.prunedTokens || 0)
       .catch(e => { streaming = null; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
   }
 
@@ -1566,14 +1634,17 @@ window.MM = window.MM || {};
 
     const ctxLimit = flat.contextTokens || 0;
     const history = buildHistory(s, userMsg, userMsg.sources || null, ctxLimit, flat.maxTokens || 4096, flat);
+    // 联网条件与原轮保持一致：本轮记录过 searchOn 就用它（百炼/智谱/OpenRouter 的原生
+    // 搜索没有 sources 存档，只看 sources 会让重试悄悄丢掉联网）；旧数据回落 sources
+    const searchOn = am.searchOn === undefined ? !!userMsg.sources : !!am.searchOn;
     pending.set(reqId, {
-      session: s, assistantMsg: am, grid: gridEl, userMsg: userMsg, singleRetry: true,
+      session: s, assistantMsg: am, grid: gridEl, userMsg: userMsg, singleRetry: true, retryModelId: modelId,
       cards: new Map(fresh ? [[modelId, cardRefs(fresh)]] : [])
     });
     if (!fresh) renderAll(); // 网格不在 DOM（理论不可达）：走 live 重建路径重新绑定节点
     scrollBottom(true);
     try {
-      await api.send({ requestId: reqId, targets: [{ model: stripModel(flat), messages: history }], searchOn: !!userMsg.sources });
+      await api.send({ requestId: reqId, targets: [{ model: stripModel(flat), messages: history }], searchOn: searchOn });
     } catch (e) {
       pending.delete(reqId);
       streaming = null; setSendBtn(false);
@@ -1785,6 +1856,19 @@ window.MM = window.MM || {};
   }
 
   // ---------- 综合回答 ----------
+  // 上一轮问答背景：追问轮的提问往往单独看不懂（“那第二种方案呢”）。
+  // 优先带上一轮的综合回答（紧凑且已过滤寒暄），没有就只带上一轮提问本身。
+  // 轮次结构固定为 [user, assistant] 交替：本轮 assistant 在 idx，上一轮在 idx-2、user 在 idx-3。
+  function prevRoundContext(s, idx) {
+    if (idx < 3) return null;
+    const prevUser = s.messages[idx - 3], prevAsst = s.messages[idx - 2];
+    if (!prevUser || prevUser.role !== 'user' || !prevAsst || prevAsst.role !== 'assistant') return null;
+    return {
+      question: String(prevUser.content || ''),
+      synthesis: prevAsst.merge && prevAsst.merge.content ? String(prevAsst.merge.content) : ''
+    };
+  }
+
   async function doMerge(roundId, opts) {
     opts = opts || {};
     if (streaming || sendLock) { U.toast('请等待当前任务完成', true); return; }
@@ -1820,7 +1904,9 @@ window.MM = window.MM || {};
         const snap = snapshotOf(am);
         snap.inherited = true;
         am.versions.push(snap);
-        if (am.versions.length > 10) am.versions.splice(0, am.versions.length - 10);
+        if (am.versions.length > 10) {
+          am.prunedTokens = (am.prunedTokens || 0) + prunedTokensOf(am.versions.splice(0, am.versions.length - 10));
+        }
         am.active = am.versions.length - 1;
       }
     }
@@ -1879,12 +1965,14 @@ window.MM = window.MM || {};
     MM.sessions.render(); // 呼吸点
     const t0 = Date.now();
     const reqId = 'syn' + (++seq);
-    // 按综合模型的上下文给提示词设上限，避免多份长回答顶爆上下文
-    const promptBudget = Math.max(4000, (model.contextTokens || 32768) - (model.maxTokens || 4096) - 2048);
-    const prompt = MM.merge.synthesisPrompt(userMsg.content, okResults, promptBudget);
     // 综合也是一次真实提问：系统提示词同样要带上，否则综合结果会丢掉角色设定
-    const synthMsgs = [];
     const sys = effectiveSystemPrompt(s);
+    // 按综合模型的上下文给提示词设 token 上限，避免多份长回答顶爆上下文；
+    // 系统提示词同样占上下文，一并扣掉
+    const promptBudget = Math.max(4000, (model.contextTokens || 32768) - (model.maxTokens || 4096) - 2048
+      - (sys ? MM.merge.tokensOf(sys) : 0));
+    const prompt = MM.merge.synthesisPrompt(userMsg.content, okResults, promptBudget, prevRoundContext(s, idx));
+    const synthMsgs = [];
     if (sys) synthMsgs.push({ role: 'system', content: sys });
     synthMsgs.push({ role: 'user', content: prompt });
     pending.set(reqId, {
@@ -1912,6 +2000,7 @@ window.MM = window.MM || {};
       const body = card && card.querySelector('.ac-body'), st = card && card.querySelector('.ac-status');
       if (body) { body.classList.remove('streaming'); body.innerHTML = '<div class="ac-error">✗ ' + U.esc(e.message) + '</div>'; }
       if (st) st.innerHTML = '<span style="color:var(--danger)">✗</span>';
+      addMergeRetryBtn(card, roundId);
     }
   }
 
@@ -1921,6 +2010,18 @@ window.MM = window.MM || {};
       const i = am.active >= 0 ? am.active : am.versions.length - 1;
       am.versions[i].merge = am.merge ? JSON.parse(JSON.stringify(am.merge)) : null;
     }
+  }
+
+  // 综合失败/停止后在卡片角落补一个「重试」，免去到工具栏找入口
+  //（失败时 merge 已回滚，redo 无副作用；停止时保留半成品，走「重新综合」确认覆盖）
+  function addMergeRetryBtn(card, roundId) {
+    if (!card) return;
+    const foot = card.querySelector('.card-foot');
+    if (!foot || foot.querySelector('.ac-retry')) return;
+    foot.insertBefore(U.el('button', {
+      class: 'ac-copy ac-retry',
+      onclick: function () { doMerge(roundId, { redo: true }); }
+    }, '重试'), foot.firstChild);
   }
 
   function finalizeMergeCard(ctx, failed) {
@@ -1934,6 +2035,7 @@ window.MM = window.MM || {};
     // 综合请求的 token 用量一并显示（用量存在 mergeMsg 上，会随版本快照一起保留）
     const mu = ctx.mergeMsg.usage;
     if (failed) status.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(mu);
+    else if (ctx.mergeMsg.stopped) status.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(mu);
     else status.innerHTML = (ctx.mergeMsg.mode === 'model' ? '✓ 完成' : '✓ 已合并') + usageBadge(mu);
     // 恢复工具栏（综合回答入口随 am.merge 状态更新）
     const wrap = U.$('#messages');
