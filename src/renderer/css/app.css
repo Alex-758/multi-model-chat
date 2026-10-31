@@ -939,3 +939,17 @@ details.sources[open] > :not(summary), details.reasoning[open] > :not(summary) {
 .md h2.sec-flag, .md h3.sec-flag { color: var(--danger); }
 .md h2.sec-flag::before, .md h3.sec-flag::before { content: '⚠ '; }
 .md h2.sec-soft::before, .md h3.sec-soft::before { content: '🔍 '; }
+/* 数值待核实标记：CSS content 生成字符（不进 innerText，复制综合回答保持干净） */
+.merge-num {
+  margin-left: 3px; font-size: .72em; font-weight: 600;
+  color: #b8860b; cursor: help; vertical-align: super; opacity: .85;
+}
+.merge-num::after { content: '?'; }
+[data-theme='dark'] .merge-num { color: #d9a441; }
+/* 共识覆盖提示（挂在综合正文之外，不随复制带出） */
+.merge-cov {
+  margin-top: 8px; padding: 6px 10px; font-size: 12px; line-height: 1.6;
+  color: var(--text-2); background: rgba(184, 134, 11, .07);
+  border: 1px solid rgba(184, 134, 11, .2); border-radius: 8px; cursor: default;
+}
+[data-theme='dark'] .merge-cov { background: rgba(217, 164, 65, .09); border-color: rgba(217, 164, 65, .25); }

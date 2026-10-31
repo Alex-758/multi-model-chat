@@ -333,6 +333,7 @@ server.listen(0, '127.0.0.1', () => {
       requests.length = 0;
       await sendText('版本上限测试');
       assert(await waitFor(doneExpr, 8000), '首轮未完成');
+      const toks = [];
       for (let i = 0; i < 10; i++) {
         assert(await js(`(function(){
           var b=[].slice.call(document.querySelectorAll('.round-tools button')).filter(function(x){return /重新生成/.test(x.textContent);})[0];
@@ -340,16 +341,21 @@ server.listen(0, '127.0.0.1', () => {
           return !!b;
         })()`), '没有重新生成按钮');
         assert(await waitFor(doneExpr, 8000), '第 ' + (i + 1) + ' 次重试未完成');
+        toks.push(await js(`MM.sessions._sessionTokensForTest(MM.state.sessions.find(function(x){return x.id===MM.state.currentId;}))`));
+        assert(i === 0 || toks[i] >= toks[i - 1], '会话累计 token 变小：' + toks.join(','));
       }
       const t = await js(`(function(){
         var s=MM.state.sessions.find(function(x){return x.id===MM.state.currentId;});
         var am=s.messages.find(function(m){return m.role==='assistant';});
         var v=document.querySelector('.ver-label');
-        return { n: am.versions.length, ver: v?v.textContent:'' };
+        return { n: am.versions.length, ver: v?v.textContent:'', tokens: MM.sessions._sessionTokensForTest(s), pruned: am.prunedTokens||0 };
       })()`);
       assert(t.n === 10 && t.ver.indexOf('版本 10/10') >= 0, JSON.stringify(t));
       assert(requests.length === 11, '请求数=' + requests.length);
-      return JSON.stringify({ versions: t.n, reqs: requests.length, ver: t.ver });
+      // 每请求 usage 固定 6（prompt 4 + completion 2），11 个请求共 66：
+      // 被裁掉的最旧版本（6）折进 prunedTokens，累计不缩水（无此修复时会只剩 60）
+      assert(t.tokens === 66 && t.pruned === 6, '累计=' + t.tokens + ' pruned=' + t.pruned);
+      return JSON.stringify({ versions: t.n, reqs: requests.length, ver: t.ver, tokens: t.tokens, pruned: t.pruned });
     });
 
     // ---------- 11. 最终落盘 ----------

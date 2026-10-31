@@ -93,5 +93,62 @@ check('英文按 token 口径不截断', pe.indexOf('已按句子截断') < 0 &&
 const pBudget = M.synthesisPrompt('q', [long], 3000);
 check('提示词总量不超预算（含脚手架）', M.tokensOf(pBudget) <= 3200, 'actual=' + M.tokensOf(pBudget));
 
+// 13. 分句保护：小数/版本号不被 ASCII 句点拦腰斩断（实测回归："Node.js 18"/"1.5 倍"）
+const node = [
+  { modelId: 'a', name: 'A', content: 'Node.js 18 已发布，启动速度提升 30%。内存占用是上一版的 1.5 倍。' },
+  { modelId: 'b', name: 'B', content: 'Node.js 18 已发布，启动速度提升 40%。内存占用是上一版的 2 倍。' }
+];
+const an3 = M.analyze(node);
+check('版本号句完整参与对比', an3.conflicts.some(c => c.texts[0].indexOf('Node.js 18') === 0), JSON.stringify(an3.conflicts));
+check('小数不再斩断（1.5 倍冲突被检出）', an3.conflicts.some(c => c.texts[0].indexOf('1.5 倍') >= 0), JSON.stringify(an3.conflicts));
+check('斩断残留不再出现', an3.conflicts.every(c => c.texts.every(t => t.indexOf('js 18') !== 0 && t.indexOf('倍。') !== 0)));
+
+// 14. 预分析/来源池不受 14 条上限截断（长列表回答的第 15+ 条要点此前会被静默丢弃）
+const bullets = Array.from({ length: 20 }, (_, i) => '\n- 普通要点' + i + '的内容足够长可以被保留下来。');
+bullets[17] = '\n- 独家关键结论XYQ只有这里提到的内容足够长可以被保留下来。';
+const bulletContent = bullets.join('');
+const an4 = M.analyze([{ modelId: 'a', name: 'A', content: bulletContent }, { modelId: 'b', name: 'B', content: bulletContent }]);
+check('第18条共识仍被预分析捕获', an4.consensus.some(c => c.text.indexOf('XYQ') >= 0));
+check('来源池含第18条', M.buildPool([{ modelId: 'a', name: 'A', content: bulletContent }]).some(p => p.text.indexOf('XYQ') >= 0));
+
+// 15. IDF 加权：只有功能词相近的句子不再误聚成共识，真共识不受影响
+const fn = [
+  { modelId: 'a', name: 'A', content: '我们可以进行各种功能的测试和验证工作。' },
+  { modelId: 'b', name: 'B', content: '我们可以进行项目的日常管理和维护工作。' }
+];
+check('仅功能词相近不成共识', M.analyze(fn).consensus.length === 0);
+check('真共识不受IDF影响', an.consensus.some(c => c.text.indexOf('量子计算使用量子比特') >= 0 && c.models.length === 2));
+
+// 16. 冲突降噪：数字之外的主体不相似的数字对不报
+const noise = [
+  { modelId: 'a', name: 'A', content: '这个项目的版本 4 已经发布。' },
+  { modelId: 'b', name: 'B', content: '这个项目共有 5 个核心模块。' }
+];
+check('主体不相似的数字对不报冲突', M.analyze(noise).conflicts.length === 0);
+
+// 17. 数值溯源：中文数量级换算（1.5万 == 15000），缺值标记、已知值放行
+const srcNums = M.sourceNums([
+  { modelId: 'a', name: 'A', content: '用户量达到 1.5 万。' },
+  { modelId: 'b', name: 'B', content: '成本占比 30%。' }
+]);
+check('同值不同写法可溯源（1.5万==15000）', M.numsAudit('总用户量约 15000 人。', srcNums).length === 0);
+check('来源没有的数值被标记', M.numsAudit('预计明年达到 99999 人。', srcNums).join(',').indexOf('99999') >= 0);
+check('已知数值不标记', M.numsAudit('成本占比 30%。', srcNums).length === 0);
+
+// 18. 共识覆盖检查：报告已覆盖的共识不算缺失，没提的被标记
+const cov = M.uncoveredConsensus(an.consensus,
+  '## 结论\n\n量子计算使用量子比特进行运算，商用时间尚无定论。\n\n## 分歧\n\n一种说法是 2048 年实现商用。另一种说法是 2030 年。');
+check('报告覆盖的共识不算缺失', cov.length === 0, JSON.stringify(cov));
+check('报告缺失的共识被标记', M.uncoveredConsensus(an.consensus, '这段报告讲的是完全无关的话题内容没有重叠之处。').length === an.consensus.length);
+
+// 19. 聚类归并机制：低于入簇阈值的拆散同类，在归并阈值下并回
+const twoPts = [
+  { text: 'x', v: new Map([['甲', 1], ['乙', 1]]) },
+  { text: 'y', v: new Map([['甲', 1], ['丙', 1]]) }
+];
+const merged = M.clusterPoints(twoPts, 0.9, 0.3); // 相似 0.5 < 0.9 不入同簇；均值 0.5 ≥ 0.3 → 归并
+check('归并能把拆散的同类并回', merged.length === 1 && merged[0].members.length === 2, JSON.stringify(merged.map(c => c.members.length)));
+check('低于归并阈值不并', M.clusterPoints(twoPts, 0.9, 0.6).length === 2);
+
 console.log('\n== merge 报告单元：' + pass + '/' + (pass + fail) + ' 通过 ==');
 process.exit(fail ? 1 : 0);

@@ -29,7 +29,21 @@
     return END_PUNCT.test(tail) ? t : t + '。';
   }
 
-  function splitPoints(text) {
+  // ---------- 分句 ----------
+  // 句界 = 中英终结标点 + ASCII 句点；但「字母数字.字母数字」形态的句点是小数/
+  // 版本号/域名（Node.js、3.5、v1.2），不能当边界——此前被拦腰斩断会连锁出错：
+  // 数字提取错乱（"1.5 倍"→"1."）、真共识被拆成假冲突、真冲突漏检（实测案例）。
+  // noNewlines：截断场景(cutSentences)要求句子不跨行，其余场景沿用旧行为允许跨行。
+  function splitSentences(text, noNewlines) {
+    const run = noNewlines ? '[^。！？!?.;；\\n]' : '[^。！？!?.;；]';
+    const re = new RegExp('(?:' + run + '|(?<=[A-Za-z0-9])\\.(?=[A-Za-z0-9]))+(?:[。！？!?;；]|\\.(?![A-Za-z0-9]))?', 'g');
+    return String(text || '').match(re) || [];
+  }
+
+  function splitPoints(text, cap) {
+    // cap：最多保留多少条要点，缺省 14；0 = 不设上限。
+    // 预分析(analyze)与来源池(buildPool)必须用 0——实测 14 条上限会把第 15 条起的
+    // 要点静默截掉，共识进不了提示词、角标也永远匹配不上；frontend 保持 14（可读摘要场景合理）。
     // 1. 表格块优先提取：连续以 | 开头的行整块保留，绝不逐行拆散
     const tables = [];
     text = String(text).replace(/(?:^[ \t]*\|[^\n]*\|[ \t]*\n?)+/gm, m => {
@@ -51,7 +65,7 @@
         if (!p) continue;
         p = stripListPrefix(p);
         if (p.length <= 130) { pts.push(p); continue; }
-        const sents = p.match(/[^。！？!?.;；]+[。！？!?.;；]?/g) || [p];
+        const sents = splitSentences(p);
         let cur = '';
         for (const s of sents) {
           if ((cur + s).length > 150 && cur) { pts.push(cur.trim()); cur = s; }
@@ -70,7 +84,7 @@
       // 剥掉“补充：”“注：”等标签前缀
       .map(p => p.replace(/^(补充说明|补充|注|注意|另外|此外|说明)[：:]\s*/, ''))
       .filter(p => p.length >= 6)
-      .slice(0, 14)
+      .slice(0, cap === undefined ? 14 : (cap || Infinity))
       // 表格块追加为独立要点（frontend 中单独输出，不参与编号）
       .concat(tables);
   }
@@ -116,21 +130,10 @@
       if (!uniqTables.some(u => norm(u) === norm(t))) uniqTables.push(t);
     }
 
-    // 相似要点聚类（同一信息多个模型都说了 → 合并为一条）
-    const clusters = [];
-    for (const pt of points) {
-      let best = null, bestSim = 0;
-      for (const c of clusters) {
-        const s = cos(pt.v, c.centroid);
-        if (s > bestSim) { bestSim = s; best = c; }
-      }
-      if (best && bestSim >= 0.34) {
-        best.members.push(pt);
-        for (const [k, v] of pt.v) best.centroid.set(k, (best.centroid.get(k) || 0) + v);
-      } else {
-        clusters.push({ members: [pt], centroid: new Map(pt.v) });
-      }
-    }
+    // IDF 加权后聚类（同一信息多个模型都说了 → 合并为一条），与 analyze 同一口径
+    const weight = idfOf(points.map(p => p.v));
+    for (const p of points) p.v = weight(p.v);
+    const clusters = clusterPoints(points, 0.34, 0.55);
 
     // 排序：多数模型都提到的要点排前面（更可能是核心答案），独有补充靠后
     const rank = c => {
@@ -182,20 +185,31 @@
     return false;
   }
 
-  function analyze(results) {
-    const points = [];
-    for (const r of (results || [])) {
-      for (const p of splitPoints(r.content || '')) {
-        if (p.startsWith('|')) continue;
-        // 句子粒度：段落级要点会把整段答案压成一条，共识/独有/冲突三分类会退化
-        const pieces = p.match(/[^。！？!?.;；]+[。！？!?.;；]?/g) || [p];
-        for (const s of pieces) {
-          const t = s.trim();
-          if (t.length < 6) continue;
-          points.push({ modelId: r.modelId, name: r.name, text: t, v: vecOf(t), nums: numsOf(t) });
-        }
+  // ---------- IDF 加权 ----------
+  // 高频功能二元组（“进行/可以/一个”）会抬高无关句的相似度、稀释真相似：
+  // 对一轮素材先统计词元文档频率，再按 log(N/df) 重新加权——全场出现的词元
+  // 权重归零，相当于自动停用词。聚类与来源角标匹配共用这一口径。
+  // 语料中没出现的词元按「半语料出现」（df=N/2 → log2）的低权重处理：查询句里的
+  // 改写脚手架（“一种说法是”）不把范数撑爆，也不像真命中词元那样抬相似度。
+  function idfOf(maps) {
+    const df = new Map();
+    for (const m of maps) for (const k of m.keys()) df.set(k, (df.get(k) || 0) + 1);
+    const n = maps.length || 1;
+    return function (m) {
+      const w = new Map();
+      for (const [k, c] of m) {
+        const idf = Math.log(n / (df.get(k) || n / 2));
+        if (idf > 0.05) w.set(k, c * idf);
       }
-    }
+      return w;
+    };
+  }
+
+  // ---------- 聚类 ----------
+  // 贪心最近质心 + 簇间归并（frontend 与 analyze 共用）。
+  // 归并修单遍贪心的顺序依赖：先到的簇可能吸走近邻把同类拆散；之后簇间质心
+  // 按成员数取均值比较（直接比和式质心会随成员数膨胀而误并），达标即合并。
+  function clusterPoints(points, sim, mergeSim) {
     const clusters = [];
     for (const pt of points) {
       let best = null, bestSim = 0;
@@ -203,13 +217,64 @@
         const s = cos(pt.v, c.centroid);
         if (s > bestSim) { bestSim = s; best = c; }
       }
-      if (best && bestSim >= 0.34) {
+      if (best && bestSim >= sim) {
         best.members.push(pt);
         for (const [k, v] of pt.v) best.centroid.set(k, (best.centroid.get(k) || 0) + v);
       } else {
         clusters.push({ members: [pt], centroid: new Map(pt.v) });
       }
     }
+    const meanOf = c => {
+      const m = new Map();
+      for (const [k, v] of c.centroid) m.set(k, v / c.members.length);
+      return m;
+    };
+    let again = true;
+    while (again) {
+      again = false;
+      outer:
+      for (let i = 0; i < clusters.length; i++) {
+        for (let j = i + 1; j < clusters.length; j++) {
+          if (cos(meanOf(clusters[i]), meanOf(clusters[j])) >= mergeSim) {
+            const a = clusters[i], b = clusters[j];
+            for (const [k, v] of b.centroid) a.centroid.set(k, (a.centroid.get(k) || 0) + v);
+            a.members.push(...b.members);
+            clusters.splice(j, 1);
+            again = true;
+            break outer;
+          }
+        }
+      }
+    }
+    return clusters;
+  }
+
+  // 疑似数值冲突要求「数字之外的主体」也相似（同一件事的不同说法），
+  // “版本 4”vs“5 个功能”这类无关数字对不再当作分歧
+  function strippedVecOf(s) {
+    return vecOf(String(s).replace(NUM_RE, ' '));
+  }
+
+  function analyze(results) {
+    const points = [];
+    for (const r of (results || [])) {
+      for (const p of splitPoints(r.content || '', 0)) {
+        if (p.startsWith('|')) continue;
+        // 句子粒度：段落级要点会把整段答案压成一条，共识/独有/冲突三分类会退化
+        const pieces = splitSentences(p);
+        if (!pieces.length) pieces.push(p);
+        for (const s of pieces) {
+          const t = s.trim();
+          if (t.length < 6) continue;
+          points.push({ modelId: r.modelId, name: r.name, text: t, v: vecOf(t), nums: numsOf(t) });
+        }
+      }
+    }
+    // IDF 加权：全场词元降权后再聚类，功能词不再抬相似度
+    const weight = idfOf(points.map(p => p.v));
+    for (const p of points) p.v = weight(p.v);
+    const clusters = clusterPoints(points, 0.34, 0.55);
+    const sv = m => m.sv || (m.sv = strippedVecOf(m.text));
     const consensus = [], unique = [];
     for (const c of clusters) {
       const models = [];
@@ -222,9 +287,11 @@
         continue;
       }
       // 簇内跨模型数值冲突的不算共识（如 2048 vs 2030）：它们留给冲突清单，
-      // 提示词里要求模型在「分歧」小节分辨，而不是当成两家都认可的共识
+      // 提示词里要求模型在「分歧」小节分辨，而不是当成两家都认可的共识；
+      // 主体不相似的数字对不算真冲突（P6），不再把共识错杀
       const hasNumConflict = c.members.some((a, i) =>
-        c.members.slice(i + 1).some(b => a.modelId !== b.modelId && numsConflict(a.nums, b.nums)));
+        c.members.slice(i + 1).some(b => a.modelId !== b.modelId &&
+          numsConflict(a.nums, b.nums) && cos(sv(a), sv(b)) >= 0.4));
       if (!hasNumConflict) {
         const rep = c.members.reduce((a, b) => a.text.length >= b.text.length ? a : b);
         consensus.push({ text: rep.text, models: models });
@@ -232,7 +299,7 @@
     }
     // 排序：支持模型多的共识在前
     consensus.sort((a, b) => b.models.length - a.models.length);
-    // 数值冲突候选：同簇内来自不同模型、数值错开的要点配对
+    // 数值冲突候选：同簇内来自不同模型、数值错开且主体相似的要点配对
     const conflicts = [];
     outer:
     for (const c of clusters) {
@@ -240,6 +307,7 @@
         for (let j = i + 1; j < c.members.length; j++) {
           const a = c.members[i], b = c.members[j];
           if (a.modelId === b.modelId || !numsConflict(a.nums, b.nums)) continue;
+          if (cos(sv(a), sv(b)) < 0.4) continue;
           conflicts.push({ texts: [a.text, b.text] });
           if (conflicts.length >= 6) break outer;
         }
@@ -265,7 +333,8 @@
   // 按句子边界截断到 token 配额（替换旧的硬 slice，避免拦腰砍断）
   function cutSentences(text, maxTokens) {
     if (tokensOf(text) <= maxTokens) return text;
-    const sents = text.match(/[^。！？!?.;；\n]+[。！？!?.;；]*/g) || [text];
+    const sents = splitSentences(text, true);
+    if (!sents.length) sents.push(text);
     let out = '', used = 0;
     for (const s of sents) {
       const tk = tokensOf(s);
@@ -289,6 +358,9 @@
       return raw.map((c, i) => '【回答 ' + (i + 1) + '】\n' + c + '\n\n').join('');
     }
     const pts = raw.map(c => splitPoints(c).map(t => ({ t: t, v: vecOf(t), tk: tokensOf(t) })));
+    // 重复判定也走 IDF：功能词抬高相似度会把真独有信息误判成重复
+    const dupWeight = idfOf(pts.reduce((a, list) => a.concat(list.map(p => p.v)), []));
+    for (const list of pts) for (const p of list) p.v = dupWeight(p.v);
     const uniqWeight = pts.map((list, i) => list.reduce((a, p) => {
       const dup = pts.some((other, j) => j !== i && other.some(q => cos(q.v, p.v) >= 0.5));
       return a + (dup ? 0 : p.tk);
@@ -369,11 +441,11 @@
     const pool = [];
     const seen = new Set();
     for (const r of (results || [])) {
-      for (const t of splitPoints(r.content || '')) {
+      for (const t of splitPoints(r.content || '', 0)) {
         if (t.startsWith('|')) continue;
         // 整段要点 + 段内句子都进池：报告里改写的短句要能对上段中某一句，
         // 否则短句对整段的相似度会被段落长度稀释而漏配
-        const pieces = t.match(/[^。！？!?.;；]+[。！？!?.;；]?/g) || [];
+        const pieces = splitSentences(t);
         for (const s of [t].concat(pieces)) {
           const key = s.trim();
           if (seen.has(key)) continue;
@@ -387,13 +459,18 @@
   }
 
   // 一段报告文本来自哪些模型（句子级匹配后聚合，避免长段落稀释相似度）
+  // IDF 以池子为语料：池子和查询句按同一权重比较，功能词不再抬相似度
   function blockModels(text, pool) {
-    const sents = String(text).match(/[^。！？!?.;；]+[。！？!?.;；]?/g) || [text];
+    if (!pool.length) return [];
+    const weight = idfOf(pool.map(p => p.v));
+    const wPool = pool.map(p => ({ modelId: p.modelId, name: p.name, v: weight(p.v) }));
+    const sents = splitSentences(text);
+    if (!sents.length) sents.push(text);
     const models = [];
     for (const s of sents) {
-      const v = vecOf(s);
+      const v = weight(vecOf(s));
       if (!v.size) continue;
-      for (const p of pool) {
+      for (const p of wPool) {
         if (models.some(m => m.modelId === p.modelId)) continue;
         if (cos(v, p.v) >= 0.42) models.push({ modelId: p.modelId, name: p.name });
       }
@@ -412,7 +489,49 @@
     return out;
   }
 
-  const api = { frontend, synthesisPrompt, analyze, matchSources, buildPool, blockModels, tokensOf };
+  // ---------- 报告后校验（零 token） ----------
+  // 数值溯源：中文数量级单位展开后比较（1.5万 == 15000），报告里的数值在来源
+  // 回答中找不到同值即视为待核实——模型可能在做合法推算，只标提示不定罪。
+  const NUM_SCALE = { '万': 1e4, '亿': 1e8, '千': 1e3 };
+  function numKey(n) {
+    const x = parseFloat(n.v) * (NUM_SCALE[n.u] || 1);
+    return isFinite(x) ? String(Math.round(x * 1e6) / 1e6) : '';
+  }
+  function sourceNums(results) {
+    const set = new Set();
+    for (const r of (results || [])) {
+      for (const n of numsOf(r.content || '')) {
+        const k = numKey(n);
+        if (k) set.add(k);
+      }
+    }
+    return set;
+  }
+  function numsAudit(blockText, srcSet) {
+    const seen = new Set(), out = [];
+    for (const n of numsOf(blockText)) {
+      const k = numKey(n);
+      if (k && !srcSet.has(k) && !seen.has(k)) { seen.add(k); out.push(n.v + (n.u || '')); }
+    }
+    return out;
+  }
+
+  // 共识覆盖检查：报告句子与共识要点相似度达标即视为已覆盖（与角标同一匹配思路，
+  // IDF 以报告句为语料）。提示词只「要求」覆盖，这里给出本地验证，缺的提示重新综合。
+  function uncoveredConsensus(consensus, content) {
+    const items = consensus || [];
+    if (!items.length) return [];
+    const sents = splitSentences(String(content || '')).map(s => vecOf(s)).filter(v => v.size);
+    if (!sents.length) return items.map(c => c.text);
+    const weight = idfOf(sents);
+    const wSents = sents.map(weight);
+    return items.filter(c => {
+      const v = weight(vecOf(c.text));
+      return !wSents.some(r => cos(v, r) >= 0.4);
+    }).map(c => c.text);
+  }
+
+  const api = { frontend, synthesisPrompt, analyze, matchSources, buildPool, blockModels, tokensOf, splitSentences, clusterPoints, uncoveredConsensus, numsAudit, sourceNums };
   if (typeof window !== 'undefined') {
     window.MM = window.MM || {};
     window.MM.merge = api;

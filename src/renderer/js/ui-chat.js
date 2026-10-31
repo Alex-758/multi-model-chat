@@ -698,6 +698,32 @@ window.MM = window.MM || {};
       if (/分歧|不一致|争议/.test(t)) h.classList.add('sec-flag');
       else if (/待验证|需核实|未确认/.test(t)) h.classList.add('sec-soft');
     }
+    // 报告后校验（零 token，结果随 entry 缓存，每次重绘不重复算）：
+    // a) 数值溯源：报告中的数字在来源回答里找不到同值（中文数量级换算后）→ 块尾加待核实标记
+    if (!entry.srcNums) entry.srcNums = MM.merge.sourceNums(results);
+    for (const el of Array.from(body.querySelectorAll('p, li'))) {
+      if (el.querySelector('.merge-num')) continue;
+      const text = (el.innerText || '').trim();
+      if (text.length < 6) continue;
+      const missing = MM.merge.numsAudit(text, entry.srcNums);
+      if (missing.length) el.appendChild(U.el('sup', {
+        class: 'merge-num',
+        title: '数值 ' + missing.join('、') + ' 未在原始回答中出现，可能为推算或笔误，请留意核实'
+      }));
+    }
+    // b) 共识覆盖：预分析的共识要点没出现在报告里时，正文下方给一行提示；
+    // 提示挂在 body 之外（卡片上），复制综合回答不会带入
+    if (!entry.analysis) entry.analysis = MM.merge.analyze(results);
+    if (!('uncovered' in entry)) entry.uncovered = MM.merge.uncoveredConsensus(entry.analysis.consensus, msg.content);
+    if (entry.uncovered.length) {
+      const card = body.closest('.merge-card');
+      if (card && !card.querySelector('.merge-cov')) {
+        body.insertAdjacentElement('afterend', U.el('div', {
+          class: 'merge-cov',
+          title: entry.uncovered.map(t => '· ' + t).join('\n')
+        }, '⚠ ' + entry.uncovered.length + ' 条共识要点未出现在报告中，可重新综合补全'));
+      }
+    }
   }
 
   function jumpToSource(roundId, models) {

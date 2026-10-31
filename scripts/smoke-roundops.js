@@ -224,6 +224,43 @@ app.whenReady().then(async () => {
   // 裁剪后：剩 9 份整版(990) + inherited 副本只计综合(综合被新综合覆盖为无用量) + prunedTokens(110) = 1100
   check('版本池裁剪后累计不缩水（prunedTokens 接账）', o.tokens0 === 1100 && o.tokens1 === 1100 && o.pruned === 110 && o.v === 10, r);
 
+  // ===== 重新生成：旧轮次的 prunedTokens 接力到新轮次 =====
+  // retryRound 重建 assistantMsg 时必须把已累计的裁剪用量带过去，否则再次轮换时账就断了
+  r = await js(`(async function(){
+    var s = MM.sessions.createSilent();
+    var versions = [];
+    for (var i = 0; i < 10; i++) {
+      versions.push({results:[{modelId:'m1', name:'A', status:'done', usage:{input:10, output:0}, content:'v'+i}], merge:null, at:Date.now()});
+    }
+    s.messages = [
+      {id:'u10', role:'user', content:'问', createdAt:Date.now()},
+      {id:'a10', role:'assistant', roundId:'rCarry', createdAt:Date.now(), prunedTokens:123,
+       results:[{modelId:'m1', name:'A', status:'done', usage:{input:10, output:0}, content:'v9'}],
+       versions:versions, active:9}
+    ];
+    // 本页没有配置任何服务商：不注入临时模型，retryRound 会被「请先选择模型」拦下
+    MM.state.config.providers = [{id:'t1', name:'T', provider:'t1', apiFormat:'openai', baseUrl:'', models:[{modelId:'tm', name:'T', enabled:true}]}];
+    MM.chat.renderChips();
+    MM.chat.renderAll();
+    var b = [].slice.call(document.querySelectorAll('.round-tools button')).filter(function(x){ return /重新生成/.test(x.textContent); })[0];
+    if (!b) return JSON.stringify({err:'no button'});
+    b.click();
+    await new Promise(function(res){ setTimeout(res, 400); });
+    var s2 = MM.sessions.current();
+    var msgs = s2.messages;
+    var newAm = msgs.filter(function(m){ return m.role === 'assistant'; })[0];
+    return JSON.stringify({
+      n: msgs.length,
+      newRound: !!(newAm && newAm.roundId !== 'rCarry'),
+      carried: newAm ? (newAm.prunedTokens || 0) : -1,
+      inherited: newAm ? (newAm.versions || []).length : -1,
+      searchOn: newAm ? newAm.searchOn : null});
+  })()`);
+  o = JSON.parse(r);
+  // 重新生成会发起真实请求（本页无 mock 服务，随后按失败收尾，不影响数据层断言）
+  check('重新生成接力 prunedTokens（carriedPruned 不断账）',
+    o.n === 2 && o.newRound === true && o.carried === 123 && o.inherited === 10, r);
+
   console.log('\nRESULT pass=' + pass + ' fail=' + fail);
   w.destroy(); app.exit(fail ? 1 : 0);
 });
