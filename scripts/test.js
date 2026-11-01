@@ -24,6 +24,7 @@ const SUITES = [
   { name: 'smoke-check',        tier: 'electron', timeout: 180, surfaces: '设置页/导出/启动 DOM' },
   { name: 'smoke-sessions',     tier: 'electron', timeout: 180, surfaces: 'ui-sessions.js 会话 CRUD/渲染' },
   { name: 'smoke-roundops',     tier: 'electron', timeout: 180, surfaces: 'ui-chat.js 轮次/版本记账/重综合' },
+  { name: 'smoke-review',       tier: 'electron', timeout: 180, surfaces: 'ui-chat.js 交叉审查/仲裁/停止/自动审查开关' },
   { name: 'smoke-real',         tier: 'electron', timeout: 180, surfaces: 'store.js 异常路径/错误遮罩' },
   { name: 'e2e-app',            tier: 'electron', timeout: 180, surfaces: 'preload/main.js 安全面/CSP/密钥隔离/XSS' },
   { name: 'e2e-attach',         tier: 'electron', timeout: 180, surfaces: 'images.js 附件/图片/文档提取' },

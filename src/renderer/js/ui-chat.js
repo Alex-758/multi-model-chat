@@ -720,10 +720,12 @@ window.MM = window.MM || {};
     if (entry.uncovered.length) {
       const card = body.closest('.merge-card, .review-card');
       if (card && !card.querySelector('.merge-cov')) {
+        // 审查卡片上对应的动作是「重新审查」而不是「重新综合」：提示指向用户实际能点的按钮
+        const redo = body.closest('.review-card') ? '重新审查' : '重新综合';
         body.insertAdjacentElement('afterend', U.el('div', {
           class: 'merge-cov',
           title: entry.uncovered.map(t => '· ' + t).join('\n')
-        }, '⚠ ' + entry.uncovered.length + ' 条共识要点未出现在报告中，可重新综合补全'));
+        }, '⚠ ' + entry.uncovered.length + ' 条共识要点未出现在报告中，可' + redo + '补全'));
       }
     }
   }
@@ -2163,12 +2165,16 @@ window.MM = window.MM || {};
   }
 
   // ---------- 交叉审查（阶段一复用本轮回答；阶段二互审；阶段三仲裁） ----------
+  // 汇总口径与 usageBadge 的契约一致：返回 {input, output} 对象（徽标的悬浮分解也要用），
+  // 不能返回预求和的数字——usageBadge 对数字取 .input 得 undefined，徽标会永远不显示
   function reviewUsage(review) {
-    let total = 0;
-    const add = u => { if (u) total += (u.input || 0) + (u.output || 0); };
+    let input = 0, output = 0, any = false;
+    const add = u => {
+      if (u && (u.input || u.output)) { any = true; input += u.input || 0; output += u.output || 0; }
+    };
     for (const it of (review.items || [])) add(it.usage);
     if (review.verdict) add(review.verdict.usage);
-    return total || null;
+    return any ? { input: input, output: output } : null;
   }
   function reviewHasContent(review) {
     return !!review && (!!review.verdict || (review.items || []).some(i => i.content));
@@ -2288,6 +2294,9 @@ window.MM = window.MM || {};
       const v = review.verdict;
       const vr = ctx.rvRefs.verdict;
       if (v && vr) {
+        // 终态落 Markdown：作废排队中的流式绘制，否则 RAF 会在本赋值之后用
+        // textContent 把渲染好的 HTML 覆盖回裸文本（实测必现）
+        vr.body._paint = null;
         vr.body.classList.remove('streaming');
         vr.body.classList.add('md');
         vr.body.innerHTML = MM.md.render(v.content || '（空）');
@@ -2441,23 +2450,40 @@ window.MM = window.MM || {};
     const refs = ctx.rvRefs && ctx.rvRefs.items.get(ev.modelId);
     if (ev.type === 'start') {
       it.status = 'streaming';
-      if (refs) refs.status.innerHTML = '<span class="spinner"></span>';
+      // 挂上流式类：流式期间保留换行（CSS .rv-item-body.streaming 的既有钩子）
+      if (refs) { refs.status.innerHTML = '<span class="spinner"></span>'; refs.body.classList.add('streaming'); }
     } else if (ev.type === 'delta') {
       it.content += ev.text;
       if (refs) scheduleStreamPaint(refs.body, function () { refs.body.textContent = it.content; });
     } else if (ev.type === 'done') {
       it.status = 'done'; it.usage = ev.usage || null; it.ms = ev.ms || 0;
-      if (refs) refs.status.innerHTML = '✓';
+      if (refs) {
+        // 终态落 Markdown：先作废排队中的流式绘制（RAF 在下一帧才跑，会晚于本赋值执行）
+        refs.body._paint = null;
+        refs.body.classList.remove('streaming');
+        refs.body.classList.add('md');
+        refs.body.innerHTML = MM.md.render(it.content || '');
+        refs.status.innerHTML = '✓';
+      }
       updateReviewHeadStatus(ctx);
     } else if (ev.type === 'error') {
       if (/已停止/.test(ev.message || '')) {
         it.status = 'stopped';
         ctx.reviewStopped = true;
         if (ev.usage) it.usage = ev.usage;
-        if (refs) refs.status.innerHTML = '<span class="badge muted">⏹</span>';
+        if (refs) {
+          refs.body._paint = null;
+          if (it.content) { refs.body.classList.remove('streaming'); refs.body.classList.add('md'); refs.body.innerHTML = MM.md.render(it.content); }
+          refs.status.innerHTML = '<span class="badge muted">⏹</span>';
+        }
       } else {
         it.status = 'error'; it.error = ev.message;
-        if (refs) refs.status.innerHTML = '<span style="color:var(--danger)">✗</span>';
+        if (refs) {
+          refs.body._paint = null;
+          if (it.content) { refs.body.classList.remove('streaming'); refs.body.classList.add('md'); refs.body.innerHTML = MM.md.render(it.content); }
+          else refs.body.innerHTML = '<span style="color:var(--danger)">✗ ' + U.esc(ev.message || '失败') + '</span>';
+          refs.status.innerHTML = '<span style="color:var(--danger)">✗</span>';
+        }
       }
       updateReviewHeadStatus(ctx);
     }
