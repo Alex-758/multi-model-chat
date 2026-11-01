@@ -305,6 +305,9 @@ server.listen(0, '127.0.0.1', () => {
       await js(`(function(){ MM.settings.open(); document.querySelector('.settings-nav[data-pane="data"]').click(); })()`);
       await sleep(200);
       await js(`[].slice.call(document.querySelectorAll('#pane-data button')).filter(function(b){return b.textContent.indexOf('导入数据')>=0;})[0].click()`);
+      await sleep(200);
+      // 导入现在先弹覆盖确认框：自动点「确定」
+      await js("(function(){ var ov=document.getElementById('confirm-overlay'); var ok=ov&&ov.querySelector('.cf-ok'); if(ok&&!ov.classList.contains('hidden')) ok.click(); })()");
       await sleep(1000);
       const t = await js(`({ fatal: !!document.getElementById('fatal-error'), n: MM.state.sessions.length,
                            title: document.querySelector('#session-title').textContent })`);
@@ -356,6 +359,82 @@ server.listen(0, '127.0.0.1', () => {
       // 被裁掉的最旧版本（6）折进 prunedTokens，累计不缩水（无此修复时会只剩 60）
       assert(t.tokens === 66 && t.pruned === 6, '累计=' + t.tokens + ' pruned=' + t.pruned);
       return JSON.stringify({ versions: t.n, reqs: requests.length, ver: t.ver, tokens: t.tokens, pruned: t.pruned });
+    });
+
+    // ---------- 10b. 崩溃残留终态归位 + 会话 id 去重 ----------
+    await run('崩溃残留：streaming/pending 状态加载时归位，不再永久"生成中"', async () => {
+      const t = await js(`(function(){
+        var s = [{ id: 'crash', title: '崩溃会话', messages: [
+          { role: 'user', content: 'q' },
+          { role: 'assistant', roundId: 'r1', results: [
+              { modelId: 'a', name: 'A', status: 'streaming', content: '半截内容' },
+              { modelId: 'b', name: 'B', status: 'pending', content: '' },
+              { modelId: 'c', name: 'C', status: 'done', content: '完整' } ],
+            review: { items: [ { modelId: 'a', status: 'streaming', content: 'x' }, { modelId: 'b', status: 'pending', content: '' } ],
+                      verdict: { content: '', usage: null } } },
+          { role: 'assistant', roundId: 'r2', results: [ { modelId: 'a', status: 'searching', content: '' } ],
+            merge: { content: '', mode: 'model', usage: null } }
+        ] }];
+        var changed = MM.migrateSessions(s);
+        var am1 = s[0].messages[1], am2 = s[0].messages[2];
+        return {
+          changed: changed,
+          rA: am1.results[0].status, rB: am1.results[1].status, rBerr: am1.results[1].error || '',
+          rC: am1.results[2].status,
+          itA: am1.review.items[0].status, itB: am1.review.items[1].status,
+          vStopped: !!am1.review.verdict.stopped, revStopped: !!am1.review.stopped,
+          r2: am2.results[0].status, mergeGone: am2.merge === null
+        };
+      })()`);
+      assert(t.changed === true, 'changed=' + t.changed);
+      assert(t.rA === 'stopped' && t.rC === 'done', JSON.stringify(t));
+      assert(t.rB === 'error' && t.rBerr.indexOf('中断') >= 0, JSON.stringify(t));
+      assert(t.itA === 'stopped' && t.itB === 'stopped' && t.vStopped === true, JSON.stringify(t));
+      // verdict 存在时头部"已停止"经由 verdict.stopped 呈现，review.stopped 保持 false
+      assert(t.r2 === 'error' && t.mergeGone === true, JSON.stringify(t));
+      return JSON.stringify(t);
+    });
+
+    await run('导入数值字段注入：徽标不渲染 HTML（statusHtml/usageBadge 数值归一）', async () => {
+      const t = await js(`(function(){
+        var s = MM.state.sessions.find(function(x){ return x.id === MM.state.currentId; });
+        s.messages.push(
+          { role: 'user', content: '注入测试', createdAt: Date.now() },
+          { role: 'assistant', roundId: 'inj1', createdAt: Date.now(),
+            results: [{ modelId: 'p1::fast', name: 'F', status: 'done', content: '正文',
+                        ms: '<img src=x onerror=window.__inj=1>', chars: '<img src=x>',
+                        usage: { input: '<img src=x>', output: 5 } }] });
+        MM.chat.renderAll();
+        var card = document.querySelector('.answer-card[data-model-id="p1::fast"]');
+        var html = card ? card.innerHTML : '';
+        return { img: (html.match(/<img/g) || []).length, onerror: html.indexOf('onerror') >= 0,
+                 tok: /tok/.test(html), cleaned: document.body.innerHTML.indexOf('window.__inj') < 0 };
+      })()`);
+      assert(t.img === 0 && t.onerror === false, JSON.stringify(t));
+      assert(t.tok === true && t.cleaned === true, JSON.stringify(t));
+      // 还原状态，避免影响后续用例
+      await js(`(function(){
+        var s = MM.state.sessions.find(function(x){ return x.id === MM.state.currentId; });
+        s.messages.length = s.messages.length - 2;
+        MM.chat.renderAll();
+      })()`);
+      return JSON.stringify(t);
+    });
+
+    await run('会话 id 去重：缺失补新 id，重复换新 id', async () => {
+      const t = await js(`(function(){
+        var out = MM.normalizeSessions([
+          { id: 'dup', title: '一', messages: [] },
+          { id: 'dup', title: '二', messages: [] },
+          { title: '无id', messages: [] },
+          { id: 'keep', title: '保留', messages: [] }
+        ]);
+        return { n: out.length, ids: out.map(function(s){ return s.id; }),
+                 uniq: new Set(out.map(function(s){ return s.id; })).size };
+      })()`);
+      assert(t.n === 4 && t.uniq === 4, JSON.stringify(t));
+      assert(t.ids[0] === 'dup' && t.ids[3] === 'keep', JSON.stringify(t));
+      return JSON.stringify(t);
     });
 
     // ---------- 11. 最终落盘 ----------

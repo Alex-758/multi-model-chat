@@ -100,6 +100,17 @@ function decryptInfo() { return decryptFailures; }
 // 当前系统是否支持加密（Windows 下为 DPAPI）。不可用时密钥会以明文落盘，界面需要提示。
 function encryptionAvailable() { return canEncrypt(); }
 
+// 覆盖类操作（导入）前给当前数据留一份带时间戳的副本。
+// .bak 是多实例冲突检测专用的固定名，不能混用；返回副本路径，失败返回空串不阻断主流程
+function snapshot(tag) {
+  try {
+    if (!fs.existsSync(file())) return '';
+    const dest = file() + '.' + tag + '-' + Date.now();
+    fs.copyFileSync(file(), dest);
+    return dest;
+  } catch (e) { return ''; }
+}
+
 function save(data) {
   // 并发检测：磁盘上的 mtime 与本进程记录不一致 => 被其他实例/进程改过
   let conflict = false;
@@ -119,4 +130,4 @@ function save(data) {
   return { conflict };
 }
 
-module.exports = { init, load, save, dir, corruptInfo, decryptInfo, decryptData, encryptionAvailable };
+module.exports = { init, load, save, dir, snapshot, corruptInfo, decryptInfo, decryptData, encryptionAvailable };

@@ -1,5 +1,5 @@
 'use strict';
-// 交叉审查回归：手动审查（互审→仲裁）/ 互审全停不进仲裁 / 重试接力 / 不足两份拦截 / 开关自动审查
+// 交叉审查回归：手动审查（互审→仲裁）/ 互审全停不进仲裁 / 部分停止不进仲裁 / 重试接力 / 不足两份拦截 / 开关自动审查
 // 真实 main.js + 真实 IPC + 本地 mock 模型；store 写入临时 userData，不碰真实数据。
 // 用法：npx electron scripts/smoke-review.js
 const { app, BrowserWindow, dialog } = require('electron');
@@ -20,8 +20,10 @@ function check(label, ok, detail) {
 const ANSWER_MARK = 'ANSWER-' , REVIEW_MARK = 'REVIEW-FINDING-', VERDICT_MARK = 'VERDICT-OK-';
 const cnt = { answer: 0, review: 0, verdict: 0 };
 const reviewSeen = []; // 收到的互审请求 body.model 顺序
-// 每个模型的第一次互审请求延迟 2600ms：场景 A 里用户在它完成前点停止
+// 每个模型的第一次互审请求延迟 2600ms：场景 A 里用户在它完成前点停止。
+// reviewSlowSecond 可把指定模型的第二次互审也放慢：场景 A2 需要"一份完成、其余未完成"时停止
 const reviewReqCount = {};
+const reviewSlowSecond = {};
 const server = http.createServer((req, res) => {
   console.log('[mock ' + Date.now() % 100000 + '] ' + req.method + ' ' + req.url);
   if (req.url.indexOf('/models') >= 0) {
@@ -40,7 +42,7 @@ const server = http.createServer((req, res) => {
     if (prompt.indexOf('你是严格的审稿人') >= 0) {
       kind = 'review'; text = REVIEW_MARK + model;
       const n = reviewReqCount[model] = (reviewReqCount[model] || 0) + 1;
-      delay = n === 1 ? 2600 : 100; // 首次（场景 A）慢，重试/自动轮快
+      delay = n === 1 ? 2600 : (n === 2 && reviewSlowSecond[model] ? 2600 : 100);
       cnt.review++; reviewSeen.push(model);
     } else if (prompt.indexOf('你是仲裁人') >= 0) {
       kind = 'verdict'; text = VERDICT_MARK + '最终结论在这里'; delay = 80;
@@ -141,8 +143,26 @@ server.listen(0, '127.0.0.1', () => {
       check('场景 A：审查卡片有重试按钮', !!(await js("!!document.querySelector('.review-card .ac-retry')")), '');
       check('场景 A：无完成的审查条目（全部空内容）', cnt.review === 3, 'review=' + cnt.review);
 
+      // ===== 场景 A2：部分停止——一份互审已完成时停止，必须停在原地，不得自发进入仲裁 =====
+      // A 轮已用掉各模型的"首轮慢"延迟；这里把 m2/m3 的第二轮也放慢（2600ms），
+      // m1 的第二轮是默认 100ms：停止时恰是"1 份完成、2 份在途"
+      reviewSlowSecond['m2'] = true; reviewSlowSecond['m3'] = true;
+      await clickBtn("(function(){var b=document.querySelector('.review-card .ac-retry'); if(b) b.click();})()");
+      const m1Done = await poll("(function(){var it=document.querySelector('.review-card .rv-item[data-model-id=\"p1::m1\"] .ac-status');return it&&it.textContent.indexOf('✓')>=0;})()", 6000);
+      check('场景 A2：m1 互审先完成', !!m1Done, '');
+      await clickBtn("document.querySelector('#btn-send').click()"); // 一份完成、两份在途时停止
+      const stoppedA2 = await poll("(function(){var s=document.querySelector('.review-card .ac-head .ac-status');return s&&s.textContent.indexOf('已停止')>=0;})()", 6000);
+      check('场景 A2：部分停止后卡片标已停止', !!stoppedA2, '');
+      await sleep(500); // 等可能迟到的仲裁请求（不应有）
+      check('场景 A2：停止后未进入仲裁（0 次仲裁请求）', cnt.verdict === 0, 'verdict=' + cnt.verdict);
+      check('场景 A2：未生成仲裁结论块', !(await js("!!document.querySelector('.review-card .rv-verdict')")), '');
+      check('场景 A2：卡片保留重试入口', !!(await js("!!document.querySelector('.review-card .ac-retry')")), '');
+
       // ===== 场景 B：重试 → 互审全成 → 仲裁 → 完成（含用量）=====
       await js("document.querySelector('.review-card .ac-retry').click()");
+      await sleep(200);
+      // A2 留下了有内容的审查条目：重新审查会先弹覆盖确认框，自动点「重新审查」
+      await js("(function(){ var ov=document.getElementById('confirm-overlay'); var ok=ov&&ov.querySelector('.cf-ok'); if(ok&&!ov.classList.contains('hidden')) ok.click(); })()");
       const doneB = await poll("(function(){var s=document.querySelector('.review-card .ac-head .ac-status');var b=document.querySelector('.rv-verdict-body');return !!(s&&s.textContent.indexOf('完成')>=0&&b&&b.textContent.indexOf('VERDICT-OK')>=0);})()", 15000);
       check('场景 B：重试走完互审+仲裁，卡片显示完成', !!doneB, '');
       check('场景 B：三个审查条目都渲染', (await js("document.querySelectorAll('.review-card .rv-item').length")) === 3, '');
@@ -155,8 +175,8 @@ server.listen(0, '127.0.0.1', () => {
       const vHtml = (await js("(function(){var b=document.querySelector('.rv-verdict-body');return b?b.innerHTML:'';})()")) || '';
       check('场景 B：审查条目正文渲染为 Markdown（终态不落 md 曾必现裸 ## 文本）', iHtml.indexOf('<h2>') === 0 || /<(p|li|h\d)[ >]/.test(iHtml), 'html=[' + iHtml.slice(0, 60) + ']');
       check('场景 B：仲裁结论正文渲染为 Markdown（RAF 竞态曾覆盖回裸文本）', /<(p|li|h\d)[ >]/.test(vHtml), 'html=[' + vHtml.slice(0, 60) + ']');
-      check('场景 B：互审 6 次（A 轮 3 次 + 本轮 3 次）、仲裁 1 次', cnt.review === 6 && cnt.verdict === 1, 'review=' + cnt.review + ' verdict=' + cnt.verdict);
-      check('场景 B：仲裁提示词包含全部审查发现', reviewSeen.length === 6, 'seen=' + reviewSeen.join(','));
+      check('场景 B：互审 9 次（A/A2/B 轮各 3 次）、仲裁 1 次', cnt.review === 9 && cnt.verdict === 1, 'review=' + cnt.review + ' verdict=' + cnt.verdict);
+      check('场景 B：仲裁提示词包含全部审查发现', reviewSeen.length === 9, 'seen=' + reviewSeen.length);
 
       // ===== 场景 C：只有一份成功回答 → 拦截并提示 =====
       await js("[].forEach.call(document.querySelectorAll('#model-chips .chip.on'), function(c){ c.click(); })");
@@ -169,7 +189,7 @@ server.listen(0, '127.0.0.1', () => {
       await sleep(300);
       const toastC = await js("(function(){var t=document.querySelector('#toast'); return t?t.textContent:'';})()");
       check('场景 C：不足两份回答被拦截提示', toastC.indexOf('至少需要两份成功回答') >= 0, toastC);
-      check('场景 C：未发起审查请求', cnt.review === 6, 'review=' + cnt.review);
+      check('场景 C：未发起审查请求', cnt.review === 9, 'review=' + cnt.review);
 
       // ===== 场景 D：开启交叉审查开关 → 回答完成后自动互审+仲裁 =====
       await js("[].forEach.call(document.querySelectorAll('#model-chips .chip.on'), function(c){ c.click(); })");
@@ -183,7 +203,7 @@ server.listen(0, '127.0.0.1', () => {
       await send('第三轮：自动交叉审查');
       const doneD = await poll("(function(){var gs=document.querySelectorAll('.answers');if(!gs.length)return false;var rid=gs[gs.length-1].getAttribute('data-round');var cs=document.querySelectorAll('.review-card');var last=cs[cs.length-1];if(!last||last.getAttribute('data-round')!==rid)return false;var s=last.querySelector('.ac-head .ac-status');var b=last.querySelector('.rv-verdict-body');return !!(s&&s.textContent.indexOf('完成')>=0&&b&&b.textContent.indexOf('VERDICT-OK')>=0);})()", 20000);
       check('场景 D：回答完成后自动审查+仲裁完成', !!doneD, '');
-      check('场景 D：自动流程互审 3 次、仲裁 1 次', cnt.review === 9 && cnt.verdict === 2, 'review=' + cnt.review + ' verdict=' + cnt.verdict);
+      check('场景 D：自动流程互审 3 次、仲裁 1 次', cnt.review === 12 && cnt.verdict === 2, 'review=' + cnt.review + ' verdict=' + cnt.verdict);
       check('场景 D：回答请求共 7 次（3+1+3）', cnt.answer === 7, 'answer=' + cnt.answer);
       // 开关回显：设置状态与胶囊高亮
       const tgl = await js("({on: document.querySelector('#tgl-review').checked, cls: document.querySelector('#tgl-review-wrap').classList.contains('on')})");

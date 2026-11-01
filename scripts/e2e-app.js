@@ -229,6 +229,42 @@ server.listen(0, '127.0.0.1', () => {
       return JSON.stringify({ texts: t.texts, tok: t.tok });
     });
 
+    // ---------- 2b. 密钥引流防线 + markdown 占位符 ----------
+    await run('安全：渲染层伪造 baseUrl 不能把密钥引去别处（连接参数以主进程存量为准）', async () => {
+      const before = requests.length;
+      const done = await js(`(function(){
+        return new Promise(function(resolve){
+          var off = api.onEvent(function(d){
+            if (d && d.type === 'all-done' && d.requestId === 'sec1') { off(); resolve(true); }
+          });
+          api.send({ requestId: 'sec1', targets: [{ model: {
+              id: 'p1::m1', providerId: 'p1', modelId: 'm1', name: 'M1',
+              apiFormat: 'openai', baseUrl: 'http://127.0.0.1:${port}/evil', fullUrl: false,
+              maxTokens: 100, contextTokens: 100000 },
+            messages: [{ role: 'user', content: '安全测试' }] }], searchOn: false });
+          setTimeout(function(){ off(); resolve(false); }, 6000);
+        });
+      })()`);
+      assert(done === true, '请求未完成');
+      const hit = requests.slice(before);
+      assert(hit.length === 1, '请求数=' + hit.length);
+      assert(hit[0].url.indexOf('/evil') < 0, '伪造 baseUrl 被使用：' + hit[0].url);
+      assert(/\/v1\/chat\/completions$/.test(hit[0].url), '实际端点=' + hit[0].url);
+      assert(hit[0].headers.authorization === 'Bearer k1', 'auth=' + hit[0].headers.authorization);
+      return JSON.stringify({ url: hit[0].url, auth: hit[0].headers.authorization });
+    });
+
+    await run('markdown：伪造占位符行不崩溃（越界索引按普通文本输出）', async () => {
+      const t = await js(`(function(){
+        try {
+          var html = MM.md.render('前文\\n\\u0000B7\\u0000\\n后文');
+          return { ok: true, hasP: html.indexOf('<p') >= 0, raw: html.indexOf('\\u0000B7\\u0000') >= 0 };
+        } catch (e) { return { ok: false, err: String(e && e.message) }; }
+      })()`);
+      assert(t.ok === true && t.hasP === true, JSON.stringify(t));
+      return JSON.stringify(t);
+    });
+
     // ---------- 3. 停止 ----------
     await run('停止生成：保留半截内容并复位按钮', async () => {
       await newSession();
@@ -609,6 +645,9 @@ server.listen(0, '127.0.0.1', () => {
         document.querySelector('.settings-nav[data-pane="data"]').click();
         [].slice.call(document.querySelectorAll('#pane-data button')).filter(function(b){return b.textContent.indexOf('导入数据')>=0;})[0].click();
       })()`);
+      await sleep(200);
+      // 导入现在先弹覆盖确认框：自动点「确定」
+      await js("(function(){ var ov=document.getElementById('confirm-overlay'); var ok=ov&&ov.querySelector('.cf-ok'); if(ok&&!ov.classList.contains('hidden')) ok.click(); })()");
       await sleep(1000);
       const t = await js(`({
         title: document.querySelector('#session-title').textContent,
@@ -645,6 +684,8 @@ server.listen(0, '127.0.0.1', () => {
         document.querySelector('.settings-nav[data-pane="data"]').click();
         [].slice.call(document.querySelectorAll('#pane-data button')).filter(function(b){return b.textContent.indexOf('导入数据')>=0;})[0].click();
       })()`);
+      await sleep(200);
+      await js("(function(){ var ov=document.getElementById('confirm-overlay'); var ok=ov&&ov.querySelector('.cf-ok'); if(ok&&!ov.classList.contains('hidden')) ok.click(); })()");
       await sleep(1000);
       const t = await js(`(function(){
         var p=MM.state.config.providers.find(function(x){return x.id==='legacy';});
@@ -677,7 +718,7 @@ server.listen(0, '127.0.0.1', () => {
       })`);
       assert(t.require === 'undefined' && t.process === 'undefined', JSON.stringify(t));
       // API 面只允许白名单内的方法（并行开发可能新增导出类方法，逐一核对）
-      const allow = ['clearSecret','exportData','exportText','extractDoc','getAll','getCatalog','importData','listModels','onEvent','onWinState','pickFiles','saveAll','saveImage','search','send','setSecret','stop','synthesize','testModel','testSearch','winControl'];
+      const allow = ['clearSecret','exportData','exportText','extractDoc','getAll','getCatalog','importData','listModels','onEvent','onFlush','onWinState','pickFiles','saveAll','saveImage','search','send','setSecret','stop','synthesize','testModel','testSearch','winControl'];
       const unknown = t.api.filter(k => allow.indexOf(k) < 0);
       assert(unknown.length === 0 && t.api.indexOf('send') >= 0 && t.api.indexOf('setSecret') >= 0, JSON.stringify(t.api));
       assert(/default-src 'self'/.test(t.csp) && /object-src 'none'/.test(t.csp) && /base-uri 'none'/.test(t.csp), t.csp);

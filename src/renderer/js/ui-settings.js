@@ -791,10 +791,11 @@ window.MM = window.MM || {};
     box.appendChild(U.el('button', {
       class: 'btn-secondary',
       onclick: async () => {
-        // 导出文件包含明文 API 密钥，先明确告知风险再让用户确认
+        // 导出文件包含明文 API 密钥，先明确告知风险再让用户确认；
+        // 图片附件本体不在备份内（只存引用），跨机恢复会失效，一并告知
         const ok = await U.confirm({
           title: '导出数据',
-          message: '导出的备份文件包含明文 API 密钥。请只保存在本机或可信位置，不要上传到网盘、聊天工具或代码仓库。确定继续导出？',
+          message: '导出的备份文件包含明文 API 密钥（图片附件不包含在备份内）。请只保存在本机或可信位置，不要上传到网盘、聊天工具或代码仓库。确定继续导出？',
           okText: '导出'
         });
         if (!ok) return;
@@ -810,6 +811,14 @@ window.MM = window.MM || {};
     box.appendChild(U.el('button', {
       class: 'btn-secondary',
       onclick: async () => {
+        // 导入是覆盖性操作：先确认再选文件。原数据由主进程在覆盖前自动备份
+        const ok = await U.confirm({
+          title: '导入数据',
+          message: '导入将覆盖当前全部数据（模型配置与所有会话）。覆盖前会自动把当前数据备份为 store.json.pre-import-<时间戳>。确定继续？',
+          okText: '导入',
+          danger: true
+        });
+        if (!ok) return;
         try {
           const data = await api.importData();
           if (!data) return;
@@ -838,7 +847,7 @@ window.MM = window.MM || {};
           if (savedOk) MM.stripSecrets(MM.state.config);
           renderModels(true); renderSearch(); renderSynth(); renderPrompt();
           MM.chat.renderAll(); MM.chat.renderTitle(); MM.sessions.render(); MM.chat.renderChips();
-          U.toast('导入成功');
+          U.toast('导入成功' + (data.backup ? '，原数据已备份为 ' + String(data.backup).split(/[\\/]/).pop() : ''));
         } catch (e) {
           // 主进程解析失败/文件不可读都会 reject：必须给用户明确反馈
           U.toast('导入失败：' + ((e && e.message) || e), true);

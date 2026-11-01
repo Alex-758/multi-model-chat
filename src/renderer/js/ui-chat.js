@@ -5,6 +5,11 @@ window.MM = window.MM || {};
 (function () {
   const U = MM.util;
   let seq = 0;
+  // requestId 带随机后缀：渲染层重载后 seq 归零会复用旧 id，主进程的
+  // activeRequests 表被同名新请求覆盖后，旧请求从此无法停止（静默跑完烧钱）
+  function nextReqId(prefix) {
+    return prefix + (++seq) + '-' + Math.random().toString(36).slice(2, 8);
+  }
   // 正在生成的会话 id（null = 空闲）。全局同一时刻只跑一轮；
   // 存会话 id 是为了区分"当前会话在生成"和"别的会话在生成"。
   let streaming = null;
@@ -577,13 +582,23 @@ window.MM = window.MM || {};
     };
   }
 
+  // 任意来源（磁盘/导入/服务端）的数值字段统一转成有限数字，NaN/对象/字符串一律按 0
+  function num(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+
   function statusHtml(res) {
     if (res.status === 'searching') return '<span class="spinner"></span><span class="badge muted">搜索中…</span>';
     if (res.status === 'streaming') return '<span class="spinner"></span><span class="badge muted">生成中…</span>';
     if (res.status === 'done') {
       let h = '<span class="badge ok">✓</span>';
-      if (res.ms) h += '<span class="badge">' + U.fmtMs(res.ms) + '</span>';
-      if (res.chars) h += '<span class="badge">' + res.chars + ' 字</span>';
+      // ms/chars 来自磁盘/导入数据时可能是任意类型：强制转数字，
+      // 否则字符串会原样拼进 innerHTML（持久化 HTML 注入）或被 + 拼接
+      const ms = num(res.ms);
+      if (ms > 0) h += '<span class="badge">' + U.fmtMs(ms) + '</span>';
+      const chars = num(res.chars);
+      if (chars > 0) h += '<span class="badge">' + chars + ' 字</span>';
       return h + usageBadge(res.usage);
     }
     if (res.status === 'error') return '<span class="badge err">✗ 失败</span>' + usageBadge(res.usage);
@@ -595,18 +610,19 @@ window.MM = window.MM || {};
   // token 用量徽标。悬停看输入/输出拆分——只显示总数会让「为什么这么贵」查不到原因。
   // 用量是服务端回传的，某些端点不返回时此处自然为空，不猜不估算。
   function usageBadge(u) {
-    if (!u || !u.input && !u.output) return '';
-    const total = (u.input || 0) + (u.output || 0);
-    if (!total) return '';
-    const tip = '输入 ' + U.esc(String(u.input || 0)) + ' + 输出 ' + U.esc(String(u.output || 0)) + ' tokens';
+    if (!u) return '';
+    const a = num(u.input), b = num(u.output);
+    if (!a && !b) return '';
+    const total = a + b;
+    const tip = '输入 ' + a + ' + 输出 ' + b + ' tokens';
     return '<span class="badge tok" title="' + tip + '">' + MM.modelInfo.fmtTokens(total) + ' tok</span>';
   }
 
   // 本轮合计用量（供轮次工具栏显示）；没有任何模型回传时返回 null，界面不显示
   function roundUsage(am) {
-    const list = (am.results || []).filter(r => r.usage && (r.usage.input || r.usage.output));
+    const list = (am.results || []).filter(r => r.usage && (num(r.usage.input) || num(r.usage.output)));
     if (!list.length) return null;
-    return list.reduce((a, r) => a + (r.usage.input || 0) + (r.usage.output || 0), 0);
+    return list.reduce((a, r) => a + num(r.usage.input) + num(r.usage.output), 0);
   }
 
   function answersGrid(am) {
@@ -940,6 +956,8 @@ window.MM = window.MM || {};
     // 回收池：当前会话置顶，最多留 2 个会话的缓存
     let pool = roundDom.get(s.id);
     if (!pool) { pool = new Map(); roundDom.set(s.id, pool); }
+    const lruIdx = roundDomLru.indexOf(s.id);
+    if (lruIdx >= 0) roundDomLru.splice(lruIdx, 1); // 去重后再置顶：重复 unshift 会让一个会话占满判活窗口
     roundDomLru.unshift(s.id);
     if (roundDomLru.length > 8) roundDomLru.length = 8; // 只用前 2 位判存活，尾部截掉防无限增长
     for (const k of Array.from(roundDom.keys())) {
@@ -1360,7 +1378,7 @@ window.MM = window.MM || {};
     }
 
     const roundId = U.uid();
-    const reqId = 'req' + (++seq);
+    const reqId = nextReqId('req');
     // 取所选模型中最小的上下文窗口做裁剪，确保所有模型都不超限
     const ctxLimits = models.map(x => x.contextTokens).filter(Boolean);
     const ctxLimit = ctxLimits.length ? Math.min.apply(null, ctxLimits) : 0;
@@ -1591,7 +1609,23 @@ window.MM = window.MM || {};
         body.innerHTML = mdHtml(res, res.content);
       }
       status.innerHTML = statusHtml(res);
+      // 失败/被停止的卡片当场补上「重试」：不补的话入口要等下一次整页重绘才出现
+      addAnswerRetryBtn(card, ctx.assistantMsg.roundId, res.modelId);
     }
+  }
+
+  // 失败/停止后在答案卡片上补「重试」按钮（只重发这一个模型，不重跑整轮）。
+  // 与 addMergeRetryBtn 同一套路：error 事件到达时卡片早已建好，answerCard 建卡时
+  // 的按钮判定只对"建卡即失败"的历史数据生效
+  function addAnswerRetryBtn(card, roundId, modelId) {
+    if (!card || !roundId) return;
+    const foot = card.querySelector('.card-foot');
+    if (!foot || foot.querySelector('.ac-retry')) return;
+    foot.insertBefore(U.el('button', {
+      class: 'ac-copy ac-retry',
+      title: '只重新调用这一个模型',
+      onclick: function () { retryOne(roundId, modelId); }
+    }, '重试'), foot.firstChild);
   }
 
   function stopAll() {
@@ -1677,7 +1711,10 @@ window.MM = window.MM || {};
     // 立即锁定状态（防搜索 await 期间重复触发）
     streaming = s.id;
     setSendBtn(true);
-    dispatchRound(s, userMsg, models, U.$('#tgl-search').checked, false, versions, am.prunedTokens || 0)
+    // 联网条件与单模型重试（retryOne）同口径：本轮记录过 searchOn 就用它——
+    // 原生搜索没有 sources 存档，用当前开关会让重新生成悄悄丢掉/多出联网
+    const searchOn = am.searchOn === undefined ? !!userMsg.sources : !!am.searchOn;
+    dispatchRound(s, userMsg, models, searchOn, false, versions, am.prunedTokens || 0)
       .catch(e => { streaming = null; setSendBtn(false); U.toast('请求失败：' + e.message, true); });
   }
 
@@ -1707,7 +1744,7 @@ window.MM = window.MM || {};
     streaming = s.id;
     setSendBtn(true);
     MM.sessions.render(); // 呼吸点：单模型重试同样占用全局生成状态
-    const reqId = 'rt' + (++seq);
+    const reqId = nextReqId('rt');
     // roundId 可能来自导入数据（含引号等字符），不能拼进 CSS 选择器：用 byRound 逐个比对属性
     const gridEl = byRound('.answers', roundId);
     const old = gridEl && Array.from(gridEl.querySelectorAll('.answer-card'))
@@ -1744,6 +1781,14 @@ window.MM = window.MM || {};
 
   // ---------- 导出本轮 ----------
   // 生成 Markdown：结构用标记（这是文件产物，不是剪贴板纯文本），正文用模型原始输出。
+  // Windows 文件名清洗：非法字符、保留设备名（CON/NUL/COM1…）、结尾点与空格。
+  // 保留名不处理会导出失败，结尾点/空格会被系统静默裁掉
+  function safeFilename(title, fallback) {
+    let name = String(title || fallback).replace(/[\\/:*?"<>|]/g, '_').replace(/[.\s]+$/, '').trim();
+    if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(name)) name = '_' + name;
+    return (name || fallback).slice(0, 50);
+  }
+
   async function exportRound(roundId) {
     const s = MM.sessions.current();
     if (!s) return;
@@ -1752,7 +1797,7 @@ window.MM = window.MM || {};
     const am = s.messages[idx];
     const userMsg = s.messages[idx - 1];
     const md = roundToMarkdown(am, s, userMsg);
-    const filename = (s.title || '对话导出').replace(/[\\/:*?"<>|]/g, '_').slice(0, 50) + '.md';
+    const filename = safeFilename(s.title, '对话导出') + '.md';
     try {
       const p = await api.exportText({ content: md, filename: filename });
       if (p) U.toast('已导出到 ' + p);
@@ -1935,7 +1980,7 @@ window.MM = window.MM || {};
     const s = MM.sessions.current();
     if (!s || !s.messages.length) { U.toast('当前会话还没有内容', true); return; }
     const md = sessionToMarkdown(s);
-    const filename = (s.title || '会话导出').replace(/[\\/:*?"<>|]/g, '_').slice(0, 50) + '.md';
+    const filename = safeFilename(s.title, '会话导出') + '.md';
     try {
       const p = await api.exportText({ content: md, filename: filename, title: '导出整个会话' });
       if (p) U.toast('已导出到 ' + p);
@@ -2080,7 +2125,7 @@ window.MM = window.MM || {};
     if (MM.sessions.current() === s) setSendBtn(true); // 后台会话综合：不能锁当前视图的输入框
     MM.sessions.render(); // 呼吸点
     const t0 = Date.now();
-    const reqId = 'syn' + (++seq);
+    const reqId = nextReqId('syn');
     // 综合也是一次真实提问：系统提示词同样要带上，否则综合结果会丢掉角色设定
     const sys = effectiveSystemPrompt(s);
     // 按综合模型的上下文给提示词设 token 上限，避免多份长回答顶爆上下文；
@@ -2142,6 +2187,9 @@ window.MM = window.MM || {};
 
   function finalizeMergeCard(ctx, failed) {
     const body = ctx.mergeBody, status = ctx.mergeStatus;
+    // 作废还在排队的流式绘制：最后一条 delta 与 all-done 同帧到达时，
+    // rAF 里的旧回调会把刚写入的 Markdown 整体覆盖回裸文本（与审查条目同源竞态）
+    body._paint = null;
     body.classList.remove('streaming');
     body.classList.add('md');
     body.innerHTML = MM.md.render(ctx.mergeMsg.content || '（空）');
@@ -2390,7 +2438,7 @@ window.MM = window.MM || {};
       msgs.push({ role: 'user', content: prompt });
       return { model: stripModel(x.model), messages: msgs };
     });
-    const reqId = 'rev' + (++seq);
+    const reqId = nextReqId('rev');
     pending.set(reqId, {
       reviewCtx: true, reviewPhase: 2, reviewStopped: false,
       session: s, am: am, roundId: roundId,
@@ -2494,9 +2542,10 @@ window.MM = window.MM || {};
     const review = ctx.am.review;
     if (ctx.reviewPhase === 2) {
       const anyDone = (review.items || []).some(i => i.status === 'done' && i.content);
-      if (!anyDone) {
-        // 全部被停止或失败：不进入仲裁。用户主动停 → 已停止；其余 → 失败
-        review.stopped = ctx.reviewStopped;
+      // 用户按了停止就必须停在这里：哪怕互审已有完成项，也不许再自发起新的仲裁请求
+      //（那会重新锁住输入框并继续消耗 token，覆盖用户的停止意图）
+      if (!anyDone || ctx.reviewStopped) {
+        review.stopped = true;
         finalizeReviewCard(ctx, !ctx.reviewStopped);
         MM.save();
         return;
@@ -2525,7 +2574,7 @@ window.MM = window.MM || {};
         ctx.rvRefs.headStatus.innerHTML = '<span class="spinner"></span> 仲裁中…';
         scrollBottom(true);
       }
-      const reqId = 'rev' + (++seq);
+      const reqId = nextReqId('rev');
       pending.set(reqId, ctx);
       api.send({ requestId: reqId, targets: [{ model: stripModel(ctx.arbiter), messages: msgs }], searchOn: false })
         .catch(function (e) {

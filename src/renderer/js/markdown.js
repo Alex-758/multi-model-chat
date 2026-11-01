@@ -18,8 +18,11 @@ window.MM = window.MM || {};
     // 链接（仅 http/https）
     s = s.replace(/\[([^\]\n]+)\]\((https?:[^)\s]+)\)/g,
       '<a href="$2" target="_blank" rel="noopener">$1</a>');
-    // 还原行内代码
-    s = s.replace(/\u0001C(\d+)\u0001/g, (m, i) => '<code>' + codes[+i] + '</code>');
+    // 还原行内代码（索引越界按原占位文本输出：模型输出可携带同类字符，不能渲染成 undefined）
+    s = s.replace(/\u0001C(\d+)\u0001/g, (m, i) => {
+      const c = codes[+i];
+      return c === undefined ? m : '<code>' + c + '</code>';
+    });
     return s;
   }
 
@@ -54,8 +57,11 @@ window.MM = window.MM || {};
       // 代码块占位行
       const bm = line.match(/^\u0000B(\d+)\u0000$/);
       if (bm) {
-        flushAll();
         const b = blocks[+bm[1]];
+        // 索引越界（模型输出自带占位符形状的行）按普通文本段落输出：
+        // 不设防会让该会话每次重绘都抛 TypeError，整卡渲染中断
+        if (!b) { para.push(line); continue; }
+        flushAll();
         out.push('<div class="codeblock"><div class="code-head"><span>' + esc(b.lang || 'text') +
           '</span><button class="code-copy" data-code="' + esc(b.code) + '">复制</button></div>' +
           '<pre><code>' + esc(b.code.replace(/\n$/, '')) + '</code></pre></div>');

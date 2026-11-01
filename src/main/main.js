@@ -117,6 +117,18 @@ function createWindow() {
       e.preventDefault();
     }
   });
+  // 关闭前先让渲染层把内存里的在途数据落盘（流式半成品、未保存的记账）：
+  // 渲染层收到 app:flush 后保存并再次 close 放行；渲染层已死时由超时兜底强关
+  let flushing = false;
+  win.on('close', (e) => {
+    if (flushing) return; // 第二次 close：flush 已做过，放行
+    flushing = true;
+    e.preventDefault();
+    try { win.webContents.send('app:flush'); } catch (err) { /* 渲染层可能已崩溃 */ }
+    setTimeout(() => {
+      try { if (win && !win.isDestroyed()) win.destroy(); } catch (err) { /* 已销毁 */ }
+    }, 2500);
+  });
 }
 
 // ---------- 窗口控制（自绘三键 #win-controls） ----------
@@ -152,13 +164,22 @@ function sanitizeConfig(cfg) {
   return c;
 }
 
-// 渲染层传入的模型对象不含密钥：按 providerId 从主进程数据中解析
+// 渲染层传入的模型对象不含密钥：按 providerId 从主进程数据中解析。
+// 连接参数（baseUrl/apiFormat/fullUrl/provider）一律以主进程存量为准：
+// 渲染层传值不可信——照单全收的话，渲染层一旦被注入就能把真实密钥
+// 以 Authorization 头引流到任意 URL（e2e-app 有回归用例）
 function resolveModel(mLike) {
   const m = (mLike && typeof mLike === 'object') ? mLike : {};
   const pid = m.providerId || String(m.id || '').split('::')[0];
   const list = (db.config && Array.isArray(db.config.providers)) ? db.config.providers : [];
   const p = list.find(x => x && x.id === pid);
   const full = Object.assign({}, m, { apiKey: (p && p.apiKey) || '' });
+  if (p) {
+    if (p.baseUrl) full.baseUrl = p.baseUrl;
+    if (p.apiFormat) full.apiFormat = p.apiFormat;
+    if (p.provider) full.provider = p.provider;
+    full.fullUrl = !!p.fullUrl;
+  }
   delete full.hasKey;
   return full;
 }
@@ -436,12 +457,14 @@ ipcMain.handle('data:import', async () => {
     // 会话条目必须过滤：null/字符串会让渲染层排序直接抛错，写回磁盘后下次启动即不可用
     const sessions = imported.sessions.filter(s => s && typeof s === 'object');
     for (const s of sessions) if (!Array.isArray(s.messages)) s.messages = [];
+    // 覆盖前给当前数据留一份副本：导入是覆盖性操作，选错文件要能退回来
+    const backupPath = store.snapshot('pre-import');
     db = { config: imported.config, sessions: sessions };
     store.save(db);
     // 1.0 平铺旧结构原样返回（含密钥）：渲染层迁移逻辑需要读密钥并经 store:save 合并回主进程；
     // 新结构返回剥离密钥后的数据
     const legacyFlat = Array.isArray(imported.config.models) && imported.config.models.length;
-    return { config: legacyFlat ? imported.config : sanitizeConfig(imported.config), sessions: db.sessions };
+    return { config: legacyFlat ? imported.config : sanitizeConfig(imported.config), sessions: db.sessions, backup: backupPath };
   } catch (err) {
     throw new Error('文件解析失败：' + err.message);
   }
@@ -479,10 +502,12 @@ app.whenReady().then(() => {
         '请勿把数据文件复制到网盘、聊天工具或不可信位置。'
     });
   }
-  // 图片附件目录 + mmimg:// 协议；顺带清理已无会话引用的孤儿图片
+  // 图片附件目录 + mmimg:// 协议；顺带清理已无会话引用的孤儿图片。
+  // 数据文件损坏时本次以空库启动：gc 会把"无引用"理解为"全部孤儿"，把可恢复数据
+  // 引用的图片一并删掉——跳过本次清理，用户恢复 .corrupt 备份后引用才不会悬空
   images.init(store.dir());
   images.registerProtocol();
-  images.gc(db.sessions);
+  if (!bad) images.gc(db.sessions);
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

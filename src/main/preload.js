@@ -12,6 +12,12 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('win:state', h);
     return () => ipcRenderer.removeListener('win:state', h);
   },
+  // 关窗前的落盘请求：渲染层保存完后自行 window.close() 放行
+  onFlush: (cb) => {
+    const h = () => cb();
+    ipcRenderer.on('app:flush', h);
+    return () => ipcRenderer.removeListener('app:flush', h);
+  },
   // 聊天
   send: (p) => ipcRenderer.invoke('chat:send', p),
   synthesize: (p) => ipcRenderer.invoke('chat:synthesize', p),

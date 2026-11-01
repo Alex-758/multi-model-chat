@@ -427,6 +427,22 @@ server.listen(0, '127.0.0.1', () => {
       return JSON.stringify({ before: s1.len, after: s2 });
     });
 
+    await run('综合同帧竞态：完成瞬间不被排队的流式绘制覆盖回裸文本', async () => {
+      await setSynth('p1::fast');
+      await newSession();
+      await setChips(['p1::m1']);
+      await sendText('综合竞态测试');
+      assert(await waitDone(), '未完成');
+      assert(await clickTool('综合回答'), '没有综合按钮');
+      assert(await waitFor("(function(){var c=document.querySelector('.merge-card');return c && /完成/.test(c.querySelector('.ac-status').textContent);})()", 8000), '综合未完成');
+      await sleep(400); // 等下一帧 rAF 里可能迟到的排队绘制（有修复则不会覆盖）
+      const t = await js("(function(){var b=document.querySelector('.merge-card .ac-body');return {cls:b.className, html:b.innerHTML.slice(0,60)};})()");
+      assert(t.cls.indexOf('md') >= 0 && /<(p|li|h\d)[ >]/.test(t.html),
+        '综合正文被覆盖回裸文本: ' + JSON.stringify(t));
+      await setSynth('frontend');
+      return JSON.stringify(t);
+    });
+
     await run('后台完成的轮次也自动综合（生成中切走会话）', async () => {
       await setSynth('frontend');
       await js(`(function(){ var t=document.querySelector('#tgl-auto'); t.checked=true; t.dispatchEvent(new Event('change',{bubbles:true})); })()`);
@@ -675,6 +691,9 @@ server.listen(0, '127.0.0.1', () => {
       fs.writeFileSync(nextOpen, typeof obj === 'string' ? obj : JSON.stringify(obj), 'utf8');
       await js(`(function(){ MM.settings.open(); document.querySelector('.settings-nav[data-pane="data"]').click();
         [].slice.call(document.querySelectorAll('#pane-data button')).filter(function(b){return b.textContent.indexOf('导入数据')>=0;})[0].click(); })()`);
+      await sleep(200);
+      // 导入是覆盖性操作，现在会先弹确认框：自动点「确定」
+      await js("(function(){ var ov=document.getElementById('confirm-overlay'); var ok=ov&&ov.querySelector('.cf-ok'); if(ok&&!ov.classList.contains('hidden')) ok.click(); })()");
       await sleep(700);
     }
     await run('导入容错：空对象/字段缺失', async () => {

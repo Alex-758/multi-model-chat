@@ -378,9 +378,14 @@ MM.defaults = {
   // 不清理会在排序时读 s.pinned 抛错，导致启动即失败，且坏数据可能被写回磁盘。
   MM.normalizeSessions = function (list) {
     const out = [];
+    const seen = new Set();
     for (const s of (Array.isArray(list) ? list : [])) {
       if (!s || typeof s !== 'object') continue;
       if (!Array.isArray(s.messages)) s.messages = [];
+      // id 缺失或重复都会让"按 id 选中/删除"命中错误会话（导入拼接/手改数据可触发）：
+      // 缺的补新 id，重的换新 id，保证列表内唯一
+      if (typeof s.id !== 'string' || !s.id || seen.has(s.id)) s.id = U.uid();
+      seen.add(s.id);
       out.push(s);
     }
     return out;
@@ -416,7 +421,35 @@ MM.defaults = {
           am.roundId = U.uid();
           changed = true;
         }
-        if (am.role !== 'assistant' || !Array.isArray(am.results) || !am.results.length) continue;
+        if (am.role !== 'assistant') continue;
+        // 退出/崩溃时中间态可能已固化在磁盘（单模型重试先落盘再发请求、后台轮改名、
+        // 审查占位）：非终态一律归位，否则重启后永远显示"生成中"且没有重试入口。
+        // 有部分内容按"已停止"保留半成品，空内容按"失败"给出重试按钮
+        if (Array.isArray(am.results)) {
+          for (const r of am.results) {
+            if (r && (r.status === 'streaming' || r.status === 'searching' || r.status === 'pending')) {
+              r.status = r.content ? 'stopped' : 'error';
+              if (!r.content) r.error = '上次退出时中断，请重试';
+              changed = true;
+            }
+          }
+        }
+        const rv = am.review;
+        if (rv) {
+          let rvDirty = false;
+          for (const it of (rv.items || [])) {
+            if (it && (it.status === 'pending' || it.status === 'streaming')) { it.status = 'stopped'; rvDirty = true; }
+          }
+          if (rv.verdict && !rv.verdict.content && !rv.verdict.stopped) { rv.verdict.stopped = true; rvDirty = true; }
+          if (rvDirty && !rv.verdict) rv.stopped = true;
+          if (rvDirty) changed = true;
+        }
+        // 综合占位被固化（开始了却没有任何内容）：删掉空卡，「综合回答」入口可重来
+        if (am.merge && !am.merge.content && !am.merge.usage && !am.merge.stopped) {
+          am.merge = null;
+          changed = true;
+        }
+        if (!Array.isArray(am.results) || !am.results.length) continue;
         if (!Array.isArray(am.versions) || !am.versions.length) {
           am.versions = [{
             results: JSON.parse(JSON.stringify(am.results)),
@@ -482,6 +515,13 @@ MM.defaults = {
       const t = localStorage.getItem('mmc-theme');
       if (t) document.documentElement.setAttribute('data-theme', t);
     } catch (e) { /* ignore */ }
+    // 主进程在窗口 close 时先请求一次落盘再放行（app:flush）：把流式半成品、
+    // 未保存的记账写盘；保存完成后由渲染层再次 close 真正关窗
+    if (api.onFlush) {
+      api.onFlush(function () {
+        MM.save().finally(function () { try { window.close(); } catch (e) { /* 已在关闭 */ } });
+      });
+    }
     U.$('#tgl-auto').checked = !!MM.state.config.synthesis.autoMerge;
     U.$('#tgl-review').checked = !!MM.state.config.synthesis.crossReview;
 

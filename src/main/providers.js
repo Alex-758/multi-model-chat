@@ -89,6 +89,14 @@ function withImageParts(m, messages) {
   return touched ? out : messages;
 }
 
+// 新一代推理模型都已弃用 max_tokens，传了会 400：改用 max_completion_tokens。
+// Kimi 仅 K3 起、OpenAI 的 GPT-5 起为限；其余服务商（含 OpenRouter 中转）仍用 max_tokens。
+// 抽成共享函数：chatOnce（测试连接）沿用同一判定，不能各写一份。
+function needsCompletionTokens(m) {
+  return (m.provider === 'moonshot' && /^kimi-k3/i.test(m.modelId || '')) ||
+         (m.provider === 'openai' && /^(gpt-5|gpt-6|o\d)/i.test(m.modelId || ''));
+}
+
 function buildBody(m, messages, opts) {
   const { stream, searchOn } = opts;
   messages = withImageParts(m, messages);
@@ -101,12 +109,7 @@ function buildBody(m, messages, opts) {
   }
   const body = { model: requestModelId(m, searchOn), messages, stream };
   if (m.maxTokens) {
-    // 新一代推理模型都已弃用 max_tokens，传了会 400：改用 max_completion_tokens。
-    // Kimi 仅 K3 起、OpenAI 的 GPT-5 起为限；其余服务商（含 OpenRouter 中转）仍用 max_tokens。
-    const needsCompletionTokens =
-      (m.provider === 'moonshot' && /^kimi-k3/i.test(m.modelId || '')) ||
-      (m.provider === 'openai' && /^(gpt-5|gpt-6|o\d)/i.test(m.modelId || ''));
-    if (needsCompletionTokens) {
+    if (needsCompletionTokens(m)) {
       body.max_completion_tokens = Math.floor(m.maxTokens);
     } else {
       body.max_tokens = Math.floor(m.maxTokens);
@@ -219,6 +222,7 @@ async function streamChat(m, messages, opts) {
     let buf = '';
     let sawData = false; // 是否出现过 SSE 的 data: 行
     let rawText = '';    // 未知 Content-Type 时用于回退成"完整 JSON"解析
+    let rawTruncated = false; // 回退缓冲是否因超限被截断（报错文案要与截断对应）
     // 单行 SSE 处理；抽成函数是为了流结束时能处理最后一行（可能没有换行结尾）
     const handleLine = (line) => {
       if (!line.startsWith('data:')) return;
@@ -234,9 +238,14 @@ async function streamChat(m, messages, opts) {
           if (d.type === 'text_delta' && d.text) { content += d.text; onEvent({ type: 'delta', text: d.text }); }
           else if (d.type === 'thinking_delta' && d.thinking) { reasoning += d.thinking; onEvent({ type: 'reasoning', text: d.thinking }); }
         } else if (j.type === 'message_start') {
-          // Anthropic 的 usage 分两次到：起点只有输入，终点才有输出，需要累加
+          // Anthropic 的 usage 分两次到：起点只有输入，终点才有输出，需要累加。
+          // 缓存命中段也按输入计费（服务端自动缓存时 input_tokens 不含缓存部分），
+          // 不加会把输入用量算少；两个字段都没有时回退 input_tokens
           const u = j.message && j.message.usage;
-          if (u) noteUsage(u.input_tokens, u.output_tokens);
+          if (u) {
+            const cachedIn = (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+            noteUsage(u.input_tokens != null ? u.input_tokens + cachedIn : (cachedIn || null), u.output_tokens);
+          }
         } else if (j.type === 'message_delta') {
           const u = j.usage;
           if (u) noteUsage(u.input_tokens, u.output_tokens);
@@ -244,12 +253,24 @@ async function streamChat(m, messages, opts) {
           throw new Error(j.error && j.error.message || '流式返回错误');
         }
       } else {
-        // 用量可能出现在任意 chunk（多数服务商只在最后一块），覆盖而非累加
-        if (j.usage) noteUsage(j.usage.prompt_tokens, j.usage.completion_tokens);
+        // 网关（one-api/new-api 类）会把上游失败以 SSE 错误帧转发：不拦住会出现
+        // "✓ 完成"的空白回答——sawData 已置 true，结尾的空内容检查不会触发
+        if (j.error) {
+          const em = j.error;
+          throw new Error(String(typeof em === 'string' ? em : (em.message || em.msg || JSON.stringify(em))).slice(0, 200));
+        }
+        // 用量可能出现在任意 chunk（多数服务商只在最后一块），覆盖而非累加。
+        // Bedrock 兼容层等端点用 input_tokens/output_tokens 命名，一并兼容
+        if (j.usage) {
+          const u = j.usage;
+          noteUsage(u.prompt_tokens != null ? u.prompt_tokens : u.input_tokens,
+                    u.completion_tokens != null ? u.completion_tokens : u.output_tokens);
+        }
         const ch = j.choices && j.choices[0];
         if (!ch) return;
-        const d = ch.delta || {};
-        if (d.content) { content += d.content; onEvent({ type: 'delta', text: d.content }); }
+        const d = ch.delta || ch.message || {}; // 个别网关整段只发一个 message 形态的帧
+        const ctext = typeof d.content === 'string' ? d.content : textOf(d.content);
+        if (ctext) { content += ctext; onEvent({ type: 'delta', text: ctext }); }
         const r = d.reasoning_content != null ? d.reasoning_content : d.reasoning;
         if (r) { reasoning += r; onEvent({ type: 'reasoning', text: r }); }
       }
@@ -273,6 +294,7 @@ async function streamChat(m, messages, opts) {
       // 不是 JSON：按 SSE 文本继续解析（有些端点 Content-Type 写错）
       for (const line of text.split('\n')) handleLine(line.trim());
       if (!content && !reasoning && !sawData) throw new Error('服务端未返回任何内容（响应格式无法识别）');
+      if (!content && !reasoning) throw new Error('服务端未返回任何内容（可能被网关拦截或上游出错）');
       return { content, reasoning, usage };
     }
 
@@ -295,6 +317,7 @@ async function streamChat(m, messages, opts) {
       // 回退解析缓冲设上限：异常端点一直不发 data: 行时不能无限吃内存
       //（正常聊天 JSON 远小于 10MB；超限后按截断文本走既有的解析失败路径）
       if (!sawData && rawText.length < 10 * 1024 * 1024) rawText += text;
+      else if (!sawData) rawTruncated = true;
       let idx;
       while ((idx = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, idx).trim();
@@ -315,7 +338,10 @@ async function streamChat(m, messages, opts) {
         throw new Error('服务端返回错误：' + full.error);
       }
     }
+    if (!content && !reasoning && !sawData && rawTruncated) throw new Error('服务端响应超过 10MB，已中止解析');
     if (!content && !reasoning && !sawData) throw new Error('服务端未返回任何内容（响应格式无法识别）');
+    // 出现过 data: 帧但没有任何正文：上游失败被网关吞成空流，不能显示"✓ 完成"的空回答
+    if (!content && !reasoning) throw new Error('服务端未返回任何内容（可能被网关拦截或上游出错）');
     return { content, reasoning, usage };
   } catch (e) {
     if (abortedByTimeout) throw new Error('连接超时：服务器超过 120 秒没有返回数据，已中断');
@@ -344,7 +370,8 @@ function friendlyHttpError(status, detail) {
     500: '服务端内部错误',
     502: '服务端网关错误',
     503: '服务端繁忙/过载，请稍后重试',
-    504: '服务端超时，请稍后重试'
+    504: '服务端超时，请稍后重试',
+    529: '服务端过载（Anthropic 官方过载码），请稍后重试'
   };
   const hint = map[status] || '请求失败';
   return hint + '（HTTP ' + status + '）' + (detail ? '：' + detail : '');
@@ -359,9 +386,10 @@ async function chatOnce(m) {
     const timeout = setTimeout(() => ctrl.abort(), 45000);
     try {
       const body = buildBody(m, [{ role: 'user', content: '你好' }], { stream: false, searchOn: false });
-      // 沿用 buildBody 选定的字段名（新一代推理模型只认 max_completion_tokens），只把值压小省钱
+      // 测试连接的模型对象不带 maxTokens，buildBody 不会写 token 字段；这里按同一判定补上，
+      // 不能盲设 max_tokens——kimi-k3 / gpt-5* 只认 max_completion_tokens，盲设必 400
       if (m.apiFormat !== 'anthropic') {
-        if ('max_completion_tokens' in body) body.max_completion_tokens = 100;
+        if (needsCompletionTokens(m)) body.max_completion_tokens = 100;
         else body.max_tokens = 100;
       }
       const res = await fetch(chatEndpoint(m), {
@@ -372,7 +400,13 @@ async function chatOnce(m) {
         err.status = res.status;
         throw err;
       }
-      const j = await res.json();
+      const rawBody = await res.text();
+      let j;
+      try { j = JSON.parse(rawBody); }
+      catch (e2) {
+        // 200 + 网关错误页（HTML/纯文本）时英文 SyntaxError 会直接漏到界面
+        throw new Error('响应不是有效 JSON（可能为网关错误页）：' + rawBody.slice(0, 100));
+      }
       if (m.apiFormat === 'anthropic') {
         const text = (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
         if (text) return text;
@@ -391,8 +425,8 @@ async function chatOnce(m) {
       const timedOut = e && (e.name === 'AbortError' || /abort/i.test(String(e.name)));
       const err = timedOut ? new Error('连接超时：服务器 45 秒未响应') : e;
       lastErr = err;
-      // 仅对服务端繁忙/限流重试；参数/鉴权错误重试无意义
-      const retryable = err.status === 503 || err.status === 429 || err.status === 502 || err.status === 504;
+      // 仅对服务端繁忙/限流重试；参数/鉴权错误重试无意义（529 是 Anthropic 官方过载码）
+      const retryable = err.status === 503 || err.status === 429 || err.status === 502 || err.status === 504 || err.status === 529;
       if (!retryable || attempt === maxAttempts) throw err;
       await new Promise(r => setTimeout(r, 1500 * attempt));
     } finally {
@@ -427,10 +461,14 @@ async function listModels(m) {
     if (!res.ok) throw new Error(await readError(res));
     const j = await res.json();
     const arr = Array.isArray(j.data) ? j.data : (Array.isArray(j.models) ? j.models : []);
+    // Gemini OpenAI 兼容层的 /models 返回形如 models/gemini-xxx 的 id：
+    // 不剥前缀会被选中后原样发给 chat 端点导致 404
+    const stripModelsPrefix = /generativelanguage\.googleapis\.com/i.test(m.baseUrl || '');
     const seen = new Set();
     const out = [];
     for (const x of arr) {
-      const id = x.id || x.name;
+      let id = x.id || x.name;
+      if (stripModelsPrefix && /^models\//.test(id)) id = id.slice('models/'.length);
       if (!id || seen.has(id)) continue;
       seen.add(id);
       const item = { id };

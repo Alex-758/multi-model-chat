@@ -82,8 +82,11 @@ app.whenReady().then(async () => {
     check('未知动作返回布尔不抛错', bogus === w.isMaximized(), String(bogus));
 
     // 关闭（最后一项）：window-all-closed → app.quit。
+    // 关闭前故意改标题但不保存：close 事件会先请求渲染层落盘（app:flush），
+    // 窗口销毁后从磁盘验证这条未保存的改动确实写进去了（无此机制则整轮丢失）。
     // app.quit 的竞态会抢在轮询循环之后杀掉进程，断言必须挂在 'closed' 事件里——
     // 它在 window-all-closed 之前同步触发，时序有保证；断言后直接 app.exit 收尾（promise 不再 resolve）
+    await js("(function(){ MM.state.sessions[0].title = 'flush-未保存标记'; })()");
     await new Promise(() => {
       const t1 = setTimeout(() => {
         check('点击关闭：窗口销毁', w.isDestroyed() === true, '6s 内未销毁');
@@ -93,6 +96,14 @@ app.whenReady().then(async () => {
       w.once('closed', () => {
         clearTimeout(t1);
         check('点击关闭：窗口销毁', true);
+        try {
+          const disk = JSON.parse(fs.readFileSync(path.join(DATA, 'store.json'), 'utf8'));
+          check('关闭前自动落盘（app:flush 把未保存改动写入磁盘）',
+            disk.sessions.some(s => s && s.title === 'flush-未保存标记'),
+            JSON.stringify(disk.sessions.map(s => s && s.title)));
+        } catch (e) {
+          check('关闭前自动落盘（app:flush 把未保存改动写入磁盘）', false, String(e && e.message));
+        }
         console.log('\nRESULT pass=' + pass + ' fail=' + fail);
         app.exit(fail ? 1 : 0);
       });
