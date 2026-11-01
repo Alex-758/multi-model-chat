@@ -700,7 +700,7 @@ window.MM = window.MM || {};
     const active = document.activeElement;
     if (active && pane.contains(active) && active.tagName === 'SELECT') return;
     pane.innerHTML = '';
-    const cfg = MM.state.config.synthesis = MM.state.config.synthesis || { synthSource: 'frontend', autoMerge: true };
+    const cfg = MM.state.config.synthesis = MM.state.config.synthesis || { synthSource: 'frontend', autoMerge: true, crossReview: false };
     pane.appendChild(U.el('div', { class: 'pane-title' }, '综合回答'));
     pane.appendChild(U.el('div', { class: 'pane-sub' }, '选择每轮回答完成后，用什么方式把多个模型的回答合并为一份综合回答。'));
 

@@ -150,5 +150,31 @@ const merged = M.clusterPoints(twoPts, 0.9, 0.3); // 相似 0.5 < 0.9 不入同�
 check('归并能把拆散的同类并回', merged.length === 1 && merged[0].members.length === 2, JSON.stringify(merged.map(c => c.members.length)));
 check('低于归并阈值不并', M.clusterPoints(twoPts, 0.9, 0.6).length === 2);
 
+// 20. 交叉审查提示词：剔除审查者自身回答，全局编号不重排（审查与仲裁间【回答 N】指向一致）
+const three = [
+  { modelId: 'a', name: 'A', content: '甲模型的独到结论AAA在这里详细展开说明。' },
+  { modelId: 'b', name: 'B', content: '乙模型的独到结论BBB在这里详细展开说明。' },
+  { modelId: 'c', name: 'C', content: '丙模型的独到结论CCC在这里详细展开说明。' }
+];
+const rp = M.reviewPrompt('这是什么问题？', three, 1, 30000);
+check('审查提示词含固定小节', rp.indexOf('## 问题清单') >= 0 && rp.indexOf('## 遗漏补充') >= 0);
+check('审查者自己的回答被剔除', rp.indexOf('BBB') < 0);
+check('其余回答保留', rp.indexOf('AAA') >= 0 && rp.indexOf('CCC') >= 0);
+check('全局编号不被重排', rp.indexOf('【回答 1】') >= 0 && rp.indexOf('【回答 3】') >= 0 && rp.indexOf('【回答 2】') < 0);
+
+// 21. 仲裁提示词：回答块在前（发现引用其编号）、发现带【审查 N】编号、预算受控
+const vp = M.verdictPrompt('这是什么问题？', three,
+  [{ content: '审查一发现：甲把年份写错了。' }, { content: '审查二发现：乙遗漏了成本条件。' }], 30000);
+check('仲裁提示词含固定小节', ['## 最终结论', '## 审查发现裁定', '## 确认的错误清单', '## 仍存不确定性']
+  .every(h => vp.indexOf(h) >= 0));
+check('审查发现带编号进提示词', vp.indexOf('【审查 1】') >= 0 && vp.indexOf('【审查 2】') >= 0);
+check('回答块在发现块之前', vp.indexOf('【回答 1】') < vp.indexOf('【审查 1】'));
+check('仲裁提示词尊重预算', M.tokensOf(vp) <= 30500, 'actual=' + M.tokensOf(vp));
+
+// 22. 预算与单份上限：超预算按句截断；单份回答超过省token上限也截断
+const longR = { modelId: 'z', name: 'Z', content: Array.from({ length: 120 }, (_, i) => '这是第' + i + '句用来验证交叉审查预算截断的内容呀。').join('') };
+check('审查回答超预算被截断', M.reviewPrompt('q?', [longR, { modelId: 'w', name: 'W', content: '短回答内容。' }], 1, 1500).indexOf('已按句子截断') >= 0);
+check('单份回答超上限被截断', M.reviewPrompt('q?', [longR, { modelId: 'w', name: 'W', content: '短回答内容。' }], 1, 30000).indexOf('已按句子截断') >= 0);
+
 console.log('\n== merge 报告单元：' + pass + '/' + (pass + fail) + ' 通过 ==');
 process.exit(fail ? 1 : 0);

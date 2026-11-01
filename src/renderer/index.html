@@ -14,8 +14,8 @@
       <div class="side-head">
         <div class="logo">
           <svg viewBox="0 0 24 24" width="18" height="18">
-            <rect x="1.5" y="1.5" width="21" height="21" rx="6" fill="#18181b"/>
-            <path d="M6 8.5A2.5 2.5 0 0 1 8.5 6h7A2.5 2.5 0 0 1 18 8.5v4A2.5 2.5 0 0 1 15.5 15H11l-3.2 3v-3.1A2.5 2.5 0 0 1 6 12.5z" fill="#fff"/>
+            <rect x="1.5" y="1.5" width="21" height="21" rx="6" fill="#c96442"/>
+            <path d="M6 8.5A2.5 2.5 0 0 1 8.5 6h7A2.5 2.5 0 0 1 18 8.5v4A2.5 2.5 0 0 1 15.5 15H11l-3.2 3v-3.1A2.5 2.5 0 0 1 6 12.5z" fill="#faf9f5"/>
           </svg>
           <span>Multi-Model Chat</span>
         </div>
@@ -46,6 +46,16 @@
           <label class="toggle" id="tgl-auto-wrap" title="所有模型回答完成后，自动按默认模式生成综合回答">
             <input type="checkbox" id="tgl-auto"><span class="tgl-track"></span><span class="tgl-label">自动综合</span>
           </label>
+          <label class="toggle" id="tgl-review-wrap" title="回答完成后自动交叉审查：各模型互审 + 仲裁结论（每轮多 N+1 次请求，开启后自动综合让位）">
+            <input type="checkbox" id="tgl-review"><span class="tgl-track"></span><span class="tgl-label">交叉审查</span>
+          </label>
+          <!-- 自绘窗口控制三键：隐藏系统标题栏后替代原生按钮，
+               随主题/弹窗遮罩联动（win:control IPC 见 main.js） -->
+          <div id="win-controls">
+            <button id="btn-win-min" title="最小化"><svg class="ico-svg" width="13" height="13" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.2 6h7.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/></svg></button>
+            <button id="btn-win-max" title="最大化 / 还原"><svg class="ico-svg ico-max" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="2.6" y="2.6" width="6.8" height="6.8" rx="1.2" stroke="currentColor" stroke-width="1.3" fill="none"/></svg><svg class="ico-svg ico-restore" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="2.2" y="4.6" width="5.4" height="5.4" rx="1.1" stroke="currentColor" stroke-width="1.3" fill="none"/><path d="M4.6 2.4h4.2a1 1 0 0 1 1 1v4.2" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg></button>
+            <button id="btn-win-close" title="关闭"><svg class="ico-svg" width="13" height="13" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.6 2.6l6.8 6.8M9.4 2.6l-6.8 6.8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/></svg></button>
+          </div>
         </div>
       </header>
 

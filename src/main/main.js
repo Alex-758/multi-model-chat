@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const store = require('./store');
@@ -9,6 +9,10 @@ const images = require('./images');
 
 // 自定义协议（mmimg://）必须在 app ready 之前注册
 images.registerScheme();
+
+// 去掉默认应用菜单（File/Edit/View…）：一体化标题栏下它是突兀的黑条；
+// F12 开发者工具由 createWindow 里的 before-input-event 单独挂接，不依赖菜单
+Menu.setApplicationMenu(null);
 
 if (!app.requestSingleInstanceLock()) {
   // 拿不到锁：直接退出，不再注册 IPC / 建窗，避免第二实例读写同一份数据文件
@@ -62,9 +66,13 @@ function createWindow() {
     height: 920,
     minWidth: 980,
     minHeight: 640,
-    backgroundColor: '#f5f6fa',
+    backgroundColor: '#faf9f5',
     title: 'Multi-Model Chat',
     icon: path.join(__dirname, '../../build/icon.ico'),
+    // 一体化标题栏：隐藏系统标题条；右上角三键由渲染层自绘（#win-controls，
+    // 经 win:control IPC 调 minimize/maximize/close）。原生 WCO 的按钮区是系统
+    // 绘制的，弹窗遮罩压不暗、主题切换也不同步，弹窗一开就突兀，故弃用
+    titleBarStyle: 'hidden',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -80,6 +88,10 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => {
     if (win && !win.isDestroyed()) { win.focus(); win.webContents.focus(); }
   });
+  // 最大化状态变化推给渲染层：自绘的 最大化/还原 图标随之切换
+  ['maximize', 'unmaximize'].forEach(ev => win.on(ev, () => {
+    if (win && !win.isDestroyed()) win.webContents.send('win:state', win.isMaximized());
+  }));
   win.loadFile(path.join(__dirname, '../renderer/index.html'));
   // 渲染进程日志/错误转发到主进程 stdout，便于排查
   win.webContents.on('console-message', (details) => {
@@ -106,6 +118,15 @@ function createWindow() {
     }
   });
 }
+
+// ---------- 窗口控制（自绘三键 #win-controls） ----------
+ipcMain.handle('win:control', (e, action) => {
+  if (!win || win.isDestroyed()) return false;
+  if (action === 'min') win.minimize();
+  else if (action === 'max') { if (win.isMaximized()) win.unmaximize(); else win.maximize(); }
+  else if (action === 'close') win.close();
+  return win.isMaximized();
+});
 
 // ---------- 密钥保管 ----------
 // API Key 只存在于主进程内存与磁盘数据文件中，渲染层永远只拿到 hasKey 布尔标记

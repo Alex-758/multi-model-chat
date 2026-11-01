@@ -521,6 +521,12 @@ async function main() {
     await sleep(200);
     const t2 = await js(`!!document.querySelector('.answer-card.src-flash')`);
     assert(t2, '点击角标后应出现闪烁卡片');
+    // 精准定位：命中的来源原句所在段落高亮，约 2 秒后自动消退
+    const t3 = await js(`!!document.querySelector('.answer-card .src-hit')`);
+    assert(t3, '点击角标后应高亮来源原句段落');
+    await sleep(2200);
+    const t4 = await js(`!!document.querySelector('.answer-card .src-hit')`);
+    assert(!t4, '段落高亮应约 2 秒后自动消退');
     // 导出：roundToMarkdown 含来源对照
     const md = await js(`(function(){
       var s = MM.sessions.current();

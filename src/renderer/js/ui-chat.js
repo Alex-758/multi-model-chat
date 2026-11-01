@@ -655,7 +655,7 @@ window.MM = window.MM || {};
     }
     let e = srcCache.get(msg);
     if (!e || e.sig !== sig) {
-      e = { sig: sig, pool: MM.merge.buildPool(results), match: new Map() };
+      e = { sig: sig, pool: MM.merge.buildPool(results), hits: new Map() };
       srcCache.set(msg, e);
     }
     return e;
@@ -669,9 +669,11 @@ window.MM = window.MM || {};
       if (el.querySelector('.merge-src')) continue;
       const text = (el.innerText || '').trim();
       if (text.length < 12) continue; // 短标题类不标
-      let models = entry.match.get(text);
-      if (!models) { models = MM.merge.blockModels(text, entry.pool); entry.match.set(text, models); }
-      if (!models.length) continue;
+      // hits：每个命中模型 + 池内最佳匹配原句（点击跳转后高亮具体段落用）
+      let hits = entry.hits.get(text);
+      if (!hits) { hits = MM.merge.blockMatches(text, entry.pool); entry.hits.set(text, hits); }
+      if (!hits.length) continue;
+      const models = hits.map(h => ({ modelId: h.modelId, name: h.name }));
       // 每个模型的色点各自可点，多来源块不再只能跳到第一家；
       // sup 上的点击兜底保持旧行为（点中色点间缝隙时跳第一个可用来源，
       // 色点自身 onclick 已 stopPropagation，不会双触发）
@@ -680,7 +682,7 @@ window.MM = window.MM || {};
         title: '来自：' + models.map(m => m.name).join('、'),
         onclick: function (e) {
           e.stopPropagation();
-          jumpToSource(roundId, models);
+          jumpToSource(roundId, models, hits);
         }
       }, models.map(m => U.el('span', {
         class: 'src-dot',
@@ -688,7 +690,7 @@ window.MM = window.MM || {};
         title: '来自：' + m.name,
         onclick: function (e) {
           e.stopPropagation();
-          jumpToSource(roundId, [m]);
+          jumpToSource(roundId, [m], hits.filter(h => h.modelId === m.modelId));
         }
       }))));
     }
@@ -716,7 +718,7 @@ window.MM = window.MM || {};
     if (!entry.analysis) entry.analysis = MM.merge.analyze(results);
     if (!('uncovered' in entry)) entry.uncovered = MM.merge.uncoveredConsensus(entry.analysis.consensus, msg.content);
     if (entry.uncovered.length) {
-      const card = body.closest('.merge-card');
+      const card = body.closest('.merge-card, .review-card');
       if (card && !card.querySelector('.merge-cov')) {
         body.insertAdjacentElement('afterend', U.el('div', {
           class: 'merge-cov',
@@ -726,7 +728,7 @@ window.MM = window.MM || {};
     }
   }
 
-  function jumpToSource(roundId, models) {
+  function jumpToSource(roundId, models, hits) {
     const grid = byRound('.answers', roundId);
     if (!grid) { U.toast('未找到本轮回答卡片'); return; }
     let card = null;
@@ -741,6 +743,26 @@ window.MM = window.MM || {};
     void card.offsetWidth; // 重启动画
     card.classList.add('src-flash');
     setTimeout(function () { card.classList.remove('src-flash'); }, 1800);
+    // 精准定位：高亮来源回答里命中原句所在的段落（底色+描边加粗，约 2 秒消退）。
+    // 探针取命中句开头若干字在渲染文本里找所属块；行内加粗等格式差异会导致
+    // 个别句子找不到块——此时退回整卡闪烁，角标匹配本就是尽力而为
+    for (const h of (hits || [])) {
+      if (!h || !h.text) continue;
+      const probe = h.text.trim().replace(/^[-*+>#\s]+/, '').slice(0, 10);
+      if (probe.length < 4) continue;
+      const c = Array.from(grid.querySelectorAll('.answer-card'))
+        .find(el => el.getAttribute('data-model-id') === h.modelId) || card;
+      let done = false;
+      for (const el of Array.from(c.querySelectorAll('p, li'))) {
+        if ((el.innerText || '').indexOf(probe) < 0) continue;
+        el.classList.remove('src-hit');
+        void el.offsetWidth; // 重启动画
+        el.classList.add('src-hit');
+        setTimeout(function () { el.classList.remove('src-hit'); }, 2000);
+        done = true;
+        break; // 每个命中点只标一个块
+      }
+    }
   }
 
   // ---------- 版本历史 ----------
@@ -835,6 +857,13 @@ window.MM = window.MM || {};
       title: hasMerge ? '用当前设置重新生成综合回答（覆盖现有这份，旧综合保留在版本历史中）' : '把多个模型的回答合并为一份综合回答',
       onclick: function () { doMerge(am.roundId, { redo: hasMerge }); }
     }, hasMerge ? '重新综合' : '综合回答'));
+    // 交叉审查入口常驻：已有审查时变成「重新审查」（覆盖旧审查，不做版本历史）
+    const hasReview = reviewHasContent(am.review);
+    tools.appendChild(U.el('button', {
+      class: 'tool-btn',
+      title: hasReview ? '用当前设置重新进行交叉审查（覆盖现有这份）' : '各模型互相审查本轮回答，仲裁给出最终结论',
+      onclick: function () { doReview(am.roundId, { redo: hasReview }); }
+    }, hasReview ? '重新审查' : '交叉审查'));
     tools.appendChild(U.el('button', {
       class: 'tool-btn', title: '把这一轮的提问与全部回答导出为 Markdown 文件',
       onclick: function () { exportRound(am.roundId); }
@@ -860,6 +889,7 @@ window.MM = window.MM || {};
     for (const ctx of pending.values()) {
       if (ctx.assistantMsg === am) return { type: 'round', ctx };
       if (ctx.am === am && ctx.mergeMsg) return { type: 'merge', ctx };
+      if (ctx.am === am && ctx.reviewCtx) return { type: 'review', ctx };
     }
     return null;
   }
@@ -881,7 +911,14 @@ window.MM = window.MM || {};
       ',' + (r.error ? 1 : 0) + ',' + (r.ms || 0)
     ).join(';');
     const mg = am.merge ? am.merge.content.length + ',' + am.merge.mode + ',' + (am.merge.usage ? 1 : 0) : '-';
-    return 'A:' + u + '|' + am.active + ',' + ((am.versions || []).length) + '|' + rs + '|' + mg;
+    // 交叉审查状态也要进签名：审查完成/失败会变卡内容，池里旧节点必须失效重建
+    const rv = am.review
+      ? (am.review.items || []).map(i => (i.status || '') + ':' + (i.content || '').length).join(';') +
+        '|' + (am.review.verdict
+          ? am.review.verdict.content.length + (am.review.verdict.usage ? 'u' : '') + (am.review.verdict.stopped ? 's' : '')
+          : '-') + (am.review.stopped ? 'S' : '')
+      : '';
+    return 'A:' + u + '|' + am.active + ',' + ((am.versions || []).length) + '|' + rs + '|' + mg + '|' + rv;
   }
 
   function renderAll() {
@@ -967,6 +1004,18 @@ window.MM = window.MM || {};
               if (liveMerge) {
                 live.ctx.mergeBody = card.querySelector('.ac-body');
                 live.ctx.mergeStatus = card.querySelector('.ac-status');
+              }
+            }
+            const liveReview = live && live.type === 'review';
+            if (liveReview || reviewHasContent(am.review)) {
+              const rc = reviewCard(am.review, !!liveReview, am.roundId, am.results,
+                liveReview ? live.ctx.reviewPhase : null);
+              frag.appendChild(rc);
+              mids.push(rc);
+              if (liveReview) {
+                // 重绘后事件绑定要指向新 DOM（与 liveMerge 同理）
+                live.ctx.rvCard = rc;
+                live.ctx.rvRefs = reviewRefsOf(rc);
               }
             }
             const tools = roundTools(am, false);
@@ -1395,6 +1444,7 @@ window.MM = window.MM || {};
       pending.delete(ev.requestId);
       // 还有其它请求在跑、或有新一轮正在搜索时，不能把 streaming 清掉
       if (!pending.size && !searchPhase) { streaming = null; refreshSendBtn(); }
+      if (ctx.reviewCtx) { onReviewAllDone(ctx); return; }
       if (ctx.mergeMsg) {
         // 综合请求结束：同步到当前版本的快照
         const am = ctx.am;
@@ -1430,16 +1480,26 @@ window.MM = window.MM || {};
       MM.sessions.render();
       // 整轮全失败时没有可合并的内容，不要弹「没有可合并的成功回答」；
       // 单模型重试不自动重跑综合：用户只是补一个失败的模型，重写全部综合既慢又费钱
-      if (!ctx.singleRetry && U.$('#tgl-auto').checked && hasUsefulResults(am.results)) doMerge(am.roundId);
+      if (!ctx.singleRetry && hasUsefulResults(am.results)) {
+        // 交叉审查开关开启时自动流程走审查（仲裁结论已覆盖综合的职责），自动综合让位；
+        // 成功回答不足两份审不起来，退回普通综合
+        if (U.$('#tgl-review').checked) {
+          const okCount = am.results.filter(r => (r.status === 'done' || r.status === 'stopped') && r.content).length;
+          if (okCount >= 2) doReview(am.roundId);
+          else if (U.$('#tgl-auto').checked) doMerge(am.roundId);
+        } else if (U.$('#tgl-auto').checked) doMerge(am.roundId);
+      }
       else if (ctx.singleRetry && am.merge && am.merge.content && hasUsefulResults(am.results)) {
         // 重试成功后旧综合容易被当成最新结论，提醒一句（重试失败则旧综合仍准确，不打扰）
         const retried = (am.results || []).find(r => r.modelId === ctx.retryModelId);
         if (retried && (retried.status === 'done' || retried.status === 'stopped')) {
-          U.toast('回答已更新，综合回答仍是旧版，可点「重新综合」更新');
+          U.toast('回答已更新' + (reviewHasContent(am.review) ? '，综合回答与交叉审查仍是旧版，可点「重新综合」「重新审查」更新' : '，综合回答仍是旧版，可点「重新综合」更新'));
         }
       }
       return;
     }
+
+    if (ctx.reviewCtx) { onReviewEvent(ev, ctx); return; }
 
     if (ctx.mergeMsg) {
       const body = ctx.mergeBody, status = ctx.mergeStatus;
@@ -1749,6 +1809,27 @@ window.MM = window.MM || {};
         }
       }
     }
+    // 交叉审查：各审查员的发现 + 仲裁结论
+    if (am.review) {
+      const rvItems = (am.review.items || []).filter(i => i.content);
+      const vContent = am.review.verdict && am.review.verdict.content;
+      if (rvItems.length || vContent) {
+        L.push('');
+        L.push('## 交叉审查');
+        for (const it of rvItems) {
+          L.push('');
+          L.push('### 审查 · ' + (it.name || it.modelId));
+          L.push('');
+          L.push(it.content);
+        }
+        if (vContent) {
+          L.push('');
+          L.push('## 仲裁结论');
+          L.push('');
+          L.push(vContent);
+        }
+      }
+    }
     // 文档附件全文放附录，导出文件拿到别处也能读到附件内容
     for (const f of ((userMsg && userMsg.files) || [])) {
       if (!f || !f.text) continue;
@@ -1820,6 +1901,13 @@ window.MM = window.MM || {};
           L.push('### 综合回答');
           L.push('');
           L.push(am.merge.content);
+        }
+        // 会话导出只带仲裁结论（互审发现全文较长，按轮导出里有完整版）
+        if (am.review && am.review.verdict && am.review.verdict.content) {
+          L.push('');
+          L.push('### 交叉审查结论');
+          L.push('');
+          L.push(am.review.verdict.content);
         }
       } else {
         L.push('');
@@ -2074,6 +2162,361 @@ window.MM = window.MM || {};
     if (anchor && ctx.am) anchor.after(roundTools(ctx.am, true));
   }
 
+  // ---------- 交叉审查（阶段一复用本轮回答；阶段二互审；阶段三仲裁） ----------
+  function reviewUsage(review) {
+    let total = 0;
+    const add = u => { if (u) total += (u.input || 0) + (u.output || 0); };
+    for (const it of (review.items || [])) add(it.usage);
+    if (review.verdict) add(review.verdict.usage);
+    return total || null;
+  }
+  function reviewHasContent(review) {
+    return !!review && (!!review.verdict || (review.items || []).some(i => i.content));
+  }
+
+  // phase：2=互审进行中 3=仲裁进行中 null=已完成/历史重绘
+  function reviewCard(review, live, roundId, results, phase) {
+    const card = U.el('div', { class: 'review-card', 'data-role': 'review', 'data-round': roundId || '' });
+    const rStatus = U.el('span', { class: 'ac-status' });
+    card.appendChild(U.el('div', { class: 'ac-head' },
+      U.el('span', { class: 'ac-name' }, '交叉审查'), rStatus));
+    const body = U.el('div', { class: 'ac-body' });
+    card.appendChild(body);
+    const findings = U.el('div', { class: 'rv-findings' });
+    for (const it of (review.items || [])) {
+      const iStatus = U.el('span', { class: 'ac-status' });
+      const streamingNow = live && phase === 2 && it.status === 'streaming';
+      if (streamingNow) iStatus.innerHTML = '<span class="spinner"></span>';
+      else if (it.status === 'done') iStatus.innerHTML = '✓';
+      else if (it.status === 'stopped') iStatus.innerHTML = '<span class="badge muted">⏹</span>';
+      else if (it.status === 'error') iStatus.innerHTML = '<span style="color:var(--danger)">✗</span>';
+      const iBody = U.el('div', { class: 'rv-item-body' + (streamingNow ? ' streaming' : it.content ? ' md' : '') });
+      if (streamingNow) iBody.textContent = it.content || '';
+      else if (it.content) iBody.innerHTML = MM.md.render(it.content);
+      else if (it.status === 'error') iBody.innerHTML = '<span style="color:var(--danger)">✗ ' + U.esc(it.error || '失败') + '</span>';
+      findings.appendChild(U.el('div', { class: 'rv-item', 'data-model-id': it.modelId },
+        U.el('div', { class: 'rv-item-head' },
+          U.el('span', { class: 'ac-dot', style: 'background:' + MM.settings.dotColor(it.modelId) }),
+          U.el('span', { class: 'rv-item-name' }, it.name || it.modelId),
+          iStatus),
+        iBody));
+    }
+    body.appendChild(findings);
+    if (review.verdict) {
+      const v = review.verdict;
+      const vBody = U.el('div', { class: 'rv-verdict-body' + (live && phase === 3 ? ' streaming' : ' md') });
+      if (live && phase === 3) vBody.textContent = v.content || '';
+      else vBody.innerHTML = MM.md.render(v.content || '（空）');
+      body.appendChild(U.el('div', { class: 'rv-verdict' },
+        U.el('div', { class: 'rv-verdict-head' },
+          U.el('span', { class: 'rv-sec-title' }, '仲裁结论'),
+          U.el('span', { class: 'ac-status' })),
+        vBody));
+    }
+    // 卡片头部状态
+    if (live) rStatus.innerHTML = '<span class="spinner"></span> ' + (phase === 3 ? '仲裁中…' : '互审中…');
+    else {
+      const u = reviewUsage(review);
+      if (!review.verdict && review.stopped) rStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u);
+      else if (review.verdict && review.verdict.stopped) rStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u);
+      else if (review.verdict) rStatus.innerHTML = '✓ 完成' + usageBadge(u);
+      else rStatus.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(u);
+    }
+    card.appendChild(U.el('div', { class: 'card-foot' },
+      U.el('button', { class: 'ac-copy', onclick: function () { U.copyTextFrom(body); U.toast('已复制'); } }, '复制')));
+    MM.md.bindCopy(card);
+    // 历史重绘：仲裁结论渲染来源角标与数值溯源（复用综合回答的后校验）
+    if (!live && review.verdict && review.verdict.content) {
+      decorateMergeSources(card.querySelector('.rv-verdict-body'), review.verdict, results, roundId);
+    }
+    return card;
+  }
+
+  function reviewRefsOf(card) {
+    const items = new Map();
+    for (const el of Array.from(card.querySelectorAll('.rv-item'))) {
+      items.set(el.getAttribute('data-model-id'), {
+        status: el.querySelector('.ac-status'),
+        body: el.querySelector('.rv-item-body')
+      });
+    }
+    const vEl = card.querySelector('.rv-verdict');
+    return {
+      items: items,
+      headStatus: card.querySelector('.ac-head .ac-status'),
+      verdict: vEl ? { status: vEl.querySelector('.ac-status'), body: vEl.querySelector('.rv-verdict-body') } : null
+    };
+  }
+
+  // 仲裁块在阶段三开始时才创建（阶段二的卡片上还没有这块）
+  function ensureVerdictBlock(card) {
+    let v = card.querySelector('.rv-verdict');
+    if (v) return v;
+    const body = card.querySelector('.ac-body');
+    v = U.el('div', { class: 'rv-verdict' },
+      U.el('div', { class: 'rv-verdict-head' },
+        U.el('span', { class: 'rv-sec-title' }, '仲裁结论'),
+        U.el('span', { class: 'ac-status' })),
+      U.el('div', { class: 'rv-verdict-body streaming' }));
+    body.appendChild(v);
+    return v;
+  }
+
+  // 审查失败/停止后在卡片角落补「重试」（与综合卡片的重试同款）
+  function addReviewRetryBtn(card, roundId) {
+    if (!card) return;
+    const foot = card.querySelector('.card-foot');
+    if (!foot || foot.querySelector('.ac-retry')) return;
+    foot.insertBefore(U.el('button', {
+      class: 'ac-copy ac-retry',
+      onclick: function () { doReview(roundId, { redo: true }); }
+    }, '重试'), foot.firstChild);
+  }
+
+  function updateReviewHeadStatus(ctx) {
+    const refs = ctx.rvRefs;
+    if (!refs || ctx.reviewPhase !== 2) return;
+    const items = ctx.am.review.items || [];
+    const done = items.filter(i => i.status === 'done' || i.status === 'stopped').length;
+    refs.headStatus.innerHTML = '<span class="spinner"></span> 互审中 ' + done + '/' + items.length + '…';
+  }
+
+  function finalizeReviewCard(ctx, failed) {
+    const review = ctx.am.review;
+    const card = ctx.rvCard;
+    if (card && card.isConnected && ctx.rvRefs) {
+      const v = review.verdict;
+      const vr = ctx.rvRefs.verdict;
+      if (v && vr) {
+        vr.body.classList.remove('streaming');
+        vr.body.classList.add('md');
+        vr.body.innerHTML = MM.md.render(v.content || '（空）');
+        decorateMergeSources(vr.body, v, ctx.am.results, ctx.roundId);
+      }
+      const u = reviewUsage(review);
+      if (failed) ctx.rvRefs.headStatus.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(u);
+      else if ((review.stopped && !v) || (v && v.stopped)) ctx.rvRefs.headStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u);
+      else ctx.rvRefs.headStatus.innerHTML = '✓ 完成' + usageBadge(u);
+      if (failed || (review.stopped && !v) || (v && v.stopped)) addReviewRetryBtn(card, ctx.roundId);
+    }
+    // 恢复工具栏（交叉审查入口随 am.review 状态更新）
+    const wrap = U.$('#messages');
+    const oldTools = byRound('.round-tools', ctx.roundId, wrap);
+    if (oldTools && ctx.am) oldTools.replaceWith(roundTools(ctx.am, true));
+  }
+
+  async function doReview(roundId, opts) {
+    opts = opts || {};
+    if (streaming || sendLock) { U.toast('请等待当前任务完成', true); return; }
+    // 轮次可能属于后台会话：按 roundId 全局定位（与 doMerge 同款）
+    let s = MM.sessions.current();
+    let idx = s ? s.messages.findIndex(m => m.role === 'assistant' && m.roundId === roundId) : -1;
+    if (idx < 0) {
+      for (const cand of MM.state.sessions) {
+        if (!cand || !Array.isArray(cand.messages) || cand === s) continue;
+        const j = cand.messages.findIndex(m => m && m.role === 'assistant' && m.roundId === roundId);
+        if (j >= 0) { s = cand; idx = j; break; }
+      }
+    }
+    if (idx < 0 || !s) return;
+    const am = s.messages[idx];
+    const userMsg = s.messages[idx - 1];
+    if (!userMsg) return;
+    const okResults = am.results
+      .filter(r => (r.status === 'done' || r.status === 'stopped') && r.content)
+      .map(r => ({ modelId: r.modelId, name: r.name, content: r.content }));
+    if (okResults.length < 2) { U.toast('交叉审查至少需要两份成功回答', true); return; }
+    if (reviewHasContent(am.review)) {
+      if (!opts.redo) { U.toast('该轮已有交叉审查，可点「重新审查」覆盖', true); return; }
+      const okc = await U.confirm({
+        title: '重新审查',
+        message: '将用当前设置重新进行交叉审查，覆盖现有的这一份。',
+        okText: '重新审查'
+      });
+      if (!okc) return;
+    }
+    const flats = MM.settings.allFlatModels();
+    // 审查者 = 本轮给出成功回答的模型（模型配置里已删除的跳过）；i 是全局编号，供
+    // reviewPrompt 剔除自身回答并让【回答 N】在审查与仲裁提示词间编号一致
+    const reviewers = okResults.map((r, i) => ({ r: r, i: i, model: flats.find(m => m.id === r.modelId) }))
+      .filter(x => x.model);
+    if (reviewers.length < 2) { U.toast('找不到可用的审查模型（模型配置可能已变化）', true); return; }
+    const cfg = MM.state.config.synthesis || {};
+    // 仲裁模型：综合设置里选定的模型优先；未选（前端合并）或已被删除时，
+    // 用本轮第一位回答者的模型兜底——flats[0] 可能是没配密钥的预置服务商，必然失败
+    const arbiter = (cfg.synthSource && flats.find(m => m.id === cfg.synthSource)) || reviewers[0].model;
+
+    am.review = {
+      items: reviewers.map(x => ({ modelId: x.r.modelId, name: x.r.name, status: 'pending', content: '', usage: null, ms: 0 })),
+      verdict: null, stopped: false, createdAt: Date.now()
+    };
+    s.updatedAt = Date.now();
+    MM.save();
+
+    // 渲染实时卡片（插到综合卡片之后，没有综合卡就插到回答网格之后）
+    const wrap = U.$('#messages');
+    const card = reviewCard(am.review, true, roundId, am.results, 2);
+    card.classList.add('anim-in');
+    const inView = MM.sessions.current() === s;
+    if (inView) {
+      const staleCard = byRound('.review-card', roundId, wrap);
+      if (staleCard) staleCard.remove();
+      const oldTools = byRound('.round-tools', roundId, wrap);
+      if (oldTools) oldTools.replaceWith(roundTools(am, true));
+      const mergeEl = byRound('.merge-card', roundId, wrap);
+      const gridEl = byRound('.answers', roundId, wrap);
+      if (mergeEl) mergeEl.after(card); else if (gridEl) gridEl.after(card); else wrap.appendChild(card);
+      scrollBottom(true);
+    }
+    streaming = s.id;
+    if (inView) setSendBtn(true);
+    MM.sessions.render(); // 呼吸点
+
+    const sys = effectiveSystemPrompt(s);
+    const targets = reviewers.map(x => {
+      const budget = Math.max(4000, (x.model.contextTokens || 32768) - (x.model.maxTokens || 4096) - 2048
+        - (sys ? MM.merge.tokensOf(sys) : 0));
+      const prompt = MM.merge.reviewPrompt(userMsg.content, okResults, x.i, budget);
+      const msgs = sys ? [{ role: 'system', content: sys }] : [];
+      msgs.push({ role: 'user', content: prompt });
+      return { model: stripModel(x.model), messages: msgs };
+    });
+    const reqId = 'rev' + (++seq);
+    pending.set(reqId, {
+      reviewCtx: true, reviewPhase: 2, reviewStopped: false,
+      session: s, am: am, roundId: roundId,
+      arbiter: arbiter, okResults: okResults, userQuestion: userMsg.content,
+      rvCard: inView ? card : null,
+      rvRefs: inView ? reviewRefsOf(card) : null
+    });
+    try {
+      await api.send({ requestId: reqId, targets: targets, searchOn: false });
+    } catch (e) {
+      pending.delete(reqId);
+      streaming = null;
+      setSendBtn(false);
+      U.toast('交叉审查失败：' + e.message, true);
+      if (am && am.review) {
+        for (const it of am.review.items) if (it.status === 'pending' || it.status === 'streaming') { it.status = 'error'; it.error = e.message; }
+      }
+      // 请求没能启动：把还空着的审查条目标成失败（有内容的保留半成品），再走统一收尾
+      if (card && card.isConnected) {
+        for (const el of Array.from(card.querySelectorAll('.rv-item'))) {
+          const b = el.querySelector('.rv-item-body');
+          if (b && !b.textContent) b.innerHTML = '<span style="color:var(--danger)">✗ 请求未能启动</span>';
+        }
+      }
+      finalizeReviewCard({ am: am, roundId: roundId, rvCard: card, rvRefs: inView ? reviewRefsOf(card) : null }, true);
+      MM.save();
+    }
+  }
+
+  // 阶段事件：delta/done/error 按 reviewPhase 分流（2=按审查条目，3=写进仲裁块）
+  function onReviewEvent(ev, ctx) {
+    const review = ctx.am.review;
+    if (ctx.reviewPhase === 3) {
+      const v = review.verdict;
+      if (!v) return;
+      const refs = ctx.rvRefs && ctx.rvRefs.verdict;
+      if (ev.type === 'start') { if (refs) refs.status.innerHTML = '<span class="spinner"></span>'; }
+      else if (ev.type === 'delta') {
+        v.content += ev.text;
+        if (refs) scheduleStreamPaint(refs.body, function () { refs.body.textContent = v.content; });
+      }
+      else if (ev.type === 'done' && ev.usage) { v.usage = ev.usage; v.ms = ev.ms || 0; }
+      else if (ev.type === 'error') {
+        if (/已停止/.test(ev.message || '')) {
+          v.stopped = true;
+          if (ev.usage) v.usage = ev.usage;
+          v.content += '\n\n（已停止，内容不完整，可点「重新审查」重出完整版）';
+        } else {
+          ctx.verdictFailed = true;
+          v.content += '\n\n（仲裁失败：' + ev.message + '）';
+        }
+      }
+      return;
+    }
+    const it = (review.items || []).find(i => i.modelId === ev.modelId);
+    if (!it) return;
+    const refs = ctx.rvRefs && ctx.rvRefs.items.get(ev.modelId);
+    if (ev.type === 'start') {
+      it.status = 'streaming';
+      if (refs) refs.status.innerHTML = '<span class="spinner"></span>';
+    } else if (ev.type === 'delta') {
+      it.content += ev.text;
+      if (refs) scheduleStreamPaint(refs.body, function () { refs.body.textContent = it.content; });
+    } else if (ev.type === 'done') {
+      it.status = 'done'; it.usage = ev.usage || null; it.ms = ev.ms || 0;
+      if (refs) refs.status.innerHTML = '✓';
+      updateReviewHeadStatus(ctx);
+    } else if (ev.type === 'error') {
+      if (/已停止/.test(ev.message || '')) {
+        it.status = 'stopped';
+        ctx.reviewStopped = true;
+        if (ev.usage) it.usage = ev.usage;
+        if (refs) refs.status.innerHTML = '<span class="badge muted">⏹</span>';
+      } else {
+        it.status = 'error'; it.error = ev.message;
+        if (refs) refs.status.innerHTML = '<span style="color:var(--danger)">✗</span>';
+      }
+      updateReviewHeadStatus(ctx);
+    }
+  }
+
+  // 阶段收尾（chat:send 的 all-done）：阶段二结束转仲裁或终止；阶段三结束落终态
+  function onReviewAllDone(ctx) {
+    const review = ctx.am.review;
+    if (ctx.reviewPhase === 2) {
+      const anyDone = (review.items || []).some(i => i.status === 'done' && i.content);
+      if (!anyDone) {
+        // 全部被停止或失败：不进入仲裁。用户主动停 → 已停止；其余 → 失败
+        review.stopped = ctx.reviewStopped;
+        finalizeReviewCard(ctx, !ctx.reviewStopped);
+        MM.save();
+        return;
+      }
+      // 阶段三：仲裁（复用综合模型设置；请求事件仍走 reviewCtx 分支，phase 切 3）
+      ctx.reviewPhase = 3;
+      streaming = ctx.session.id;
+      if (MM.sessions.current() === ctx.session) setSendBtn(true);
+      MM.save();
+      const sys = effectiveSystemPrompt(ctx.session);
+      const budget = Math.max(4000, (ctx.arbiter.contextTokens || 32768) - (ctx.arbiter.maxTokens || 4096) - 2048
+        - (sys ? MM.merge.tokensOf(sys) : 0));
+      const reviews = (review.items || [])
+        .filter(i => (i.status === 'done' || i.status === 'stopped') && i.content)
+        .map(i => ({ content: i.content }));
+      const prompt = MM.merge.verdictPrompt(ctx.userQuestion, ctx.okResults, reviews, budget);
+      const msgs = sys ? [{ role: 'system', content: sys }] : [];
+      msgs.push({ role: 'user', content: prompt });
+      review.verdict = { content: '', usage: null, ms: 0, stopped: false };
+      const card = ctx.rvCard;
+      if (card && card.isConnected) {
+        ensureVerdictBlock(card);
+        ctx.rvRefs = reviewRefsOf(card);
+        const vr = ctx.rvRefs.verdict;
+        if (vr) vr.status.innerHTML = '<span class="spinner"></span>';
+        ctx.rvRefs.headStatus.innerHTML = '<span class="spinner"></span> 仲裁中…';
+        scrollBottom(true);
+      }
+      const reqId = 'rev' + (++seq);
+      pending.set(reqId, ctx);
+      api.send({ requestId: reqId, targets: [{ model: stripModel(ctx.arbiter), messages: msgs }], searchOn: false })
+        .catch(function (e) {
+          pending.delete(reqId);
+          streaming = null;
+          setSendBtn(false);
+          U.toast('仲裁失败：' + e.message, true);
+          if (review.verdict) review.verdict.content += '\n\n（仲裁失败：' + e.message + '）';
+          finalizeReviewCard(ctx, true);
+          MM.save();
+        });
+      return;
+    }
+    finalizeReviewCard(ctx, !!ctx.verdictFailed);
+    MM.save();
+  }
+
   // ---------- 滚动：贴底检测 + 智能跟随 ----------
   // stickBottom 由滚动事件维护：流式期间不再每帧读 scrollHeight（读布局会强制同步重排）
   let stickBottom = true;
@@ -2248,12 +2691,26 @@ window.MM = window.MM || {};
       setTimeout(function () { document.documentElement.classList.remove('theme-anim'); }, 280);
       try { localStorage.setItem('mmc-theme', next); } catch (e) { }
     });
+    // 自绘窗口三键（#win-controls）：最小化/最大化(还原)/关闭。
+    // DOM 按钮随主题与弹窗遮罩联动，规避原生 WCO 白条不被遮罩压暗的问题
+    if (window.api && window.api.winControl) {
+      const maxBtn = U.$('#btn-win-max');
+      const setMax = function (m) { if (maxBtn) maxBtn.classList.toggle('is-max', !!m); };
+      U.$('#btn-win-min').addEventListener('click', function () { window.api.winControl('min'); });
+      maxBtn.addEventListener('click', function () { window.api.winControl('max').then(setMax).catch(function () { }); });
+      U.$('#btn-win-close').addEventListener('click', function () { window.api.winControl('close'); });
+      if (window.api.onWinState) window.api.onWinState(setMax);
+    }
     U.$('#tgl-auto').addEventListener('change', function () {
       MM.state.config.synthesis.autoMerge = this.checked;
       MM.save({ configOnly: true }); // 只改了 config，不需要复制整份会话历史
     });
+    U.$('#tgl-review').addEventListener('change', function () {
+      MM.state.config.synthesis.crossReview = this.checked;
+      MM.save({ configOnly: true });
+    });
     // 顶栏开关胶囊的高亮态跟随复选框（开启时文字变 accent 色，一眼可辨）
-    for (const id of ['#tgl-search', '#tgl-auto']) {
+    for (const id of ['#tgl-search', '#tgl-auto', '#tgl-review']) {
       const input = U.$(id);
       const sync = function () { input.closest('.toggle').classList.toggle('on', input.checked); };
       input.addEventListener('change', sync);

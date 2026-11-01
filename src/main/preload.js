@@ -5,6 +5,13 @@ contextBridge.exposeInMainWorld('api', {
   // 存储
   getAll: () => ipcRenderer.invoke('store:all'),
   saveAll: (d) => ipcRenderer.invoke('store:save', d),
+  // 窗口控制（自绘三键）与最大化状态推送
+  winControl: (a) => ipcRenderer.invoke('win:control', a),
+  onWinState: (cb) => {
+    const h = (e, d) => cb(d);
+    ipcRenderer.on('win:state', h);
+    return () => ipcRenderer.removeListener('win:state', h);
+  },
   // 聊天
   send: (p) => ipcRenderer.invoke('chat:send', p),
   synthesize: (p) => ipcRenderer.invoke('chat:synthesize', p),

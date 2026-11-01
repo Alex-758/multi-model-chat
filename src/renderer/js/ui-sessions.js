@@ -35,6 +35,11 @@ window.MM = window.MM || {};
         for (const r of (m.results) || []) if (r) add(r.usage);
         if (m.merge) add(m.merge.usage);
       }
+      // 交叉审查（互审 + 仲裁）也是真实请求：审查不做版本化，挂在轮次上只记一次
+      if (m.review) {
+        for (const it of (m.review.items || [])) if (it) add(it.usage);
+        if (m.review.verdict) add(m.review.verdict.usage);
+      }
       total += m.prunedTokens || 0;
     }
     return total;

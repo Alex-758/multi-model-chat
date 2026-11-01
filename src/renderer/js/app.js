@@ -91,7 +91,7 @@ MM.defaults = {
   DEFAULT_CONFIG: {
     providers: [],
     search: { provider: 'bing', apiKey: '' },
-    synthesis: { synthSource: 'frontend', autoMerge: true },
+    synthesis: { synthSource: 'frontend', autoMerge: true, crossReview: false },
     // 全局系统提示词：对所有模型、所有会话生效（按会话覆盖见 session.systemPrompt）
     systemPrompt: ''
   }
@@ -249,7 +249,7 @@ MM.defaults = {
 
   // 旧综合设置迁移：1.0/1.1 的 mode='model'+modelKey、更旧的 modelId → synthSource
   function normalizeSynth(rawSyn, providers) {
-    const syn = Object.assign({ synthSource: 'frontend', autoMerge: true }, rawSyn || {});
+    const syn = Object.assign({ synthSource: 'frontend', autoMerge: true, crossReview: false }, rawSyn || {});
     if (rawSyn && !rawSyn.synthSource) {
       if (rawSyn.mode === 'model' && rawSyn.modelKey) {
         syn.synthSource = rawSyn.modelKey;
@@ -483,6 +483,7 @@ MM.defaults = {
       if (t) document.documentElement.setAttribute('data-theme', t);
     } catch (e) { /* ignore */ }
     U.$('#tgl-auto').checked = !!MM.state.config.synthesis.autoMerge;
+    U.$('#tgl-review').checked = !!MM.state.config.synthesis.crossReview;
 
     MM.chat.bind();
     MM.settings.bind();
@@ -522,17 +523,17 @@ MM.defaults = {
     if (document.getElementById('fatal-error')) return;
     const box = document.createElement('div');
     box.id = 'fatal-error';
-    box.setAttribute('style', 'position:fixed;inset:0;z-index:999;display:flex;align-items:center;justify-content:center;background:rgba(15,18,28,.55);padding:24px;');
+    box.setAttribute('style', 'position:fixed;inset:0;z-index:999;display:flex;align-items:center;justify-content:center;background:rgba(30,26,20,.5);padding:24px;');
     const panel = document.createElement('div');
-    panel.setAttribute('style', 'max-width:640px;width:100%;background:#fff;color:#1f2329;border-radius:12px;padding:22px 24px;font-size:13px;line-height:1.7;box-shadow:0 18px 60px rgba(0,0,0,.35);');
+    panel.setAttribute('style', 'max-width:640px;width:100%;background:#fffdf9;color:#3d3929;border-radius:12px;padding:22px 24px;font-size:13px;line-height:1.7;box-shadow:0 18px 60px rgba(0,0,0,.35);');
     panel.innerHTML = '<h2 style="font-size:16px;margin:0 0 8px">应用初始化失败</h2>' +
-      '<p style="margin:0 0 10px;color:#6b7280">数据文件可能已损坏或格式异常。请先备份 <code>%APPDATA%\\Multi-Model Chat\\store.json</code>，再重新加载；如需重置，可删除该文件后重启（会话记录会丢失）。</p>';
+      '<p style="margin:0 0 10px;color:#6b675a">数据文件可能已损坏或格式异常。请先备份 <code>%APPDATA%\\Multi-Model Chat\\store.json</code>，再重新加载；如需重置，可删除该文件后重启（会话记录会丢失）。</p>';
     const pre = document.createElement('pre');
-    pre.setAttribute('style', 'max-height:180px;overflow:auto;background:#f2f3f5;border-radius:8px;padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all;');
+    pre.setAttribute('style', 'max-height:180px;overflow:auto;background:#f2f0e8;border-radius:8px;padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all;');
     pre.textContent = detail;
     const btn = document.createElement('button');
     btn.textContent = '重新加载';
-    btn.setAttribute('style', 'margin-top:14px;background:#18181b;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;');
+    btn.setAttribute('style', 'margin-top:14px;background:#3d3929;color:#faf9f5;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;');
     btn.addEventListener('click', function () { location.reload(); });
     panel.appendChild(pre);
     panel.appendChild(btn);

@@ -416,6 +416,66 @@
     return p;
   }
 
+  // ---------- 交叉审查提示词（全员互审 + 仲裁，两阶段） ----------
+  // 成本控制：给审查者的每份回答先按句截到单份上限（审查要要点不要全文），
+  // 发现清单限量限量输出——这同时压了审查输出和仲裁输入。
+  const REVIEW_CAPS = { perAnswerTok: 1200, maxFindings: 8, findingMaxChars: 80, reviewTok: 900 };
+
+  // 给单个审查者的回答块：编号沿用全体回答的全局序号（【回答 N】在所有审查者与
+  // 仲裁提示词里指向同一位模型），只剔除审查者自己的那份，避免自审护短。
+  function reviewAnswersBlock(all, ownIdx, budget) {
+    const block = buildAnswersBlock(all, budget);
+    const parts = block.split(/(?=【回答 \d+】)/);
+    const ownMark = '【回答 ' + (ownIdx + 1) + '】';
+    return parts.filter(pt => pt.slice(0, ownMark.length) !== ownMark).join('');
+  }
+
+  // all：本轮全部成功回答（含审查者自己的，用于全局编号）；ownIdx：审查者自己在 all 里的下标
+  function reviewPrompt(question, all, ownIdx, budget) {
+    const capped = (all || []).map(r => ({
+      modelId: r.modelId, name: r.name,
+      content: cutSentences(String(r.content || ''), REVIEW_CAPS.perAnswerTok)
+    }));
+    let p = '下面是其他几个 AI 模型对同一个问题的回答。你是严格的审稿人，请逐份审查这些回答，找出：\n' +
+      '- 逻辑漏洞（推理链断裂、前提与结论矛盾）\n' +
+      '- 遗漏的条件或重要信息\n' +
+      '- 事实错误（与你的知识不符的陈述）\n' +
+      '- 没有依据的断言（结论缺乏论证或来源）\n\n' +
+      '输出格式（Markdown，使用以下固定的小节标题）：\n' +
+      '## 问题清单\n' +
+      '（每条一行，格式：[高|中|低]【回答 N】问题描述。只报高置信度的问题，最多 ' + REVIEW_CAPS.maxFindings +
+      ' 条，每条不超过 ' + REVIEW_CAPS.findingMaxChars + ' 字；没有就写「未发现」）\n' +
+      '## 遗漏补充\n' +
+      '（重要但所有回答都没提到的点，最多 3 条；没有就写「无」）\n\n' +
+      '要求：不要复述回答内容；不要提及任何模型名称；拿不准的问题不要报。\n\n' +
+      '【原始问题】\n' + question + '\n\n';
+    p += reviewAnswersBlock(capped, ownIdx, Math.max(500, (Number(budget) || 32000) - tokensOf(p)));
+    return p;
+  }
+
+  // 仲裁提示词：全部回答（预算内尽量全量）+ 各审查员的发现，逐条核实后给出最终结论
+  // reviews：[{ content }]，只收有内容的审查（编号【审查 N】按传入顺序）
+  function verdictPrompt(question, all, reviews, budget) {
+    let p = '下面是多个 AI 模型对同一个问题的回答，以及各审查员对这些回答提出的问题。\n' +
+      '你是仲裁人，请完成两件事：\n' +
+      '1. 逐条核实审查发现：以原回答内容为依据判断每条问题是否成立（审查员也可能出错——可能误读原回答，自己也可能有事实错误）。成立的问题说明错在哪里、正确说法是什么；不成立的问题说明理由。\n' +
+      '2. 在核实的基础上给出你的最终结论：吸收所有回答中正确且有用的信息，修正确认的错误，补上重要遗漏。\n\n' +
+      '输出格式（Markdown，使用以下固定的小节标题；某一节没有内容时整节省略，不要输出空标题）：\n' +
+      '## 最终结论\n（直接回答问题；与原回答不一致的修正要明确指出）\n' +
+      '## 审查发现裁定\n（逐条：【审查 N】成立/部分成立/不成立——理由，每条不超过 100 字）\n' +
+      '## 确认的错误清单\n（原回答中确认存在的问题，逐条列出；没有就省略本节）\n' +
+      '## 仍存不确定性\n（无法核实、需要进一步查证的问题；没有就写「无」）\n\n' +
+      '要求：不要提及任何模型名称；引用原回答时直接融入正文，不要加引号；不要寒暄。\n\n' +
+      '【原始问题】\n' + question + '\n\n';
+    const revBlock = (reviews || []).map((rv, i) =>
+      '【审查 ' + (i + 1) + '】\n' + cutSentences(String(rv.content || ''), REVIEW_CAPS.reviewTok) + '\n\n'
+    ).join('');
+    // 回答块在前（审查发现引用的是【回答 N】编号），预算先扣掉脚手架与发现块
+    p += buildAnswersBlock(all, Math.max(500, (Number(budget) || 32000) - tokensOf(p) - tokensOf(revBlock)));
+    if (revBlock) p += '【交叉审查发现（请逐条核实）】\n\n' + revBlock;
+    return p;
+  }
+
   // ---------- 来源匹配（图2：观点可点击查看来自哪些模型） ----------
   // 把报告按展示块（段落/列表项）拆开，再按句子与各模型要点比相似度；
   // 命中的块记下来自哪些模型，渲染成可点击角标。模型改写幅度大的段落可能匹配不上——
@@ -458,24 +518,32 @@
     return pool;
   }
 
-  // 一段报告文本来自哪些模型（句子级匹配后聚合，避免长段落稀释相似度）
+  // 一段报告文本与来源池的句子级匹配：每个命中的模型返回相似度最高的那条池内原句
+  // （text 字段），供点击角标跳转后高亮来源回答里的具体段落。
   // IDF 以池子为语料：池子和查询句按同一权重比较，功能词不再抬相似度
-  function blockModels(text, pool) {
+  function blockMatches(text, pool) {
     if (!pool.length) return [];
     const weight = idfOf(pool.map(p => p.v));
-    const wPool = pool.map(p => ({ modelId: p.modelId, name: p.name, v: weight(p.v) }));
+    const wPool = pool.map(p => ({ modelId: p.modelId, name: p.name, text: p.text, v: weight(p.v) }));
     const sents = splitSentences(text);
     if (!sents.length) sents.push(text);
-    const models = [];
+    const best = new Map(); // modelId -> 命中模型及最佳匹配句
     for (const s of sents) {
       const v = weight(vecOf(s));
       if (!v.size) continue;
       for (const p of wPool) {
-        if (models.some(m => m.modelId === p.modelId)) continue;
-        if (cos(v, p.v) >= 0.42) models.push({ modelId: p.modelId, name: p.name });
+        const sim = cos(v, p.v);
+        if (sim < 0.42) continue;
+        const cur = best.get(p.modelId);
+        if (!cur || sim > cur.sim) best.set(p.modelId, { modelId: p.modelId, name: p.name, text: p.text, sim: sim });
       }
     }
-    return models;
+    return Array.from(best.values());
+  }
+
+  // 一段报告文本来自哪些模型（blockMatches 的按模型聚合视图）
+  function blockModels(text, pool) {
+    return blockMatches(text, pool).map(m => ({ modelId: m.modelId, name: m.name }));
   }
 
   function matchSources(content, results) {
@@ -531,7 +599,7 @@
     }).map(c => c.text);
   }
 
-  const api = { frontend, synthesisPrompt, analyze, matchSources, buildPool, blockModels, tokensOf, splitSentences, clusterPoints, uncoveredConsensus, numsAudit, sourceNums };
+  const api = { frontend, synthesisPrompt, reviewPrompt, verdictPrompt, analyze, matchSources, buildPool, blockModels, blockMatches, tokensOf, splitSentences, clusterPoints, uncoveredConsensus, numsAudit, sourceNums };
   if (typeof window !== 'undefined') {
     window.MM = window.MM || {};
     window.MM.merge = api;

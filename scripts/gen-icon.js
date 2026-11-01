@@ -15,9 +15,9 @@ for (let y = 0; y < S; y++) {
   for (let x = 0; x < S; x++) {
     const i = (y * S + x) * 4;
     const t = y / S;
-    px[i] = 99 + (168 - 99) * t;
-    px[i + 1] = 102 + (85 - 102) * t;
-    px[i + 2] = 241 + (247 - 241) * t;
+    px[i] = 201 + (181 - 201) * t;   // 陶土橙渐变 #c96442 → #b5563a
+    px[i + 1] = 100 + (86 - 100) * t;
+    px[i + 2] = 66 + (58 - 66) * t;
     px[i + 3] = 255;
     // 圆角裁剪
     const cx = Math.min(Math.max(x, R), S - R);
@@ -39,13 +39,13 @@ function fillEllipse(cx, cy, rx, ry, r, g, b) {
     }
   }
 }
-fillEllipse(128, 122, 88, 58, 255, 255, 255);
+fillEllipse(128, 122, 88, 58, 250, 249, 245);
 // 气泡尾巴
 for (let d = 0; d < 26; d++) {
   for (let w = 0; w < 26 - d; w++) {
     const x = 92 + w, y = 168 + d;
     const i = (y * S + x) * 4;
-    px[i] = 255; px[i + 1] = 255; px[i + 2] = 255; px[i + 3] = 255;
+    px[i] = 250; px[i + 1] = 249; px[i + 2] = 245; px[i + 3] = 255;
   }
 }
 // 三个彩色圆点（多模型）

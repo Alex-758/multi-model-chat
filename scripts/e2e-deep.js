@@ -1,7 +1,8 @@
 'use strict';
 // 深度模拟使用测试：真实 main.js + 真实渲染层 + 本地 mock 服务。
 // 覆盖：连点/快速操作、异常输入、流异常（断流/垃圾行/CRLF/超大 delta/无用量）、
-//       综合中停止/切会话、设置边界（删除当前服务商/空名/HTML 名/特殊模型 ID/全不选/空 ID）、
+//       综合中停止/切会话、交叉审查（互审+仲裁全流程/单回答回退）、
+//       设置边界（删除当前服务商/空名/HTML 名/特殊模型 ID/全不选/空 ID）、
 //       导入容错（畸形 JSON 系列）、流式中导入/清空、猴子随机点击、控制台零错误。
 const { app, BrowserWindow, dialog, shell } = require('electron');
 const http = require('http');
@@ -457,6 +458,70 @@ server.listen(0, '127.0.0.1', () => {
       // 还原套件默认：关掉自动综合
       await js(`(function(){ var t=document.querySelector('#tgl-auto'); t.checked=false; t.dispatchEvent(new Event('change',{bubbles:true})); })()`);
       return JSON.stringify(t);
+    });
+
+    // ================= C2. 交叉审查 =================
+    await run('交叉审查：互审+仲裁全流程（手动入口）', async () => {
+      await newSession();
+      await setChips(['p1::m1', 'p1::m2']);
+      await sendText('交叉审查测试');
+      assert(await waitDone(), '首轮未完成');
+      requests.length = 0;
+      // 开启交叉审查开关（持久化进 config）
+      await js(`(function(){ var t=document.querySelector('#tgl-review'); t.checked=true; t.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+      assert(await clickTool('交叉审查'), '没有交叉审查按钮');
+      assert(await waitFor("!!document.querySelector('.review-card')", 4000), '审查卡片未出现');
+      assert(await waitFor("(function(){ var c=document.querySelector('.review-card'); return c && /完成/.test(c.querySelector('.ac-head .ac-status').textContent); })()", 20000), '审查未完成');
+      const t = await js(`(function(){
+        var am = MM.sessions.current().messages.filter(function(m){return m.role==='assistant';}).pop();
+        if (!am.review) return JSON.stringify({ none: true });
+        return JSON.stringify({ items: am.review.items.length,
+          done: am.review.items.filter(function(i){return i.status==='done';}).length,
+          verdict: !!(am.review.verdict && am.review.verdict.content),
+          usage: am.review.items.every(function(i){return i.usage;}) && !!(am.review.verdict && am.review.verdict.usage) });
+      })()`);
+      const o = JSON.parse(t);
+      assert(!o.none && o.items === 2 && o.done === 2, '审查条目=' + t);
+      assert(o.verdict, '仲裁结论缺失');
+      assert(o.usage, '审查/仲裁用量未记账');
+      // 请求计数：2 路互审 + 1 路仲裁；仲裁提示词必须带审查发现与原回答编号
+      assert(requests.length === 3, '请求数=' + requests.length);
+      const last = lastReq();
+      const vPrompt = String(last.body.messages[last.body.messages.length - 1].content);
+      assert(vPrompt.indexOf('【审查 1】') >= 0 && vPrompt.indexOf('【回答 1】') >= 0, '仲裁提示词缺审查发现/回答编号');
+      // UI：两条发现 + 仲裁块 + 工具栏翻转为「重新审查」
+      const ui = await js("(function(){ var c=document.querySelector('.review-card'); return JSON.stringify({ items: c.querySelectorAll('.rv-item').length, verdict: !!c.querySelector('.rv-verdict'), retool: [].slice.call(document.querySelectorAll('.round-tools button')).some(function(x){return /重新审查/.test(x.textContent);}) }); })()");
+      const uio = JSON.parse(ui);
+      assert(uio.items === 2 && uio.verdict && uio.retool, 'UI=' + ui);
+      // 重开会话恢复：审查卡片还在（切走再切回）
+      await renameActiveDeep('审查会话');
+      await switchToDeep('旁观会话');
+      await switchToDeep('审查会话');
+      const back = await js("document.querySelectorAll('#messages .review-card').length");
+      assert(back === 1, '切回后审查卡片缺失: ' + back);
+      // 还原：关掉开关
+      await js(`(function(){ var t=document.querySelector('#tgl-review'); t.checked=false; t.dispatchEvent(new Event('change',{bubbles:true})); })()`);
+      return 'items=2 verdict=1 reqs=3';
+    });
+
+    await run('交叉审查：回答不足两份不给审（开关自动路径回退综合）', async () => {
+      await newSession();
+      await setChips(['p1::m1']);
+      await js(`(function(){ ['tgl-review','tgl-auto'].forEach(function(id){ var t=document.querySelector('#'+id); t.checked=true; t.dispatchEvent(new Event('change',{bubbles:true})); }); })()`);
+      await sleep(150);
+      requests.length = 0;
+      await sendText('单模型也要走审查开关');
+      assert(await waitDone(), '未完成');
+      await sleep(600); // all-done 钩子触发窗口
+      const t = await js(`(function(){
+        var am = MM.sessions.current().messages.filter(function(m){return m.role==='assistant';}).pop();
+        return JSON.stringify({ review: !!am.review, merged: !!(am.merge && am.merge.content) });
+      })()`);
+      const o = JSON.parse(t);
+      assert(!o.review, '单份回答不应触发审查');
+      assert(o.merged, '不足两份时应回退自动综合');
+      await js(`(function(){ ['tgl-review','tgl-auto'].forEach(function(id){ var t=document.querySelector('#'+id); t.checked=false; t.dispatchEvent(new Event('change',{bubbles:true})); }); })()`);
+      return 'review=false merged=true';
     });
 
     // ================= D. 设置边界 =================
