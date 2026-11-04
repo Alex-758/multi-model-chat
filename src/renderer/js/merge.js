@@ -255,10 +255,18 @@
     return vecOf(String(s).replace(NUM_RE, ' '));
   }
 
+  // 超大输入护栏：单条回答超过 8 万字符只对分析/来源池取前 8 万——正常场景
+  // （单回答 3 万字）完全不触发，纯防御病态输入把聚类拖进 O(n²) 深水区
+  const ANALYZE_CHAR_CAP = 80000;
+  function capText(s) {
+    s = String(s || '');
+    return s.length > ANALYZE_CHAR_CAP ? s.slice(0, ANALYZE_CHAR_CAP) : s;
+  }
+
   function analyze(results) {
     const points = [];
     for (const r of (results || [])) {
-      for (const p of splitPoints(r.content || '', 0)) {
+      for (const p of splitPoints(capText(r.content), 0)) {
         if (p.startsWith('|')) continue;
         // 句子粒度：段落级要点会把整段答案压成一条，共识/独有/冲突三分类会退化
         const pieces = splitSentences(p);
@@ -501,7 +509,7 @@
     const pool = [];
     const seen = new Set();
     for (const r of (results || [])) {
-      for (const t of splitPoints(r.content || '', 0)) {
+      for (const t of splitPoints(capText(r.content), 0)) {
         if (t.startsWith('|')) continue;
         // 整段要点 + 段内句子都进池：报告里改写的短句要能对上段中某一句，
         // 否则短句对整段的相似度会被段落长度稀释而漏配
@@ -518,13 +526,31 @@
     return pool;
   }
 
+  // IDF 加权池缓存（E7）：同一 pool 会被逐段 blockMatches 反复查询，
+  // idfOf + 全池加权在调用方已按 srcCache 复用 pool 实例——按实例缓存，
+  // 每个综合轮只算一次权重，不再每个段落重算
+  const wPoolCache = new WeakMap();
+  function weightedPool(pool) {
+    let w = wPoolCache.get(pool);
+    if (!w) {
+      const weight = idfOf(pool.map(p => p.v));
+      w = {
+        weight: weight,
+        wPool: pool.map(p => ({ modelId: p.modelId, name: p.name, text: p.text, v: weight(p.v) }))
+      };
+      wPoolCache.set(pool, w);
+    }
+    return w;
+  }
+
   // 一段报告文本与来源池的句子级匹配：每个命中的模型返回相似度最高的那条池内原句
   // （text 字段），供点击角标跳转后高亮来源回答里的具体段落。
   // IDF 以池子为语料：池子和查询句按同一权重比较，功能词不再抬相似度
   function blockMatches(text, pool) {
     if (!pool.length) return [];
-    const weight = idfOf(pool.map(p => p.v));
-    const wPool = pool.map(p => ({ modelId: p.modelId, name: p.name, text: p.text, v: weight(p.v) }));
+    const wp = weightedPool(pool);
+    const weight = wp.weight;
+    const wPool = wp.wPool;
     const sents = splitSentences(text);
     if (!sents.length) sents.push(text);
     const best = new Map(); // modelId -> 命中模型及最佳匹配句

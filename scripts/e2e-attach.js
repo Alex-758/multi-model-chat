@@ -507,14 +507,16 @@ async function main() {
       return true;
     })()`);
     assert(ok, '构造会话失败');
+    // 冷开装饰挪到空闲时段补（E2）：角标可能不在这帧出现，轮询等待
+    assert(await waitFor("document.querySelectorAll('.merge-card .merge-src').length >= 2", 5000),
+      '来源角标未在空闲时段渲染');
     const t1 = await js(`({
       badges: document.querySelectorAll('.merge-card .merge-src').length,
       dots: document.querySelectorAll('.merge-card .src-dot').length,
       flag: !!document.querySelector('.merge-card h2.sec-flag'),
       badgeTitle: (document.querySelector('.merge-card .merge-src') || {}).title || ''
     })`);
-    assert(t1.badges >= 2 && t1.dots >= t1.badges, JSON.stringify(t1));
-    assert(t1.flag, '分歧小节未加 sec-flag 标识');
+    assert(t1.badges >= 2 && t1.dots >= t1.badges, JSON.stringify(t1));    assert(t1.flag, '分歧小节未加 sec-flag 标识');
     assert(t1.badgeTitle.indexOf('来自：') === 0, '角标悬停应显示来源: ' + t1.badgeTitle);
     // 点击角标：跳到含 2048 的模型卡片并闪烁
     await js(`document.querySelector('.merge-card .merge-src').click()`);
@@ -537,6 +539,32 @@ async function main() {
     // 复制综合回答仍是纯文本（角标 innerText 只有色点无文字，复制不带入杂音）
     await js(`MM.util.copyTextFrom(document.querySelector('.merge-card .ac-body'))`);
     return '角标=' + t1.badges;
+  });
+
+  // ---------- 15b. 「+」路径直读核心与白名单（E5） ----------
+  await run('extractDocPath/readTextFile：主进程直读用户刚选的文件（不写临时文件）', async () => {
+    const imgs = require(path.join(ROOT, 'src', 'main', 'images'));
+    const tmpDoc = path.join(DATA, 'picked-note2.html');
+    fs.writeFileSync(tmpDoc, '<html><body><h1>HELLO-DOC-PATH</h1><p>正文段落</p></body></html>', 'utf8');
+    const r1 = await imgs.extractDocPath({ path: tmpDoc, name: 'picked-note2.html' });
+    assert(r1.text && r1.text.indexOf('HELLO-DOC-PATH') >= 0, 'html 提取: ' + String(r1.text).slice(0, 80));
+    assert(fs.existsSync(tmpDoc), '不应删除用户原件');
+    const tmpTxt = path.join(DATA, 'picked-gbk2.txt');
+    // GBK '测试-OK'（对严格 UTF-8 非法）：主进程解码回退链应与渲染层同口径
+    fs.writeFileSync(tmpTxt, Buffer.from([0xB2, 0xE2, 0xCA, 0xD4, 0x2D, 0x4F, 0x4B]));
+    const r2 = imgs.readTextFile(tmpTxt);
+    assert(r2.text.indexOf('测试-OK') >= 0, 'GBK 解码: ' + JSON.stringify(r2.text));
+    return 'OK';
+  });
+
+  await run('路径白名单：未经 files:pick 授权的路径一律拒绝', async () => {
+    const sneaky = path.join(DATA, 'sneaky.txt');
+    fs.writeFileSync(sneaky, 'SECRET', 'utf8');
+    let err = null;
+    try { await js(`api.readTextPath({ path: ${JSON.stringify(sneaky)} })`); }
+    catch (e) { err = e; }
+    assert(err && /授权/.test(String(err.message || err)), '应拒绝未授权路径: ' + (err ? err.message : '未报错'));
+    return '拒绝=' + String((err && err.message) || '').slice(0, 40);
   });
 
   server.close();

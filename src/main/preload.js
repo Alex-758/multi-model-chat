@@ -18,6 +18,12 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('app:flush', h);
     return () => ipcRenderer.removeListener('app:flush', h);
   },
+  // 主进程的一次性提示（如第二实例触发时聚焦当前窗口）
+  onNotice: (cb) => {
+    const h = (e, d) => cb(d);
+    ipcRenderer.on('app:notice', h);
+    return () => ipcRenderer.removeListener('app:notice', h);
+  },
   // 聊天
   send: (p) => ipcRenderer.invoke('chat:send', p),
   synthesize: (p) => ipcRenderer.invoke('chat:synthesize', p),
@@ -26,8 +32,8 @@ contextBridge.exposeInMainWorld('api', {
   listModels: (model) => ipcRenderer.invoke('models:list', { model }),
   testModel: (model) => ipcRenderer.invoke('models:test', { model }),
   getCatalog: (force) => ipcRenderer.invoke('catalog:get', force),
-  // 搜索
-  search: (query, count) => ipcRenderer.invoke('search:query', { query, count }),
+  // 搜索（requestId 用于 chat:stop 中止搜索阶段的网络请求）
+  search: (query, count, requestId) => ipcRenderer.invoke('search:query', { query, count, requestId }),
   testSearch: (cfg) => ipcRenderer.invoke('search:test', cfg),
   // 密钥保管（渲染层不持有密钥，只写入/清除）
   setSecret: (id, key) => ipcRenderer.invoke('secrets:set', { id, key }),
@@ -40,6 +46,9 @@ contextBridge.exposeInMainWorld('api', {
   saveImage: (p) => ipcRenderer.invoke('images:save', p),
   extractDoc: (p) => ipcRenderer.invoke('attach:extractDoc', p),
   pickFiles: () => ipcRenderer.invoke('files:pick'),
+  // 「+」路径直读（仅限最近一次选择框返回的路径）：文本解码 / 文档提取
+  readTextPath: (p) => ipcRenderer.invoke('files:readText', p),
+  extractDocPath: (p) => ipcRenderer.invoke('attach:extractDocPath', p),
   // 事件流
   onEvent: (cb) => {
     const h = (e, d) => cb(d);

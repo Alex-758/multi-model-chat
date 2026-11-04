@@ -1,29 +1,41 @@
 'use strict';
-// 通用联网搜索：必应（免费无需密钥）/ Tavily / 博查，结果注入对话上下文
+// 通用联网搜索：必应（免费无需密钥）/ Tavily / 博查，结果注入对话上下文。
+// opts.signal：外部中止（chat:stop 经 activeRequests 传入）——用户点停止时
+// 搜索请求立即中断，不再在主进程空跑到 15s 超时
 const BING_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
-async function bingSearch(query, count) {
-  // 双端点兜底：www 失败或解析不到结果时换 cn 端点再试一次
+// 把外部 signal 接到本次请求的 controller 上；已中止则直接抛"已停止"
+function wireExternal(signal, ctrl) {
+  if (!signal) return;
+  if (signal.aborted) throw new Error('已停止');
+  signal.addEventListener('abort', () => ctrl.abort(), { once: true });
+}
+
+async function bingSearch(query, count, opts) {
+  // 双端点兜底：www 失败或解析不到结果时换 cn 端点再试一次（已中止则不再重试）
   const endpoints = [
     'https://www.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=zh-CN&count=' + Math.max(count + 4, 10),
     'https://cn.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=zh-CN&count=' + Math.max(count + 4, 10)
   ];
   let lastErr = null;
   for (const url of endpoints) {
+    if (opts && opts.signal && opts.signal.aborted) throw new Error('已停止');
     try {
-      const out = await bingAttempt(url, count);
+      const out = await bingAttempt(url, count, opts);
       if (out.length) return out;
       lastErr = new Error('必应搜索未解析到结果（可能被临时限流），可稍后重试或配置 Tavily/博查');
     } catch (e) {
+      if (opts && opts.signal && opts.signal.aborted) throw new Error('已停止');
       lastErr = e;
     }
   }
   throw lastErr || new Error('必应搜索失败');
 }
 
-async function bingAttempt(url, count) {
+async function bingAttempt(url, count, opts) {
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), 15000);
+  wireExternal(opts && opts.signal, ctrl);
   try {
     const res = await fetch(url, {
       headers: { 'User-Agent': BING_UA, 'Accept-Language': 'zh-CN,zh;q=0.9' },
@@ -46,14 +58,15 @@ async function bingAttempt(url, count) {
   } finally { clearTimeout(timeout); }
 }
 
-async function webSearch(cfg, query, count = 6) {
+async function webSearch(cfg, query, count = 6, opts) {
   const provider = cfg && cfg.provider;
   const key = (cfg && cfg.apiKey || '').trim();
   if (!provider || provider === 'none') return null;
-  if (provider === 'bing') return bingSearch(query, count);
+  if (provider === 'bing') return bingSearch(query, count, opts);
 
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), 15000);
+  wireExternal(opts && opts.signal, ctrl);
   try {
     if (!key) throw new Error('搜索服务商已选但 API 密钥为空，请在设置中填写');
     if (provider === 'tavily') {

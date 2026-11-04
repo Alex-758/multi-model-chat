@@ -22,6 +22,8 @@ if (!app.requestSingleInstanceLock()) {
 app.on('second-instance', () => {
   const w = BrowserWindow.getAllWindows()[0];
   if (w) { if (w.isMinimized()) w.restore(); w.focus(); }
+  // 用户再点一次图标时给可见反馈：聚焦已有窗口 + 窗口内提示（否则会像"点了没反应"）
+  if (w && !w.isDestroyed()) w.webContents.send('app:notice', '应用已在运行，已切换到当前窗口');
 });
 
 let win = null;
@@ -110,12 +112,19 @@ function createWindow() {
     e.preventDefault();
     if (/^https?:/i.test(url)) shell.openExternal(url);
   });
-  // F12 打开开发者工具，便于排查
-  win.webContents.on('before-input-event', (e, input) => {
-    if (input.type === 'keyDown' && input.key === 'F12') {
-      win.webContents.toggleDevTools();
-      e.preventDefault();
-    }
+  // F12 打开开发者工具便于排查（仅开发态；打包后不暴露，防止误触与 API 面暴露）
+  if (!app.isPackaged) {
+    win.webContents.on('before-input-event', (e, input) => {
+      if (input.type === 'keyDown' && input.key === 'F12') {
+        win.webContents.toggleDevTools();
+        e.preventDefault();
+      }
+    });
+  }
+  // 权限请求一律拒绝：本应用不需要摄像头/麦克风/通知等任何设备权限，
+  // 显式全拒走 fail-closed，而不是依赖 Chromium 的默认放行
+  win.webContents.session.setPermissionRequestHandler((wc, permission, callback) => {
+    callback(false);
   });
   // 关闭前先让渲染层把内存里的在途数据落盘（流式半成品、未保存的记账）：
   // 渲染层收到 app:flush 后保存并再次 close 放行；渲染层已死时由超时兜底强关
@@ -214,13 +223,13 @@ ipcMain.handle('store:save', (e, data) => {
       : (Array.isArray(db.sessions) ? db.sessions : [])
   };
   const r = store.save(db);
-  // 多实例冲突：旧数据已备份，弹窗提示一次
+  // 多实例冲突：旧数据已带时间戳备份，弹窗提示一次
   if (r && r.conflict && !conflictNotified) {
     conflictNotified = true;
     dialog.showMessageBox({
       type: 'warning',
       title: '检测到多实例写入',
-      message: '检测到另一个 Multi-Model Chat 实例修改了数据文件。\n\n旧数据已自动备份为 store.json.bak（位于 %APPDATA%\\Multi-Model Chat），本次保存可能覆盖另一实例的最新改动。请尽量避免同时运行多个实例。'
+      message: '检测到另一个 Multi-Model Chat 实例修改了数据文件。\n\n旧数据已自动备份为 store.json.bak-<时间戳>（位于 %APPDATA%\\Multi-Model Chat，保留最近 5 份），本次保存可能覆盖另一实例的最新改动。请尽量避免同时运行多个实例。'
     });
   }
   return true;
@@ -269,10 +278,10 @@ ipcMain.handle('chat:send', (e, payload) => {
         send({ type: 'start' });
         const t0 = Date.now();
         try {
-          const { content, reasoning, usage } = await providers.streamChat(resolveModel(model), messages, {
+          const { content, reasoning, usage, finish } = await providers.streamChat(resolveModel(model), messages, {
             searchOn, signal: ac.signal, onEvent: send
           });
-          send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage });
+          send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage, finish: finish || undefined });
         } catch (err) {
           // 已停止的回答也会带出已产生的 token 用量
           send({ type: 'error', message: (err && err.message) || String(err), usage: (err && err.usage) || null });
@@ -301,10 +310,10 @@ ipcMain.handle('chat:synthesize', (e, payload) => {
     send({ type: 'start' });
     const t0 = Date.now();
     try {
-      const { content, usage } = await providers.streamChat(resolveModel(model), messages, {
+      const { content, usage, finish } = await providers.streamChat(resolveModel(model), messages, {
         searchOn: false, signal: ac.signal, onEvent: send
       });
-      send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage });
+      send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage, finish: finish || undefined });
     } catch (err) {
       send({ type: 'error', message: (err && err.message) || String(err), usage: (err && err.usage) || null });
     }
@@ -374,7 +383,19 @@ ipcMain.handle('catalog:get', async (e, force) => {
 ipcMain.handle('images:save', (e, p) => images.saveImage(p));
 // PDF/Word 等文档全文提取（本机 markitdown）
 ipcMain.handle('attach:extractDoc', (e, p) => images.extractDoc(p));
-// 「+」按钮：原生文件选择框。沙箱渲染层读不了任意路径，由主进程读完按 base64 回传
+
+// 「+」按钮选中的文件路径白名单（10 分钟有效）：路径版的提取/解码只接受
+// 最近一次选择框真正返回的文件，渲染层被注入也无法借道读任意本地文件
+const pickedPaths = new Map(); // path -> expiresAt
+function consumePickedPath(p) {
+  const exp = pickedPaths.get(p);
+  if (!exp || exp < Date.now()) return false;
+  pickedPaths.delete(p);
+  return true;
+}
+// 「+」按钮：原生文件选择框。沙箱渲染层读不了任意路径——
+// 图片回传 base64（渲染层要压缩），文本/文档只回传元数据，
+// 内容走 files:readText / attach:extractDocPath 按白名单路径直读（E5：base64 不再两跳过 IPC）
 ipcMain.handle('files:pick', async () => {
   const r = await dialog.showOpenDialog(win, {
     title: '选择图片或文档附件',
@@ -394,20 +415,41 @@ ipcMain.handle('files:pick', async () => {
     try { st = fs.statSync(p); } catch (err) { continue; }
     if (!st.isFile()) continue;
     if (st.size > 25 * 1024 * 1024) { tooLarge.push(path.basename(p)); continue; }
+    const name = path.basename(p);
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    const mime = IMG_MIME[ext] || '';
+    // 只有图片需要把字节交给渲染层（压缩要用 canvas）；其余只给句柄，内容按需直读
     try {
       files.push({
-        name: path.basename(p),
-        mime: IMG_MIME[path.extname(p).slice(1).toLowerCase()] || '',
-        base64: fs.readFileSync(p).toString('base64')
+        name, mime, path: p, size: st.size,
+        base64: mime ? fs.readFileSync(p).toString('base64') : undefined
       });
+      pickedPaths.set(p, Date.now() + 10 * 60 * 1000);
     } catch (err) { /* 单个文件读不了就跳过，不阻断其他文件 */ }
   }
   return { files, tooLarge };
 });
+// 白名单路径的文本附件解码（GBK/UTF-16 在主进程处理，几 MB 文本不再绕渲染层一圈）
+ipcMain.handle('files:readText', (e, p) => {
+  const file = p && String(p.path || '');
+  if (!file || !consumePickedPath(file)) throw new Error('路径未被授权读取（请重新通过「+」选择）');
+  return images.readTextFile(file);
+});
+// 白名单路径的文档提取（大文档不再 base64 两跳、不再写临时文件）
+ipcMain.handle('attach:extractDocPath', (e, p) => {
+  const file = p && String(p.path || '');
+  if (!file || !consumePickedPath(file)) throw new Error('路径未被授权读取（请重新通过「+」选择）');
+  return images.extractDocPath({ path: file, name: p.name });
+});
 
 // ---------- IPC：联网搜索 ----------
-ipcMain.handle('search:query', (e, { query, count }) => {
-  return search.webSearch((db.config && db.config.search) || {}, query, count);
+// requestId：与 chat:send 同一张 activeRequests 表，chat:stop 即可中止搜索阶段的
+// 网络请求（此前停止只覆盖 chat，搜索会在主进程跑满 15s 超时）
+ipcMain.handle('search:query', (e, { query, count, requestId }) => {
+  let ac = null;
+  if (requestId) { ac = new AbortController(); activeRequests.set(requestId, ac); }
+  return search.webSearch((db.config && db.config.search) || {}, query, count, { signal: ac && ac.signal })
+    .finally(() => { if (ac) activeRequests.delete(requestId); });
 });
 // 测试搜索：密钥由主进程合并（渲染层只传服务商选择）
 ipcMain.handle('search:test', (e, cfg) => {
@@ -417,7 +459,8 @@ ipcMain.handle('search:test', (e, cfg) => {
 });
 
 // ---------- IPC：数据导入导出 ----------
-// 导出直接读主进程数据（含密钥——这是用户自己的完整备份）
+// 导出直接读主进程数据（含密钥——这是用户自己的完整备份）；
+// 图片附件以内联 base64 一并打包（images.exportAttach），跨机恢复不再悬空
 ipcMain.handle('data:export', async () => {
   const r = await dialog.showSaveDialog(win, {
     title: '导出数据',
@@ -425,7 +468,10 @@ ipcMain.handle('data:export', async () => {
     filters: [{ name: 'JSON', extensions: ['json'] }]
   });
   if (r.canceled || !r.filePath) return null;
-  fs.writeFileSync(r.filePath, JSON.stringify({ config: db.config, sessions: db.sessions }, null, 1), 'utf8');
+  fs.writeFileSync(r.filePath, JSON.stringify({
+    config: db.config,
+    sessions: images.exportAttach(db.sessions)
+  }, null, 1), 'utf8');
   return r.filePath;
 });
 // 导出对话文本（单轮 / 整会话共用）：内容由渲染层拼好传过来，这里只负责保存对话框与写盘
@@ -457,6 +503,8 @@ ipcMain.handle('data:import', async () => {
     // 会话条目必须过滤：null/字符串会让渲染层排序直接抛错，写回磁盘后下次启动即不可用
     const sessions = imported.sessions.filter(s => s && typeof s === 'object');
     for (const s of sessions) if (!Array.isArray(s.messages)) s.messages = [];
+    // 备份里内联的图片附件物化回 images/ 目录并改写引用（旧格式备份无 dataB64，原样通过）
+    await images.importAttach(sessions);
     // 覆盖前给当前数据留一份副本：导入是覆盖性操作，选错文件要能退回来
     const backupPath = store.snapshot('pre-import');
     db = { config: imported.config, sessions: sessions };

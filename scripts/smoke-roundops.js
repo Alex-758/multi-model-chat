@@ -155,15 +155,18 @@ app.whenReady().then(async () => {
   check('token 统计不因重综合翻倍', o.tokens0 === 1900 && o.tokens1 === 1900, r);
   check('重综合生成新内容', o.merged === true, r);
 
-  // 结果在快照之后发生过变化（模拟单模型重试：all-done 已把新结果入池，未标记）：
-  // 再重综合 → 副本压栈。结果两批各计一次，副本批只计综合
+  // 结果在快照之后发生过变化（模拟单模型重试）：all-done 现在给这种快照打
+  // partial 标记（只真实重发了一个模型），sessionTokens 只计 partialModelId
+  // 那一条的用量——未重试模型的用量不再被重复计入会话累计。
+  // 再重综合 → 副本压栈，副本只计综合
   r = await js(`(async function(){
     var s = MM.sessions.current();
     var am = s.messages[1];
     am.results[1].content = '回答B（重试后）';
     am.results[1].usage = {input:0, output:600};
     am.versions.push({results:JSON.parse(JSON.stringify(am.results)),
-      merge:JSON.parse(JSON.stringify(am.merge)), at:Date.now()});
+      merge:JSON.parse(JSON.stringify(am.merge)), at:Date.now(),
+      partial:true, partialModelId:'m2'});
     am.active = am.versions.length - 1;
     await MM.chat._doMergeForTest('rM', {redo:true});
     return JSON.stringify({
@@ -174,7 +177,9 @@ app.whenReady().then(async () => {
       v3Inherited:am.versions[3].inherited === true});
   })()`);
   o = JSON.parse(r);
-  check('重试后重综合：两批结果各计一次、副本只计综合', o.v === 4 && o.tokens === 4000, r);
+  // v0 整批 1900（A 1500 + B 400）+ v1 partial 只计 m2（600）= 2500：
+  // 未重试的 m1 不再随快照重复计一次
+  check('重试后重综合：partial 快照只计重发模型、副本只计综合', o.v === 4 && o.tokens === 2500, r);
   check('重试前后两版结果均可回滚', o.v0Intact === true && o.v2Intact === true, r);
   check('重综合副本带 inherited 标记', o.v3Inherited === true, r);
 

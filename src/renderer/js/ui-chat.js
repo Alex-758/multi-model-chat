@@ -16,6 +16,9 @@ window.MM = window.MM || {};
   // 轮次令牌：每次 dispatchRound 自增。停止或开始新一轮后，仍停留在搜索阶段的旧轮次
   // 醒来时令牌已过期，必须放弃——只看 streaming 是否为真值会把新轮次误当成"没被取消"。
   let runToken = 0;
+  // 当前搜索阶段的请求 id：stopAll 同时中止它（此前停止只覆盖 chat，搜索会在
+  // 主进程空跑到 15s 超时）
+  let curSearchId = null;
   // 处于联网搜索阶段（尚未建立 pending）的轮次数。此时收到上一轮的 all-done 不能把
   // streaming 清空，否则刚开始的新一轮会被误判为"已取消"。
   let searchPhase = 0;
@@ -129,9 +132,7 @@ window.MM = window.MM || {};
       return;
     }
     if (file.size > MAX_DOC_BYTES) { U.toast('文件超过 20MB，无法作为附件', true); return; }
-    const a = { kind: 'file', name: file.name || '文档', text: '' };
-    pendingAttach.push(a);
-    renderAttachBar();
+    const a = beginDocAttach(file.name);
     a.ready = (async () => {
       try {
         let text = '';
@@ -153,6 +154,14 @@ window.MM = window.MM || {};
       renderAttachBar();
     })();
     await a.ready;
+  }
+
+  // 文本/文档附件的占位芯片（拖拽与「+」路径单跳共用）
+  function beginDocAttach(name) {
+    const a = { kind: 'file', name: name || '文档', text: '' };
+    pendingAttach.push(a);
+    renderAttachBar();
+    return a;
   }
 
   function attachChip(a) {
@@ -572,6 +581,25 @@ window.MM = window.MM || {};
     return card;
   }
 
+  // 流式期间模型回传了搜索引用（annotations）：在卡片上补/重建 📎 来源区。
+  // 与 answerCard 建卡时的来源区同一结构，点击行为也一致（http(s) 白名单）
+  function refreshSourcesRow(card, res) {
+    if (!card || !res.sources || !res.sources.length) return;
+    let det = card.querySelector('details.sources');
+    if (!det) {
+      det = U.el('details', { class: 'sources' });
+      card.insertBefore(det, card.querySelector('.ac-body'));
+    }
+    det.innerHTML = '';
+    det.appendChild(U.el('summary', {}, '📎 搜索来源 (' + res.sources.length + ')'));
+    for (const r of res.sources) {
+      const url = String(r.url || '');
+      det.appendChild(/^https?:\/\//i.test(url)
+        ? U.el('a', { href: url, target: '_blank', rel: 'noopener' }, r.title || url)
+        : U.el('span', { class: 'src-item' }, r.title || url));
+    }
+  }
+
   // 缓存一张回答卡片里高频访问的节点（状态、正文、思考过程）
   function cardRefs(card) {
     return {
@@ -599,6 +627,10 @@ window.MM = window.MM || {};
       if (ms > 0) h += '<span class="badge">' + U.fmtMs(ms) + '</span>';
       const chars = num(res.chars);
       if (chars > 0) h += '<span class="badge">' + chars + ' 字</span>';
+      // 非正常终止要标记出来（finish_reason 此前全程未读）：截断/拦截的回答
+      // 看起来和完整回答一样，用户会误以为内容是全的
+      if (res.finish === 'length') h += '<span class="badge warn" title="回答因达到最大输出长度被截断，可调大该模型的最大输出">已截断</span>';
+      else if (res.finish === 'content_filter') h += '<span class="badge err" title="回答被内容安全策略拦截，可能不完整">内容被拦截</span>';
       return h + usageBadge(res.usage);
     }
     if (res.status === 'error') return '<span class="badge err">✗ 失败</span>' + usageBadge(res.usage);
@@ -648,8 +680,9 @@ window.MM = window.MM || {};
     if (live) body.textContent = msg.content || '';
     else body.innerHTML = mdHtml(msg, msg.content);
     card.appendChild(body);
-    // 非流式（历史重绘/前端合并完成）：渲染来源角标与分歧小节标识
-    if (!live) decorateMergeSources(body, msg, results, roundId);
+    // 非流式（历史重绘/前端合并完成）：渲染来源角标与分歧小节标识。
+    // 冷开大会话逐卡装饰是秒级开销（E2）：空闲时段补，先出内容后出角标
+    if (!live) decorateMergeSourcesDeferred(body, msg, results, roundId);
     card.appendChild(U.el('div', { class: 'card-foot' },
       U.el('button', { class: 'ac-copy', onclick: function () { U.copyTextFrom(body); U.toast('已复制'); } }, '复制')));
     MM.md.bindCopy(card);
@@ -677,23 +710,41 @@ window.MM = window.MM || {};
     return e;
   }
 
+  // 冷开大会话时逐卡装饰（分析+匹配+溯源）是秒级一次性开销（E2）：挪到空闲时段
+  // 逐卡补——卡片先出内容，角标/溯源稍后跟上；卡片被替换/移除则跳过。
+  // finalize 路径（单卡）保持同步，保证综合完成瞬间角标即可点
+  function decorateMergeSourcesDeferred(body, msg, results, roundId) {
+    if (!body || body._decoQueued) return;
+    body._decoQueued = true;
+    const run = function () {
+      body._decoQueued = false;
+      if (!body.isConnected) return;
+      decorateMergeSources(body, msg, results, roundId);
+    };
+    if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 1200 });
+    else setTimeout(run, 200);
+  }
+
   function decorateMergeSources(body, msg, results, roundId) {
     if (!msg || !msg.content || !results || !results.length) return;
     const entry = srcCacheEntry(msg, results);
     if (!entry.pool.length) return;
-    for (const el of Array.from(body.querySelectorAll('p, li'))) {
-      if (el.querySelector('.merge-src')) continue;
-      const text = (el.innerText || '').trim();
-      if (text.length < 12) continue; // 短标题类不标
+    // 两阶段（E3）：先一次性读完全部块的 innerText（整批只触发一次布局），
+    // 再做全部匹配与追加——逐块"读布局→写 DOM"交替会让每块强制重排一次
+    const blocks = Array.from(body.querySelectorAll('p, li'))
+      .map(el => ({ el: el, text: (el.innerText || '').trim() }));
+    for (const b of blocks) {
+      if (b.el.querySelector('.merge-src')) continue;
+      if (b.text.length < 12) continue; // 短标题类不标
       // hits：每个命中模型 + 池内最佳匹配原句（点击跳转后高亮具体段落用）
-      let hits = entry.hits.get(text);
-      if (!hits) { hits = MM.merge.blockMatches(text, entry.pool); entry.hits.set(text, hits); }
+      let hits = entry.hits.get(b.text);
+      if (!hits) { hits = MM.merge.blockMatches(b.text, entry.pool); entry.hits.set(b.text, hits); }
       if (!hits.length) continue;
       const models = hits.map(h => ({ modelId: h.modelId, name: h.name }));
       // 每个模型的色点各自可点，多来源块不再只能跳到第一家；
       // sup 上的点击兜底保持旧行为（点中色点间缝隙时跳第一个可用来源，
       // 色点自身 onclick 已 stopPropagation，不会双触发）
-      el.appendChild(U.el('sup', {
+      b.el.appendChild(U.el('sup', {
         class: 'merge-src',
         title: '来自：' + models.map(m => m.name).join('、'),
         onclick: function (e) {
@@ -719,12 +770,11 @@ window.MM = window.MM || {};
     // 报告后校验（零 token，结果随 entry 缓存，每次重绘不重复算）：
     // a) 数值溯源：报告中的数字在来源回答里找不到同值（中文数量级换算后）→ 块尾加待核实标记
     if (!entry.srcNums) entry.srcNums = MM.merge.sourceNums(results);
-    for (const el of Array.from(body.querySelectorAll('p, li'))) {
-      if (el.querySelector('.merge-num')) continue;
-      const text = (el.innerText || '').trim();
-      if (text.length < 6) continue;
-      const missing = MM.merge.numsAudit(text, entry.srcNums);
-      if (missing.length) el.appendChild(U.el('sup', {
+    for (const b of blocks) {
+      if (b.el.querySelector('.merge-num')) continue;
+      if (b.text.length < 6) continue;
+      const missing = MM.merge.numsAudit(b.text, entry.srcNums);
+      if (missing.length) b.el.appendChild(U.el('sup', {
         class: 'merge-num',
         title: '数值 ' + missing.join('、') + ' 未在原始回答中出现，可能为推算或笔误，请留意核实'
       }));
@@ -804,7 +854,16 @@ window.MM = window.MM || {};
     for (const v of (versions || [])) {
       if (!v) continue;
       if (v.merge) add(v.merge.usage);
-      if (!v.inherited) for (const r of (v.results || [])) if (r) add(r.usage);
+      if (!v.inherited) {
+        // partial 快照只计重发的那一个模型（与 sessionTokens 同口径），
+        // 否则裁剪时又把旧模型的用量多折一次
+        if (v.partial && v.partialModelId) {
+          const r = (v.results || []).find(x => x && x.modelId === v.partialModelId);
+          if (r) add(r.usage);
+        } else {
+          for (const r of (v.results || [])) if (r) add(r.usage);
+        }
+      }
     }
     return sum;
   }
@@ -1354,14 +1413,22 @@ window.MM = window.MM || {};
           scrollBottom(true);
         }
         searchPhase++;
+        curSearchId = nextReqId('sr');
         try {
-          searchResults = await api.search(userMsg.content, 6);
+          searchResults = await api.search(userMsg.content, 6, curSearchId);
           if (!searchResults) U.toast('联网搜索未返回结果（可在设置中检查搜索引擎）');
         } catch (e) {
-          U.toast('联网搜索失败：' + e.message, true);
-          searchResults = null;
+          // 被停止（chat:stop 经 activeRequests 中止）或已开新一轮：属预期，静默；
+          // 其余失败照常提示
+          if (runToken !== myToken || /已停止/.test(e.message || '')) {
+            searchResults = null;
+          } else {
+            U.toast('联网搜索失败：' + e.message, true);
+            searchResults = null;
+          }
         } finally {
           searchPhase--;
+          curSearchId = null;
         }
         if (searchResults && searchResults.length) userMsg.sources = searchResults;
       }
@@ -1481,6 +1548,13 @@ window.MM = window.MM || {};
       if (hasUsefulResults(am.results)) {
         am.versions = am.versions || [];
         const snap = snapshotOf(am);
+        // 单模型重试的快照只真实重发了一个模型：其余条目是从上一份快照原样
+        // 带来的旧数据。打 partial 标记，sessionTokens/prunedTokensOf 对这种
+        // 快照只计 partialModelId 那一条的用量，会话累计不再重复计数
+        if (ctx.singleRetry && ctx.retryModelId) {
+          snap.partial = true;
+          snap.partialModelId = ctx.retryModelId;
+        }
         if (!am.versions.length || JSON.stringify(am.versions[am.versions.length - 1].results) !== JSON.stringify(snap.results)) {
           am.versions.push(snap);
         }
@@ -1526,7 +1600,7 @@ window.MM = window.MM || {};
       if (ev.type === 'start') { status.innerHTML = '<span class="spinner"></span> 生成中…'; }
       else if (ev.type === 'delta') {
         ctx.mergeMsg.content += ev.text;
-        scheduleStreamPaint(body, function () { if (!ctx.mergeFailed) body.textContent = ctx.mergeMsg.content; });
+        scheduleStreamPaint(body, function () { if (!ctx.mergeFailed) paintStreamText(body, ctx.mergeMsg.content); });
       }
       else if (ev.type === 'done' && ev.usage) {
         // 综合也是真实请求，占用量要一并记下并显示，否则统计会漏掉这一项
@@ -1573,7 +1647,7 @@ window.MM = window.MM || {};
       res.content += ev.text;
       // 绘制前检查状态：error/done 事件可能在同一帧内先到，
       // 不能让排队的旧绘制把错误信息/渲染结果覆盖回纯文本
-      scheduleStreamPaint(body, function () { if (res.status === 'streaming') body.textContent = res.content; });
+      scheduleStreamPaint(body, function () { if (res.status === 'streaming') paintStreamText(body, res.content); });
     } else if (ev.type === 'reasoning') {
       res.reasoning = (res.reasoning || '') + ev.text;
       if (!refs.reasoning) {
@@ -1588,10 +1662,21 @@ window.MM = window.MM || {};
       }
       // 与正文一样按帧合帧：长思考链下每个 delta 全量重写 textContent 是 O(n²)
       const rBody = refs.reasoning;
-      if (rBody) scheduleStreamPaint(rBody, function () { if (res.status === 'streaming') rBody.textContent = res.reasoning; });
+      if (rBody) scheduleStreamPaint(rBody, function () { if (res.status === 'streaming') paintStreamText(rBody, res.reasoning); });
+    } else if (ev.type === 'sources') {
+      // 模型原生联网的引用注回（OpenRouter/OpenAI 的 url_citation 等）：
+      // 并入该回答的来源列表（按 url 去重），卡片上补 📎 来源区
+      const list = (ev.sources || []).filter(s => s && s.url && !(res.sources || []).some(x => x.url === s.url));
+      if (list.length) {
+        res.sources = (res.sources || []).concat(list);
+        refreshSourcesRow(card, res);
+      }
     } else if (ev.type === 'done') {
       res.status = 'done'; res.ms = ev.ms; res.chars = ev.chars;
       if (ev.usage) res.usage = ev.usage; // token 用量（服务端回传，无则不显示）
+      // 终止原因：length=被 max_tokens 截断、content_filter=被内容安全拦截——
+      // 不标记的话用户会把截断/拦截的回答当成完整回答（C5）
+      if (ev.finish) res.finish = ev.finish;
       status.innerHTML = statusHtml(res);
       body.classList.remove('streaming');
       body.classList.add('md');
@@ -1633,7 +1718,12 @@ window.MM = window.MM || {};
       // 停止失败不应变成未处理的 Promise 拒绝
       Promise.resolve(api.stop(id)).catch(function () { });
     }
-    // 搜索阶段尚无 pending 可中止：立即复位并让令牌失效，dispatchRound 在搜索返回后检测到即退出
+    // 搜索阶段尚无 pending 可中止：中止搜索请求本身，并立即复位、让令牌失效，
+    // dispatchRound 在搜索返回后检测到即退出
+    if (curSearchId) {
+      Promise.resolve(api.stop(curSearchId)).catch(function () { });
+      curSearchId = null;
+    }
     streaming = null;
     runToken++;
     setSendBtn(false);
@@ -2279,9 +2369,9 @@ window.MM = window.MM || {};
     card.appendChild(U.el('div', { class: 'card-foot' },
       U.el('button', { class: 'ac-copy', onclick: function () { U.copyTextFrom(body); U.toast('已复制'); } }, '复制')));
     MM.md.bindCopy(card);
-    // 历史重绘：仲裁结论渲染来源角标与数值溯源（复用综合回答的后校验）
+    // 历史重绘：仲裁结论渲染来源角标与数值溯源（复用综合回答的后校验，空闲时段补）
     if (!live && review.verdict && review.verdict.content) {
-      decorateMergeSources(card.querySelector('.rv-verdict-body'), review.verdict, results, roundId);
+      decorateMergeSourcesDeferred(card.querySelector('.rv-verdict-body'), review.verdict, results, roundId);
     }
     return card;
   }
@@ -2478,7 +2568,7 @@ window.MM = window.MM || {};
       if (ev.type === 'start') { if (refs) refs.status.innerHTML = '<span class="spinner"></span>'; }
       else if (ev.type === 'delta') {
         v.content += ev.text;
-        if (refs) scheduleStreamPaint(refs.body, function () { refs.body.textContent = v.content; });
+        if (refs) scheduleStreamPaint(refs.body, function () { paintStreamText(refs.body, v.content); });
       }
       else if (ev.type === 'done' && ev.usage) { v.usage = ev.usage; v.ms = ev.ms || 0; }
       else if (ev.type === 'error') {
@@ -2502,7 +2592,7 @@ window.MM = window.MM || {};
       if (refs) { refs.status.innerHTML = '<span class="spinner"></span>'; refs.body.classList.add('streaming'); }
     } else if (ev.type === 'delta') {
       it.content += ev.text;
-      if (refs) scheduleStreamPaint(refs.body, function () { refs.body.textContent = it.content; });
+      if (refs) scheduleStreamPaint(refs.body, function () { paintStreamText(refs.body, it.content); });
     } else if (ev.type === 'done') {
       it.status = 'done'; it.usage = ev.usage || null; it.ms = ev.ms || 0;
       if (refs) {
@@ -2625,13 +2715,39 @@ window.MM = window.MM || {};
     });
   }
 
+  // 流式绘制只追加不重写（E6）：长回答末段每帧整段 textContent 替换是 O(n²)
+  // 字符复制。维护流式文本节点引用与已绘长度：内容单调增长时 appendData 只写
+  // 增量；节点被终态 innerHTML 重建或内容回退时自动回退整写
+  function paintStreamText(el, text) {
+    const node = el._streamNode;
+    if (node && node.parentNode === el && el.childNodes.length === 1 && node.data.length === el._streamLen) {
+      if (text.length === el._streamLen) return;
+      if (text.length > el._streamLen) {
+        node.appendData(text.slice(el._streamLen));
+        el._streamLen = text.length;
+        return;
+      }
+    }
+    el.textContent = text;
+    el._streamNode = el.firstChild;
+    el._streamLen = text.length;
+  }
+
   function autoResize() {
     const ta = U.$('#input');
-    ta.style.height = 'auto';
-    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+    const v = ta.value;
+    // 超长文本（>10 万字符）跳过整框布局与 O(n) trim（E4）：粘贴 10MB 后每个键入
+    // 都要付一次全量换行布局 + 整串复制。高度已钳在 200px，大文本态直接复用
+    if (v.length > 100000) {
+      if (!ta._bigInput) { ta._bigInput = true; ta.style.height = '200px'; }
+    } else {
+      ta._bigInput = false;
+      ta.style.height = 'auto';
+      ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+    }
     const btn = U.$('#btn-send');
     const wasReady = btn.classList.contains('ready');
-    const ready = btn.classList.contains('stop') || ta.value.trim().length > 0 || pendingAttach.some(a => !a.failed);
+    const ready = btn.classList.contains('stop') || (v.length > 0 && (v.length > 100000 || v.trim().length > 0)) || pendingAttach.some(a => !a.failed);
     btn.classList.toggle('ready', ready);
     // 从"空"到"有内容"的瞬间脉冲一次提示可发送
     if (ready && !wasReady) {
@@ -2683,8 +2799,9 @@ window.MM = window.MM || {};
     // 「+」按钮：原生文件选择框加附件
     const attBtn = U.$('#btn-attach');
     if (attBtn) attBtn.addEventListener('click', pickAttachments);
-    // 「+」按钮：主进程弹原生文件选择框并读回内容，这里转成 File 对象走同一条附件处理链
-  // （图片压缩/OCR、文档提取、数量与大小上限全部复用）
+  // 「+」按钮：原生文件选择框加附件。单跳路由（E5）：图片回传 base64（渲染层
+  // 压缩要用 canvas，保留这一跳）；文本/文档只拿元数据，内容经白名单路径由主进程
+  // 直读/直提取——大文档不再 base64 两跳过 IPC、不再写临时文件
   async function pickAttachments() {
     let r;
     try {
@@ -2696,10 +2813,44 @@ window.MM = window.MM || {};
     if (!r) return; // 用户取消了选择框
     for (const name of (r.tooLarge || [])) U.toast('「' + name + '」超过大小上限，已跳过', true);
     for (const f of (r.files || [])) {
-      const bin = atob(f.base64);
-      const arr = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-      await addDroppedFile(new File([arr], f.name || '附件', { type: f.mime || '' }));
+      const mime = String(f.mime || '').toLowerCase();
+      if (IMAGE_MIMES[mime]) {
+        const bin = atob(f.base64);
+        const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        await addImageBlob(new File([arr], f.name || '图片', { type: mime }));
+        continue;
+      }
+      const ext = ((f.name || '').split('.').pop() || '').toLowerCase();
+      const isText = TEXT_EXTS.indexOf(ext) >= 0;
+      if (!isText && DOC_EXTS.indexOf(ext) < 0) {
+        U.toast('暂不支持「' + (f.name || '该文件') + '」：文本类/PDF/Office 文档可直接拖入', true);
+        continue;
+      }
+      if ((f.size || 0) > MAX_DOC_BYTES) { U.toast('文件超过 20MB，无法作为附件', true); continue; }
+      const a = beginDocAttach(f.name);
+      a.ready = (async () => {
+        try {
+          let text = '';
+          if (isText) {
+            const rr = await api.readTextPath({ path: f.path });
+            text = (rr && rr.text) || '';
+          } else {
+            const rr = await api.extractDocPath({ path: f.path, name: f.name });
+            text = (rr && rr.text) || '';
+            if (!text.trim()) throw new Error('未能从文档中提取到文字');
+          }
+          if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); // 去 BOM
+          if (text.length > MAX_DOC_CHARS) text = text.slice(0, MAX_DOC_CHARS) + '\n……（内容过长，已截断）';
+          a.text = text;
+          a.chars = text.length;
+        } catch (e) {
+          a.failed = true;
+          U.toast('附件「' + a.name + '」处理失败：' + ((e && e.message) || e), true);
+        }
+        renderAttachBar();
+      })();
+      await a.ready;
     }
     const inp = U.$('#input');
     if (inp) inp.focus();

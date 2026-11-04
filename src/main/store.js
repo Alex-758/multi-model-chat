@@ -118,8 +118,12 @@ function save(data) {
   if (lastMtime && cur && cur !== lastMtime) {
     conflict = true;
     try {
-      fs.copyFileSync(file(), file() + '.bak');
-      console.warn('[store] 检测到 store.json 被其他实例修改，旧数据已备份为 store.json.bak');
+      // 带时间戳副本，保留最近 5 份：固定名 .bak 会被乒乓写入的下一轮覆盖，
+      // 两实例交替写两次后"最早的那份别人家数据"就永远丢了
+      const bak = file() + '.bak-' + Date.now();
+      fs.copyFileSync(file(), bak);
+      pruneBaks();
+      console.warn('[store] 检测到 store.json 被其他实例修改，旧数据已备份为 ' + path.basename(bak));
     } catch (e) { /* 备份失败不阻断写入 */ }
   }
   const f = file();
@@ -128,6 +132,19 @@ function save(data) {
   fs.renameSync(tmp, f);
   lastMtime = currentMtime();
   return { conflict };
+}
+
+// 只保留最近 5 份 .bak-<时间戳>，更旧的删掉（防目录无限堆积）
+function pruneBaks() {
+  try {
+    const dir = path.dirname(file());
+    const baks = fs.readdirSync(dir)
+      .filter(n => n.startsWith(path.basename(file()) + '.bak-'))
+      .sort();
+    for (const n of baks.slice(0, Math.max(0, baks.length - 5))) {
+      try { fs.unlinkSync(path.join(dir, n)); } catch (e) { /* 占用等：下次再清 */ }
+    }
+  } catch (e) { /* 目录不可读：跳过 */ }
 }
 
 module.exports = { init, load, save, dir, snapshot, corruptInfo, decryptInfo, decryptData, encryptionAvailable };

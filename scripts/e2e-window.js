@@ -81,6 +81,21 @@ app.whenReady().then(async () => {
     const bogus = await js("window.api.winControl('__nope__')");
     check('未知动作返回布尔不抛错', bogus === w.isMaximized(), String(bogus));
 
+    // 第二实例可见反馈（D10）：同 userData 再起一个进程 → 拿锁失败退出，
+    // 已有窗口收到 second-instance 聚焦 + app:notice 提示（此前是"点了没反应"）
+    const childJs = path.join(os.tmpdir(), 'mmc-second-instance-child.js');
+    fs.writeFileSync(childJs,
+      "const { app } = require('electron');\n" +
+      'app.setPath(\'userData\', ' + JSON.stringify(DATA) + ');\n' +
+      "if (app.requestSingleInstanceLock()) { console.log('GOT-LOCK'); app.exit(2); }\n" +
+      "else { console.log('LOCK-DENIED'); app.exit(0); }\n");
+    const { spawn } = require('child_process');
+    const child = spawn(process.execPath, [childJs], { stdio: 'ignore' });
+    const childExit = await new Promise(r => { child.on('exit', c => r(c)); setTimeout(() => r(-1), 10000); });
+    check('第二实例拿锁失败并退出', childExit === 0, 'exit=' + childExit);
+    const noticed = await poll("document.querySelector('#toast') && document.querySelector('#toast').textContent.indexOf('已在运行') >= 0", true, 6000);
+    check('已有窗口弹出「已在运行」提示', noticed === true);
+
     // 关闭（最后一项）：window-all-closed → app.quit。
     // 关闭前故意改标题但不保存：close 事件会先请求渲染层落盘（app:flush），
     // 窗口销毁后从磁盘验证这条未保存的改动确实写进去了（无此机制则整轮丢失）。

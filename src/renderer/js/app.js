@@ -379,13 +379,22 @@ MM.defaults = {
   MM.normalizeSessions = function (list) {
     const out = [];
     const seen = new Set();
-    for (const s of (Array.isArray(list) ? list : [])) {
+    const seenRounds = new Set();
+    for (const s of (Array.isArray(list) ? list : []) ) {
       if (!s || typeof s !== 'object') continue;
       if (!Array.isArray(s.messages)) s.messages = [];
       // id 缺失或重复都会让"按 id 选中/删除"命中错误会话（导入拼接/手改数据可触发）：
       // 缺的补新 id，重的换新 id，保证列表内唯一
       if (typeof s.id !== 'string' || !s.id || seen.has(s.id)) s.id = U.uid();
       seen.add(s.id);
+      // roundId 全局唯一：跨会话重复会让「综合回答/重新生成」按 roundId 全局定位时
+      // 命中错误轮次（doMerge 取第一个命中）。缺失的留给 migrateSessions 补
+      for (const m of s.messages) {
+        if (m && m.role === 'assistant' && typeof m.roundId === 'string' && m.roundId) {
+          if (seenRounds.has(m.roundId)) m.roundId = U.uid();
+          seenRounds.add(m.roundId);
+        }
+      }
       out.push(s);
     }
     return out;
@@ -516,11 +525,19 @@ MM.defaults = {
       if (t) document.documentElement.setAttribute('data-theme', t);
     } catch (e) { /* ignore */ }
     // 主进程在窗口 close 时先请求一次落盘再放行（app:flush）：把流式半成品、
-    // 未保存的记账写盘；保存完成后由渲染层再次 close 真正关窗
+    // 未保存的记账写盘；保存完成后由渲染层再次 close 真正关窗。
+    // 保存失败时不许静默丢数据：弹强提示让用户重试或明确放弃（D9）
     if (api.onFlush) {
       api.onFlush(function () {
-        MM.save().finally(function () { try { window.close(); } catch (e) { /* 已在关闭 */ } });
+        MM.save({ immediate: true }).then(function (ok) {
+          if (ok) { try { window.close(); } catch (e) { /* 已在关闭 */ } return; }
+          showSaveFailGate();
+        });
       });
+    }
+    // 主进程一次性提示（第二实例触发时聚焦当前窗口等）
+    if (api.onNotice) {
+      api.onNotice(function (text) { U.toast(String(text || ''), true); });
     }
     U.$('#tgl-auto').checked = !!MM.state.config.synthesis.autoMerge;
     U.$('#tgl-review').checked = !!MM.state.config.synthesis.crossReview;
@@ -536,27 +553,100 @@ MM.defaults = {
   const U = MM.util;
 
   let saveFailToastAt = 0;
-  MM.save = function (opts) {
-    // configOnly：只保存配置（设置页、全局提示词）。不传 sessions，
-    // 避免把整份会话历史反复结构化克隆给主进程；主进程会保留它内存里的会话数据。
-    const payload = (opts && opts.configOnly)
+  // 保存合帧（D7/E1）：一轮对话会触发 3~8 次全量保存，14MB 库每次 stringify 30ms 级。
+  // 150ms 尾合帧把同窗口内的保存合并成一次；每次调用仍返回 promise，
+  // 在"包含本调用数据的那次落盘"完成后 resolve——await MM.save() 语义不变。
+  // immediate：关窗 flush 等必须立刻写盘的路径直通，不等合帧窗口
+  let savePendingKind = 0; // 0=无 1=configOnly 2=全量（全量是 configOnly 的超集，取最大）
+  let saveTimer = 0;
+  const saveWaiters = [];
+  let dirtyRetryTimer = 0;
+  let dirtyRetryDelay = 3000;
+  function buildSavePayload(kind) {
+    // kind 0/2 都是全量：脏重试时即使没有新的保存排队，也要把内存里的数据写下去
+    return kind === 1
       ? { config: MM.state.config }
       : { config: MM.state.config, sessions: MM.state.sessions };
-    // 返回是否落盘成功：调用方据此判断能否安全丢弃本地明文密钥等临时状态
-    return api.saveAll(payload)
-      .then(function () { return true; })
-      .catch(function (e) {
-        // 写盘失败不能静默：5 秒内最多提示一次，避免防抖保存刷屏
-        const now = Date.now();
-        if (now - saveFailToastAt > 5000) {
-          saveFailToastAt = now;
-          U.toast('保存失败：' + ((e && e.message) || e) + '（数据可能未写入磁盘）', true);
-        }
-        return false;
-      });
+  }
+  function markSaveFail(e) {
+    MM._dirty = true; // 写盘失败：置脏标记，退避重试与关窗强提示都依赖它
+    const now = Date.now();
+    if (now - saveFailToastAt > 5000) {
+      saveFailToastAt = now;
+      U.toast('保存失败：' + ((e && e.message) || e) + '（数据可能未写入磁盘）', true);
+    }
+    if (!dirtyRetryTimer) {
+      dirtyRetryTimer = setTimeout(function () {
+        dirtyRetryTimer = 0;
+        if (MM._dirty) doFlushSave();
+      }, dirtyRetryDelay);
+      dirtyRetryDelay = Math.min(dirtyRetryDelay * 2, 30000); // 退避重试：3s → 6s → 12s → 24s → 30s
+    }
+  }
+  async function doFlushSave() {
+    const kind = savePendingKind;
+    savePendingKind = 0;
+    let ok = false;
+    try {
+      await api.saveAll(buildSavePayload(kind));
+      ok = true;
+    } catch (e) {
+      markSaveFail(e);
+    }
+    if (ok) { MM._dirty = false; dirtyRetryDelay = 3000; }
+    const waiters = saveWaiters.splice(0, saveWaiters.length);
+    for (const w of waiters) w(ok);
+    return ok;
+  }
+  MM.save = function (opts) {
+    const kind = (opts && opts.configOnly) ? 1 : 2;
+    savePendingKind = Math.max(savePendingKind, kind);
+    return new Promise(function (resolve) {
+      saveWaiters.push(resolve);
+      if (opts && opts.immediate) {
+        if (saveTimer) { clearTimeout(saveTimer); saveTimer = 0; }
+        doFlushSave();
+      } else if (!saveTimer) {
+        saveTimer = setTimeout(function () { saveTimer = 0; doFlushSave(); }, 150);
+      }
+    });
   };
 
   // 初始化失败时给出可见提示，而不是留下一个空白/半死的界面
+  function showSaveFailGate() {
+    if (document.getElementById('save-fail-gate')) return;
+    const box = document.createElement('div');
+    box.id = 'save-fail-gate';
+    box.setAttribute('style', 'position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;background:rgba(30,26,20,.6);padding:24px;');
+    const panel = document.createElement('div');
+    panel.setAttribute('style', 'max-width:520px;width:100%;background:#fffdf9;color:#3d3929;border-radius:12px;padding:22px 24px;font-size:13px;line-height:1.7;box-shadow:0 18px 60px rgba(0,0,0,.35);');
+    panel.innerHTML = '<h2 style="font-size:15px;margin:0 0 8px">保存失败，数据尚未写入磁盘</h2>' +
+      '<p style="margin:0 0 12px;color:#6b675a">写盘失败（磁盘已满，或数据文件被杀毒软件/云同步占用？）。' +
+      '此时关闭窗口会丢失本次的全部新内容。请先排查磁盘，再点「重试保存」。</p>';
+    const row = document.createElement('div');
+    const retry = document.createElement('button');
+    retry.textContent = '重试保存';
+    retry.setAttribute('style', 'background:#3d3929;color:#faf9f5;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;margin-right:10px;');
+    const giveup = document.createElement('button');
+    giveup.textContent = '放弃更改并关闭';
+    giveup.setAttribute('style', 'background:none;color:#8a3b2b;border:1px solid #c8c2b4;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;');
+    retry.addEventListener('click', function () {
+      retry.disabled = true;
+      retry.textContent = '保存中…';
+      MM.save({ immediate: true }).then(function (ok) {
+        if (ok) { try { window.close(); } catch (e) { /* 已在关闭 */ } return; }
+        retry.disabled = false;
+        retry.textContent = '重试保存';
+      });
+    });
+    giveup.addEventListener('click', function () { try { window.close(); } catch (e) { /* 已在关闭 */ } });
+    row.appendChild(retry);
+    row.appendChild(giveup);
+    panel.appendChild(row);
+    box.appendChild(panel);
+    document.body.appendChild(box);
+  }
+
   function showFatalError(err) {
     const detail = String((err && (err.stack || err.message)) || err || '未知错误');
     console.error('[mmc] init error: ' + detail);

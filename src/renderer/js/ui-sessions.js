@@ -28,7 +28,16 @@ window.MM = window.MM || {};
       if (versions) {
         for (const v of versions) {
           if (!v) continue;
-          if (!v.inherited) for (const r of (v.results || [])) if (r) add(r.usage);
+          if (!v.inherited) {
+            // partial 快照（单模型重试）只真实重发了一个模型：其余条目是上一份
+            // 快照带来的旧数据，只计 partialModelId 那一条，不重复计
+            if (v.partial && v.partialModelId) {
+              const r = (v.results || []).find(x => x && x.modelId === v.partialModelId);
+              if (r) add(r.usage);
+            } else {
+              for (const r of (v.results || [])) if (r) add(r.usage);
+            }
+          }
           if (v.merge) add(v.merge.usage);
         }
       } else {

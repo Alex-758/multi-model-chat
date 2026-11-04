@@ -91,6 +91,20 @@ app.whenReady().then(async () => {
       setTimeout(function(){ off(); resolve(false); }, 1500);
     })`);
     check('非法 chat:send payload 仍会收到 all-done', done === true, 'allDone=' + done);
+
+    // 多实例冲突备份：带时间戳命名 + 只保留最近 5 份（D8）
+    const storePath = path.join(tmp, 'store.json');
+    fs.appendFileSync(storePath, ' '); // 外部改动：mtime 变化，模拟另一实例写入过
+    await js('MM.save()');
+    await sleep(500);
+    let baks = fs.readdirSync(tmp).filter(f => /\.bak-\d+$/.test(f));
+    check('冲突备份带时间戳（.bak-<ts>）', baks.length >= 1, JSON.stringify(baks.map(f => f.slice(-14))));
+    for (let i = 0; i < 7; i++) fs.writeFileSync(path.join(tmp, 'store.json.bak-1000000000000' + i), 'x', 'utf8');
+    fs.appendFileSync(storePath, ' ');
+    await js('MM.save()');
+    await sleep(500);
+    baks = fs.readdirSync(tmp).filter(f => /\.bak-\d+$/.test(f));
+    check('冲突备份只保留最近 5 份', baks.length === 5, 'n=' + baks.length);
   } catch (e) {
     console.log('SMOKE_ERROR ' + (e && (e.stack || e.message)));
   }

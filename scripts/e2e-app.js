@@ -67,6 +67,23 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ choices: [{ message: { content: '非流式完整回答' } }], usage: { prompt_tokens: 7, completion_tokens: 3 } }));
       return;
     }
+    // C5：finish_reason=length → 界面应出「已截断」徽标
+    if (model === 'cut') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"被截断的回答"}}]}\n\n');
+      res.write('data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":11,"completion_tokens":4}}\n\n');
+      res.end('data: [DONE]\n\n');
+      return;
+    }
+    // C11：模型自带引用注回（annotations）→ 并入来源列表；跨帧去重 + 非 http 过滤
+    if (model === 'web') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"带引用的回答。"}}]}\n\n');
+      res.write('data: {"choices":[{"delta":{"annotations":[{"type":"url_citation","url_citation":{"url":"https://example.com/a","title":"引用A"}}]}}]}\n\n');
+      res.write('data: {"choices":[{"delta":{"annotations":[{"url":"https://example.com/a","title":"重复"},{"url":"https://example.com/b","title":"引用B"},{"url":"javascript:alert(1)","title":"坏"}]}}]}\n\n');
+      res.end('data: [DONE]\n\n');
+      return;
+    }
     const slow = model === 'slow';
     const text = slow ? '慢速输出'.repeat(60) : ('回答-' + model + '-' + n);
     res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -111,7 +128,9 @@ function baseConfig(port) {
           { modelId: 'm2', name: '模型二', enabled: true, contextTokens: 100000, maxTokens: 4096 },
           { modelId: 'slow', name: '慢速', enabled: true, contextTokens: 100000, maxTokens: 4096 },
           { modelId: 'err', name: '错误', enabled: true, contextTokens: 100000, maxTokens: 4096 },
-          { modelId: 'json', name: '非流式', enabled: true, contextTokens: 100000, maxTokens: 4096 }
+          { modelId: 'json', name: '非流式', enabled: true, contextTokens: 100000, maxTokens: 4096 },
+          { modelId: 'cut', name: '截断模型', enabled: true, contextTokens: 100000, maxTokens: 4096 },
+          { modelId: 'web', name: '联网模型', enabled: true, contextTokens: 100000, maxTokens: 4096 }
         ]
       },
       {
@@ -265,6 +284,48 @@ server.listen(0, '127.0.0.1', () => {
       return JSON.stringify(t);
     });
 
+    // ---------- 2c. 截断徽标 / 引用注回 / 流式增量节点 ----------
+    await run('finish_reason：截断回答带「已截断」徽标（此前静默显示 ✓）', async () => {
+      await newSession();
+      await setChips(['p1::cut']);
+      await sendText('截断测试');
+      assert(await waitDone(), '未完成');
+      const t = await js(`(function(){
+        var card = document.querySelector('.answer-card');
+        var s = MM.state.sessions.find(function(x){return x.id===MM.state.currentId;});
+        return { badge: (card.querySelector('.badge.warn')||{}).textContent || '',
+                 finish: (s.messages[1].results[0]||{}).finish };
+      })()`);
+      assert(t.badge === '已截断' && t.finish === 'length', JSON.stringify(t));
+      return JSON.stringify(t);
+    });
+
+    await run('annotations：模型自带引用并入来源区（跨帧去重 + 非 http 过滤）', async () => {
+      await newSession();
+      await setChips(['p1::web']);
+      await sendText('引用测试');
+      assert(await waitDone(), '未完成');
+      const t = await js(`(function(){
+        var s = MM.state.sessions.find(function(x){return x.id===MM.state.currentId;});
+        var res = s.messages[1].results[0];
+        var card = document.querySelector('.answer-card');
+        var links = [].slice.call(card.querySelectorAll('details.sources a')).map(function(a){return a.getAttribute('href');});
+        return { n: (res.sources||[]).length, urls: (res.sources||[]).map(function(x){return x.url;}), links: links };
+      })()`);
+      assert(t.n === 2 && t.urls.indexOf('https://example.com/a') >= 0 && t.urls.indexOf('javascript:alert(1)') < 0, JSON.stringify(t));
+      assert(t.links.length === 2, '来源区应有 2 条链接: ' + JSON.stringify(t.links));
+      return JSON.stringify(t);
+    });
+
+    await run('权限请求一律拒绝（permission handler fail-closed）', async () => {
+      const perm = await js(`new Promise(function(resolve){
+        navigator.mediaDevices.getUserMedia({ video: true }).then(function(){ resolve('allowed'); },
+          function(e){ resolve((e && e.name) || 'denied'); });
+      })`);
+      assert(perm === 'NotAllowedError', 'perm=' + perm);
+      return perm;
+    });
+
     // ---------- 3. 停止 ----------
     await run('停止生成：保留半截内容并复位按钮', async () => {
       await newSession();
@@ -272,6 +333,12 @@ server.listen(0, '127.0.0.1', () => {
       requests.length = 0;
       await sendText('慢速停止测试');
       assert(await waitFor("(document.querySelector('.ac-body') && document.querySelector('.ac-body').textContent.length > 2)", 6000), '没有开始输出');
+      // E6：流式绘制走增量文本节点（单个 Text 节点 appendData，不整段重写）
+      const sn = await js(`(function(){
+        var b = document.querySelector('.ac-body');
+        return { n: b.childNodes.length, type: b.firstChild.nodeType, len: b.firstChild.data ? b.firstChild.data.length : -1 };
+      })()`);
+      assert(sn.n === 1 && sn.type === 3 && sn.len > 0, '流式正文应为单文本节点: ' + JSON.stringify(sn));
       await js("document.querySelector('#btn-send').click()");
       assert(await waitFor("!document.querySelector('#btn-send').classList.contains('stop')", 6000), '按钮未复位');
       const t = await js(`(function(){ var c=document.querySelector('.answer-card'); return { status:c.querySelector('.ac-status').textContent, text:c.querySelector('.ac-body').textContent }; })()`);
@@ -589,7 +656,20 @@ server.listen(0, '127.0.0.1', () => {
     });
 
     // ---------- 17. 导出 ----------
-    await run('导出数据：确认提示 + 文件内容', async () => {
+    await run('导出数据：确认提示 + 文件内容 + 图片附件内联（D6）', async () => {
+      // 当前会话放一条带图片引用的消息：图片本体在 images/ 目录
+      const imgId = 'a1b2c3d4e5f6';
+      const imgDir = path.join(DATA, 'images');
+      const imgPath = path.join(imgDir, imgId + '.png');
+      fs.mkdirSync(imgDir, { recursive: true });
+      fs.writeFileSync(imgPath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'));
+      await js(`(function(){
+        var s = MM.state.sessions.find(function(x){return x.id===MM.state.currentId;});
+        s.messages.push({ id: 'im1', role: 'user', content: '带图提问', createdAt: Date.now(),
+          images: [{ id: 'a1b2c3d4e5f6', ext: 'png', name: 'pixel.png', size: 70 }] });
+        MM.chat.renderAll();
+      })()`);
+      await js('(async function(){ await MM.save(); })()');
       nextSave = path.join(DATA, 'export.json');
       await js(`(function(){
         MM.settings.open();
@@ -613,9 +693,34 @@ server.listen(0, '127.0.0.1', () => {
       const p1 = j.config.providers.find(p => p.id === 'p1');
       assert(p1 && p1.apiKey === 'k1', '导出应包含明文密钥（用户确认的备份）');
       assert(/明文 API 密钥/.test(confirmMsg || ''), '确认文案=' + confirmMsg);
+      // D6：图片本体以 dataB64 内联进备份
+      const imgMsg = (function find() {
+        for (const s of j.sessions) for (const m of (s.messages || [])) if (m.images && m.images.length) return m;
+        return null;
+      })();
+      assert(imgMsg && imgMsg.images[0].dataB64 && imgMsg.images[0].dataB64.indexOf('iVBOR') === 0, '备份应内联图片 base64');
+      // 回灌：删掉图片本体后导入同一份备份 → 图片物化回 images/，引用换新 id、dataB64 剥离
+      fs.unlinkSync(imgPath);
+      nextOpen = nextSave;
+      await js(`(function(){
+        [].slice.call(document.querySelectorAll('#pane-data button')).filter(function(b){return b.textContent.indexOf('导入数据')>=0;})[0].click();
+      })()`);
+      await sleep(200);
+      await js("(function(){ var ov=document.getElementById('confirm-overlay'); var ok=ov&&ov.querySelector('.cf-ok'); if(ok&&!ov.classList.contains('hidden')) ok.click(); })()");
+      await sleep(1500);
+      const after = await js(`(function(){
+        var im = null;
+        for (var i = 0; i < MM.state.sessions.length && !im; i++)
+          for (var k = 0; k < (MM.state.sessions[i].messages||[]).length && !im; k++)
+            if ((MM.state.sessions[i].messages[k].images||[]).length) im = MM.state.sessions[i].messages[k].images[0];
+        return im ? { id: im.id, ext: im.ext, hasB64: !!im.dataB64 } : null;
+      })()`);
+      assert(after && after.id && after.id !== imgId && after.ext === 'png' && !after.hasB64, JSON.stringify(after));
+      assert(fs.existsSync(path.join(imgDir, after.id + '.png')), '图片应物化回 images/ 目录');
+      assert(fs.existsSync(imgPath) === false, '不应复活旧文件名');
       await js('MM.settings.close()');
       await sleep(250);
-      return JSON.stringify({ sessions: j.sessions.length, providers: j.config.providers.length, hasPlain: p1.apiKey === 'k1' });
+      return JSON.stringify({ sessions: j.sessions.length, providers: j.config.providers.length, imgNew: after.id });
     });
 
     // ---------- 18. 导入新格式 ----------
@@ -718,7 +823,7 @@ server.listen(0, '127.0.0.1', () => {
       })`);
       assert(t.require === 'undefined' && t.process === 'undefined', JSON.stringify(t));
       // API 面只允许白名单内的方法（并行开发可能新增导出类方法，逐一核对）
-      const allow = ['clearSecret','exportData','exportText','extractDoc','getAll','getCatalog','importData','listModels','onEvent','onFlush','onWinState','pickFiles','saveAll','saveImage','search','send','setSecret','stop','synthesize','testModel','testSearch','winControl'];
+      const allow = ['clearSecret','exportData','exportText','extractDoc','extractDocPath','getAll','getCatalog','importData','listModels','onEvent','onFlush','onNotice','onWinState','pickFiles','readTextPath','saveAll','saveImage','search','send','setSecret','stop','synthesize','testModel','testSearch','winControl'];
       const unknown = t.api.filter(k => allow.indexOf(k) < 0);
       assert(unknown.length === 0 && t.api.indexOf('send') >= 0 && t.api.indexOf('setSecret') >= 0, JSON.stringify(t.api));
       assert(/default-src 'self'/.test(t.csp) && /object-src 'none'/.test(t.csp) && /base-uri 'none'/.test(t.csp), t.csp);

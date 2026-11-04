@@ -34,14 +34,14 @@
 ### C10 · 10MB 回退缓冲截断后报错文案误导 — P3 ✅已修复
 - 超限截断后落「未返回任何内容」。修复：rawTruncated 标记 → 报「服务端响应超过 10MB，已中止解析」。回归：用例 19。
 
-### C5 · finish_reason 全程未读（content_filter/length 截断静默） — P3 ⏸未修复（进路线图）
-- 拦截/截断与正常完成无差别显示 ✓。修复需卡片追加提示的 UI 管线，属功能增强。
+### C5 · finish_reason 全程未读（content_filter/length 截断静默） — P3 ✅已修复（第二轮）
+- providers 归一 finish（length/content_filter；Anthropic stop_reason 的 max_tokens/refusal 映射）随 done 事件透传；卡片出「已截断」（.badge.warn 新增）/「内容被拦截」徽标。回归：audit-providers 20/21 + e2e-app「已截断徽标」。
 
-### C11 · 原生搜索引用注回未解析（OpenRouter annotations/百炼 search_results）— P3 优化 ⏸未修复（进路线图）
-- 来源展示走前端搜索注入，双通道不同源但不缺位。
+### C11 · 原生搜索引用注回未解析（OpenRouter annotations/百炼 search_results）— P3 优化 ✅已修复（第二轮）
+- providers 解析 delta.annotations（url_citation 与平铺两形态、http(s) 白名单、帧内去重、上限 8）→ sources 事件；渲染层按 url 合并进 res.sources 并在卡片上补 📎 来源区（refreshSourcesRow）。回归：audit-providers 22 + e2e-app「annotations 并入来源区」。
 
-### C12 · google 预置不在 STREAM_USAGE_PROVIDERS — P3 ⏸未修复（需真实 API 验证）
-- 无法离线证实 Gemini 兼容层是否默认回 usage；误加 stream_options 可能 400，需在线确认后加白名单。
+### C12 · google 预置不在 STREAM_USAGE_PROVIDERS — P3 ✅已修复（第二轮：文档取证）
+- Google 官方 OpenAI 兼容层文档示例直接使用 `stream_options={'include_usage': True}`（ai.google.dev/gemini-api/docs/openai）→ 加入白名单。回归：audit-providers 23（请求体含 stream_options）。
 
 ## 已验证无问题（摘要）
 SSE 多形态（CRLF/[DONE] 变体/末尾无换行/注释行/跨块多字节）；choices 空数组+usage 尾块；reasoning_content 与 OpenRouter reasoning；usage null 无 NaN（Math.max 覆盖语义）；Anthropic 头/system 顶层/thinking 三通道/小数 max_tokens（ba84261 在位）；URL 拼接 15 变体；stream_options 白名单；原生搜索参数（:online 幂等/enable_search/web_search）；非流式回退双通道；readDetail 四形态；401/403/429/5xx 中文映射；120s/45s/20s 超时；AbortError→stopped 带 usage；usage 归一 {input,output} 契约 + 渲染层 NaN 安全。

@@ -421,19 +421,25 @@ server.listen(0, '127.0.0.1', () => {
       return JSON.stringify(t);
     });
 
-    await run('会话 id 去重：缺失补新 id，重复换新 id', async () => {
+    await run('会话 id 去重：缺失补新 id，重复换新 id；roundId 跨会话去重', async () => {
       const t = await js(`(function(){
         var out = MM.normalizeSessions([
           { id: 'dup', title: '一', messages: [] },
           { id: 'dup', title: '二', messages: [] },
           { title: '无id', messages: [] },
-          { id: 'keep', title: '保留', messages: [] }
+          { id: 'keep', title: '保留', messages: [
+              { role: 'assistant', roundId: 'rr', results: [{ modelId: 'x', status: 'done', content: 'c' }] }] },
+          { id: 'keep', title: '重复id', messages: [
+              { role: 'assistant', roundId: 'rr', results: [{ modelId: 'x', status: 'done', content: 'c' }] }] }
         ]);
         return { n: out.length, ids: out.map(function(s){ return s.id; }),
-                 uniq: new Set(out.map(function(s){ return s.id; })).size };
+                 uniq: new Set(out.map(function(s){ return s.id; })).size,
+                 r0: out[3].messages[0].roundId, r1: out[4].messages[0].roundId,
+                 rUniq: out[3].messages[0].roundId !== out[4].messages[0].roundId };
       })()`);
-      assert(t.n === 4 && t.uniq === 4, JSON.stringify(t));
-      assert(t.ids[0] === 'dup' && t.ids[3] === 'keep', JSON.stringify(t));
+      assert(t.n === 5 && t.uniq === 5, JSON.stringify(t));
+      assert(t.ids[0] === 'dup' && t.ids[2] !== 'dup' && t.ids[2] && t.ids[3] === 'keep' && t.ids[4] !== 'keep', JSON.stringify(t));
+      assert(t.rUniq === true && t.r0 === 'rr', 'roundId 应全局唯一（重复的换新 id）: ' + JSON.stringify(t));
       return JSON.stringify(t);
     });
 

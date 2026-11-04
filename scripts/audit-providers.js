@@ -238,6 +238,81 @@ async function run() {
   catch (e) { err = e; }
   check('超 10MB 响应报"响应过大"', !!err && /10MB/.test(err.message), err ? err.message : '未报错');
 
+  // 20) finish_reason=length：返回 finish，界面据此出「已截断」徽标（C5）
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.write('data: {"choices":[{"delta":{"content":"答"}}]}\n\n');
+    res.write('data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n');
+    res.end('data: [DONE]\n\n');
+  };
+  out = await providers.streamChat(model(base), [{ role: 'user', content: 'hi' }], { onEvent: () => {} });
+  check('finish_reason=length 透传', out.finish === 'length' && out.content === '答', JSON.stringify({ finish: out.finish, content: out.content }));
+
+  // 21) content_filter 与 Anthropic stop_reason 归一（C5）
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.end('data: {"choices":[{"delta":{"content":"x"},"finish_reason":"content_filter"}]}\n\n');
+  };
+  out = await providers.streamChat(model(base), [{ role: 'user', content: 'hi' }], { onEvent: () => {} });
+  const cfOk = out.finish === 'content_filter';
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.write('data: {"type":"message_start","message":{"usage":{"input_tokens":5}}}\n\n');
+    res.write('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"答"}}\n\n');
+    res.write('data: {"type":"message_delta","usage":{"output_tokens":1},"delta":{"stop_reason":"max_tokens"}}\n\n');
+    res.end();
+  };
+  out = await providers.streamChat(Object.assign(model(base), { apiFormat: 'anthropic' }),
+    [{ role: 'user', content: 'hi' }], { onEvent: () => {} });
+  check('content_filter / anthropic max_tokens 归一', cfOk && out.finish === 'length',
+    JSON.stringify({ cf: cfOk, anth: out.finish }));
+
+  // 22) annotations 引用注回 → sources 事件（http 白名单 + 去重）（C11）
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.write('data: {"choices":[{"delta":{"content":"带引用"}}]}\n\n');
+    res.write('data: {"choices":[{"delta":{"annotations":[{"type":"url_citation","url_citation":{"url":"https://e.com/a","title":"A"}}]}}]}\n\n');
+    res.write('data: {"choices":[{"delta":{"annotations":[{"url":"https://e.com/a","title":"重复"},{"url":"ftp://x/y","title":"非http"}]}}]}\n\n');
+    res.end('data: [DONE]\n\n');
+  };
+  const gotSources = [];
+  await providers.streamChat(model(base), [{ role: 'user', content: 'hi' }], {
+    onEvent: ev => { if (ev.type === 'sources') gotSources.push(...ev.sources); }
+  });
+  // provider 层按帧解析（帧内去重 + 非 http 过滤）；跨帧去重由渲染层按 url 合并
+  // （e2e-app「annotations：模型自带引用并入来源区」覆盖 3 条注回 → 来源 2 条）
+  check('annotations 转 sources 事件（非 http 过滤，帧内去重）',
+    gotSources.length === 2 && gotSources[0].url === 'https://e.com/a' &&
+      gotSources.every(s => /^https?:\/\//.test(s.url)),
+    JSON.stringify(gotSources));
+
+  // 23) google 预置发 stream_options（官方兼容层支持 include_usage）（C12）
+  captured = null;
+  handler = (req, res) => {
+    let b = '';
+    req.on('data', c => { b += c; });
+    req.on('end', () => {
+      captured = JSON.parse(b);
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.write('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+  };
+  await providers.streamChat(Object.assign(model(base), { provider: 'google', modelId: 'gemini-4-argon' }),
+    [{ role: 'user', content: 'hi' }], { onEvent: () => {} });
+  check('google 端点带 stream_options.include_usage（官方文档支持）',
+    captured && captured.stream_options && captured.stream_options.include_usage === true,
+    JSON.stringify(captured && captured.stream_options));
+
+  // 24) 搜索中止：外部 signal 已中止时立即抛"已停止"，不发网络（B8）
+  const search = require('../src/main/search');
+  const abortCtrl = new AbortController();
+  abortCtrl.abort();
+  err = null;
+  try { await search.webSearch({ provider: 'bing' }, '测试', 3, { signal: abortCtrl.signal }); }
+  catch (e) { err = e; }
+  check('搜索外部中止立即抛"已停止"', !!err && /已停止/.test(err.message), err ? err.message : '未报错');
+
   server.close();
   console.log('---SUMMARY---');
   console.log(JSON.stringify(rows, null, 1));

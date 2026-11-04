@@ -9,7 +9,10 @@ function normalizeBase(url) { return (url || '').trim().replace(/\/+$/, ''); }
 // 只对确认支持的服务商开启：自定义/自托管端点（Ollama、vLLM 等）传未知参数可能报错，
 // Anthropic 格式自带 usage，不需要此参数。
 const STREAM_USAGE_PROVIDERS = {
-  deepseek: 1, moonshot: 1, dashscope: 1, zhipu: 1, openrouter: 1, openai: 1
+  deepseek: 1, moonshot: 1, dashscope: 1, zhipu: 1, openrouter: 1, openai: 1,
+  // Google 官方 OpenAI 兼容层文档明确支持 stream_options.include_usage
+  //（官方示例即用该参数取 chunk.usage，见 ai.google.dev/gemini-api/docs/openai）
+  google: 1
 };
 
 function chatEndpoint(m) {
@@ -142,7 +145,7 @@ function textOf(v) {
   return '';
 }
 function extractFull(j, format) {
-  const out = { content: '', reasoning: '', input: null, output: null, error: '' };
+  const out = { content: '', reasoning: '', input: null, output: null, error: '', finish: '', sources: null };
   if (!j || typeof j !== 'object') return out;
   if (format === 'anthropic') {
     for (const b of (Array.isArray(j.content) ? j.content : [])) {
@@ -153,12 +156,15 @@ function extractFull(j, format) {
     const u = j.usage || {};
     if (u.input_tokens != null) out.input = u.input_tokens;
     if (u.output_tokens != null) out.output = u.output_tokens;
+    out.finish = mapStopReason(j.stop_reason);
   } else {
     const ch = (j.choices && j.choices[0]) || null;
     const msg = (ch && (ch.message || ch.delta)) || {};
     out.content = textOf(msg.content);
     out.reasoning = msg.reasoning_content || msg.reasoning || '';
     if (!out.content && ch && typeof ch.text === 'string') out.content = ch.text;
+    if (ch && ch.finish_reason) out.finish = mapStopReason(ch.finish_reason);
+    if (Array.isArray(msg.annotations)) out.sources = parseAnnotations(msg.annotations);
     const u = j.usage || {};
     if (u.prompt_tokens != null) out.input = u.prompt_tokens;
     if (u.completion_tokens != null) out.output = u.completion_tokens;
@@ -169,6 +175,31 @@ function extractFull(j, format) {
   if (e) out.error = String(typeof e === 'string' ? e : (e.message || e.msg || JSON.stringify(e))).slice(0, 200);
   else if (!out.content && !out.reasoning && typeof j.message === 'string') out.error = j.message.slice(0, 200);
   return out;
+}
+
+// 统一的终止原因词汇表：length=被 max_tokens 截断、content_filter=被内容安全拦截、
+// 其他（stop/end_turn 等）为正常结束，返回空串不标记
+function mapStopReason(reason) {
+  const r = String(reason || '');
+  if (r === 'length' || r === 'max_tokens') return 'length';
+  if (r === 'content_filter' || r === 'refusal' || r === 'safety') return 'content_filter';
+  return '';
+}
+
+// 解析搜索引用注回（OpenAI/OpenRouter 的 delta.annotations）：
+// 形态有 {url_citation:{url,title}} 与平铺 {url,title} 两种，按 http(s) 白名单过滤
+function parseAnnotations(list) {
+  const out = [];
+  const seen = new Set();
+  for (const a of (Array.isArray(list) ? list : [])) {
+    const c = (a && a.url_citation) || a || {};
+    const url = String(c.url || '');
+    if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+    seen.add(url);
+    out.push({ url: url, title: String(c.title || url).slice(0, 200) });
+    if (out.length >= 8) break;
+  }
+  return out.length ? out : null;
 }
 
 // 流式对话。onEvent({type:'delta'|'reasoning', text})
@@ -189,6 +220,8 @@ async function streamChat(m, messages, opts) {
   };
   bumpIdle();
   let content = '', reasoning = '';
+  // 终止原因：length=截断、content_filter=内容安全拦截；界面据此提示"这不是完整回答"
+  let finish = '';
   // token 用量：各服务商字段名不同，统一归一成 {input, output}；无法取得时为 null，界面就不显示
   let usage = null;
   const noteUsage = (inp, out) => {
@@ -249,6 +282,7 @@ async function streamChat(m, messages, opts) {
         } else if (j.type === 'message_delta') {
           const u = j.usage;
           if (u) noteUsage(u.input_tokens, u.output_tokens);
+          if (j.delta && j.delta.stop_reason) finish = mapStopReason(j.delta.stop_reason);
         } else if (j.type === 'error') {
           throw new Error(j.error && j.error.message || '流式返回错误');
         }
@@ -268,11 +302,17 @@ async function streamChat(m, messages, opts) {
         }
         const ch = j.choices && j.choices[0];
         if (!ch) return;
+        if (ch.finish_reason) finish = mapStopReason(ch.finish_reason);
         const d = ch.delta || ch.message || {}; // 个别网关整段只发一个 message 形态的帧
         const ctext = typeof d.content === 'string' ? d.content : textOf(d.content);
         if (ctext) { content += ctext; onEvent({ type: 'delta', text: ctext }); }
         const r = d.reasoning_content != null ? d.reasoning_content : d.reasoning;
         if (r) { reasoning += r; onEvent({ type: 'reasoning', text: r }); }
+        // 原生搜索/联网模型的引用注回（OpenRouter url_citation 等）：转成来源列表给界面
+        if (Array.isArray(d.annotations)) {
+          const srcs = parseAnnotations(d.annotations);
+          if (srcs) onEvent({ type: 'sources', sources: srcs });
+        }
       }
     };
 
@@ -288,14 +328,16 @@ async function streamChat(m, messages, opts) {
         }
         if (full.content) { content = full.content; onEvent({ type: 'delta', text: full.content }); }
         if (full.reasoning) { reasoning = full.reasoning; onEvent({ type: 'reasoning', text: full.reasoning }); }
+        if (full.sources) onEvent({ type: 'sources', sources: full.sources });
+        if (full.finish) finish = full.finish;
         noteUsage(full.input, full.output);
-        return { content, reasoning, usage };
+        return { content, reasoning, usage, finish };
       }
       // 不是 JSON：按 SSE 文本继续解析（有些端点 Content-Type 写错）
       for (const line of text.split('\n')) handleLine(line.trim());
       if (!content && !reasoning && !sawData) throw new Error('服务端未返回任何内容（响应格式无法识别）');
       if (!content && !reasoning) throw new Error('服务端未返回任何内容（可能被网关拦截或上游出错）');
-      return { content, reasoning, usage };
+      return { content, reasoning, usage, finish };
     }
 
     // 流式读取（Content-Type 是 event-stream，或未声明为 JSON）
@@ -333,6 +375,8 @@ async function streamChat(m, messages, opts) {
       if (full && (full.content || full.reasoning)) {
         if (full.content) { content = full.content; onEvent({ type: 'delta', text: full.content }); }
         if (full.reasoning) { reasoning = full.reasoning; onEvent({ type: 'reasoning', text: full.reasoning }); }
+        if (full.sources) onEvent({ type: 'sources', sources: full.sources });
+        if (full.finish) finish = full.finish;
         noteUsage(full.input, full.output);
       } else if (full && full.error) {
         throw new Error('服务端返回错误：' + full.error);
@@ -342,7 +386,7 @@ async function streamChat(m, messages, opts) {
     if (!content && !reasoning && !sawData) throw new Error('服务端未返回任何内容（响应格式无法识别）');
     // 出现过 data: 帧但没有任何正文：上游失败被网关吞成空流，不能显示"✓ 完成"的空回答
     if (!content && !reasoning) throw new Error('服务端未返回任何内容（可能被网关拦截或上游出错）');
-    return { content, reasoning, usage };
+    return { content, reasoning, usage, finish };
   } catch (e) {
     if (abortedByTimeout) throw new Error('连接超时：服务器超过 120 秒没有返回数据，已中断');
     if ((signal && signal.aborted) || /abort/i.test(String(e && e.name))) {

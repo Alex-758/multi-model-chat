@@ -11,7 +11,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { protocol } = require('electron');
 
 let imagesDir = null;
@@ -39,7 +39,8 @@ function fileOf(id, ext) {
   return path.join(imagesDir, id + '.' + e);
 }
 
-// 保存图片并提取文字。OCR 失败不影响发图：多模态模型仍能看原图，只是纯文本模型拿不到文字
+// 保存图片并提取文字。OCR 失败不影响发图：多模态模型仍能看原图，只是纯文本模型拿不到文字。
+// skipOcr：导入备份物化图片时用（图片自带的识别文字已随消息持久化，不必重跑 OCR）
 async function saveImage(payload) {
   const p = payload || {};
   const ext = MIME_EXT[String(p.mime || '').toLowerCase()];
@@ -54,7 +55,7 @@ async function saveImage(payload) {
   const file = path.join(imagesDir, id + '.' + ext);
   fs.writeFileSync(file, buf);
   let text = '';
-  if (process.platform === 'win32') {
+  if (!p.skipOcr && process.platform === 'win32') {
     try { text = await ocrFile(file); } catch (e) { text = ''; }
   }
   return { id, ext, text };
@@ -193,7 +194,8 @@ function bundledConverter() {
 
 function runCmd(cmd, args, timeoutMs, opts) {
   return new Promise((resolve, reject) => {
-    const spawnOpts = Object.assign({ shell: true, windowsHide: true }, opts);
+    // 默认 shell:false + 绝对路径：参数数组交给 Node 转义，杜绝 shell 元字符拆参
+    const spawnOpts = Object.assign({ shell: false, windowsHide: true }, opts);
     let child;
     try {
       child = spawn(cmd, args, spawnOpts);
@@ -259,6 +261,22 @@ async function extractDocxJs(file) {
   return text;
 }
 
+// 在 PATH 中解析命令的绝对路径（where.exe 本身是 exe，shell:false 可直接调）。
+// pip 安装的 markitdown 在部分机器上是 .cmd 垫片，shell:false 直接跑会 ENOENT，
+// 必须先解析成绝对路径；结果缓存，避免每次提取都查一遍
+const cmdPathCache = new Map();
+function resolveCommand(name) {
+  if (cmdPathCache.has(name)) return cmdPathCache.get(name);
+  let found = null;
+  try {
+    const r = spawnSync('where', [name], { shell: false, windowsHide: true, timeout: 5000 });
+    const out = String((r.stdout || '')).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    found = out[0] || null;
+  } catch (e) { found = null; }
+  cmdPathCache.set(name, found);
+  return found;
+}
+
 async function extractMarkitdown(file) {
   const bundled = bundledConverter();
   if (bundled) {
@@ -269,17 +287,44 @@ async function extractMarkitdown(file) {
       // 内置转换器对该文件失败：回落系统命令再试一次
     }
   }
-  const quoted = '"' + file + '"';
-  try {
-    return await runCmd('markitdown', [quoted]);
-  } catch (e1) {
+  const sysMd = resolveCommand('markitdown');
+  if (sysMd) {
     try {
-      return await runCmd('python', ['-m', 'markitdown', quoted]);
-    } catch (e2) {
-      throw new Error('文档解析失败：' + (e1.message || e2.message).slice(0, 120) +
-        '。也可安装 markitdown 增强（pip install "markitdown[all]"）');
+      return await runCmd(sysMd, [file], 90000, { shell: false });
+    } catch (e1) {
+      // 继续走 python -m 兜底
     }
   }
+  const py = resolveCommand('python');
+  if (py) {
+    try {
+      return await runCmd(py, ['-m', 'markitdown', file], 90000, { shell: false });
+    } catch (e2) {
+      throw new Error('文档解析失败：安装 markitdown 后重试（pip install "markitdown[all]"）');
+    }
+  }
+  throw new Error('文档解析失败：未找到 markitdown 转换器。也可安装增强（pip install "markitdown[all]"）');
+}
+
+// 提取核心：按扩展名路由（base64 临时文件与"用户选择的原始路径"两条路共用）
+async function extractFromFile(file, ext) {
+  let text;
+  if (ext === 'pdf') {
+    try {
+      text = await extractPdfJs(file);
+    } catch (e) {
+      text = await extractMarkitdown(file); // JS 解不开（如扫描/加密）：回落 markitdown
+    }
+  } else if (ext === 'docx') {
+    try {
+      text = await extractDocxJs(file);
+    } catch (e) {
+      text = await extractMarkitdown(file);
+    }
+  } else {
+    text = await extractMarkitdown(file);
+  }
+  return { text: text };
 }
 
 async function extractDoc(payload) {
@@ -293,26 +338,99 @@ async function extractDoc(payload) {
   const tmp = path.join(os.tmpdir(), 'mmc-attach-' + crypto.randomBytes(6).toString('hex') + '.' + ext);
   fs.writeFileSync(tmp, Buffer.from(b64, 'base64'));
   try {
-    let text;
-    if (ext === 'pdf') {
-      try {
-        text = await extractPdfJs(tmp);
-      } catch (e) {
-        text = await extractMarkitdown(tmp); // JS 解不开（如扫描/加密）：回落 markitdown
-      }
-    } else if (ext === 'docx') {
-      try {
-        text = await extractDocxJs(tmp);
-      } catch (e) {
-        text = await extractMarkitdown(tmp);
-      }
-    } else {
-      text = await extractMarkitdown(tmp);
-    }
-    return { text: text };
+    return await extractFromFile(tmp, ext);
   } finally {
     try { fs.unlinkSync(tmp); } catch (e) { /* 清理失败不影响结果 */ }
   }
 }
 
-module.exports = { registerScheme, init, saveImage, loadBase64, registerProtocol, gc, extractDoc };
+// 直接对用户刚通过选择框选中的文件提取（files:pick 的路径白名单由 main 校验）：
+// 大文档不再 base64 两跳过 IPC，也不写临时文件、不动用户原件
+async function extractDocPath(payload) {
+  const p = payload || {};
+  const name = String(p.name || '');
+  const file = String(p.path || '');
+  const ext = ((name || file).split('.').pop() || '').toLowerCase();
+  if (!DOC_EXTS.test(ext)) throw new Error('暂不支持该格式（PDF / Word / Excel / PPT / RTF / HTML）');
+  if (LEGACY_HINT[ext]) throw new Error(LEGACY_HINT[ext]);
+  let st;
+  try { st = fs.statSync(file); } catch (e) { throw new Error('文件已不存在或不可读'); }
+  if (!st.isFile()) throw new Error('目标不是文件');
+  if (st.size > 20 * 1024 * 1024) throw new Error('文件过大（上限 20MB）');
+  return extractFromFile(file, ext);
+}
+
+// 文本附件解码（与渲染层 decodeTextFile 同策略）：BOM UTF-16 → 严格 UTF-8 → GBK 兜底。
+// Node 的 TextDecoder 不认 utf-16be：按字节两两交换后用 utf-16le 解
+function decodeTextBuf(buf) {
+  if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) return new TextDecoder('utf-16le').decode(buf);
+  if (buf.length >= 2 && buf[0] === 0xFE && buf[1] === 0xFF) {
+    const sw = Buffer.from(buf);
+    for (let i = 0; i + 1 < sw.length; i += 2) { const t = sw[i]; sw[i] = sw[i + 1]; sw[i + 1] = t; }
+    return new TextDecoder('utf-16le').decode(sw);
+  }
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); }
+  catch (e) {
+    try { return new TextDecoder('gbk').decode(buf); }
+    catch (e2) { return new TextDecoder('utf-8').decode(buf); }
+  }
+}
+
+// 读取用户刚选中的文本附件（路径白名单由 main 校验），GBK/UTF-16 在主进程解码，
+// 不再让几 MB 的 base64 在渲染层绕一圈
+function readTextFile(file) {
+  return { text: decodeTextBuf(fs.readFileSync(file)) };
+}
+
+// ---------- 备份中的图片附件 ----------
+// 导出：把消息引用的图片本体以内联 base64 写进备份（跨机恢复不再全部悬空）。
+// 同一张图（id+ext 相同）只内联一份；文件已丢失的条目跳过（保持既有降级路径）
+function exportAttach(sessions) {
+  const cache = new Map();
+  const out = JSON.parse(JSON.stringify(sessions || []));
+  for (const s of out) {
+    for (const m of ((s && s.messages) || [])) {
+      for (const im of ((m && m.images) || [])) {
+        if (!im || !im.id || !im.ext) continue;
+        const key = im.id + '.' + im.ext;
+        if (!cache.has(key)) {
+          const f = fileOf(im.id, im.ext);
+          let b64 = null;
+          if (f) { try { b64 = fs.readFileSync(f).toString('base64'); } catch (e) { b64 = null; } }
+          cache.set(key, b64);
+        }
+        const b64 = cache.get(key);
+        if (b64) im.dataB64 = b64;
+      }
+    }
+  }
+  return out;
+}
+
+// 导入：把备份内联的图片重新物化回 images/ 目录，引用改写为新 id；
+// 同一张图只物化一次；失败的条目保留原引用（mmimg 404 → 已持久化的 OCR 文字兜底），不阻断导入
+async function importAttach(sessions) {
+  const map = new Map(); // 旧 id.ext -> {id, ext} | null（失败）
+  for (const s of (sessions || [])) {
+    for (const m of ((s && s.messages) || [])) {
+      for (const im of ((m && m.images) || [])) {
+        if (!im || !im.dataB64) continue;
+        const key = (im.id || '') + '.' + (im.ext || '');
+        if (!map.has(key)) {
+          try {
+            const r = await saveImage({ mime: EXT_MIME[String(im.ext).toLowerCase()], base64: im.dataB64, skipOcr: true });
+            map.set(key, { id: r.id, ext: r.ext });
+          } catch (e) {
+            map.set(key, null);
+          }
+        }
+        const got = map.get(key);
+        delete im.dataB64;
+        if (got) { im.id = got.id; im.ext = got.ext; }
+      }
+    }
+  }
+  return sessions;
+}
+
+module.exports = { registerScheme, init, saveImage, loadBase64, registerProtocol, gc, extractDoc, extractDocPath, readTextFile, exportAttach, importAttach };

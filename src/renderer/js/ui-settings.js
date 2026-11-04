@@ -237,6 +237,9 @@ window.MM = window.MM || {};
     if (!p.baseUrl) { U.toast('请先填写请求地址', true); return null; }
     if (btn) { btn.disabled = true; btn.textContent = '获取中…'; }
     try {
+      // 连接参数以主进程存量为准（安全防线）：先把刚填的配置落盘过去，否则
+      // "改完地址立刻拉取"会请求到旧地址
+      await MM.save({ configOnly: true });
       const list = await api.listModels({ apiFormat: p.apiFormat, baseUrl: p.baseUrl, fullUrl: p.fullUrl, providerId: p.id, provider: p.provider || p.id });
       getCache()[p.id] = list;
       MM.save({ configOnly: true });
@@ -529,6 +532,8 @@ window.MM = window.MM || {};
         return;
       }
       try {
+        // 同 listModels：连接参数以主进程存量为准，先把刚填的配置落盘过去
+        await MM.save({ configOnly: true });
         const reply = await api.testModel({ apiFormat: p.apiFormat, baseUrl: p.baseUrl, fullUrl: p.fullUrl, modelId: mo.modelId, providerId: p.id, provider: p.provider || p.id });
         result.className = 'test-result ok';
         result.textContent = '✓ 连接成功（' + mo.modelId + '），回复：' + String(reply).slice(0, 100);
@@ -792,10 +797,10 @@ window.MM = window.MM || {};
       class: 'btn-secondary',
       onclick: async () => {
         // 导出文件包含明文 API 密钥，先明确告知风险再让用户确认；
-        // 图片附件本体不在备份内（只存引用），跨机恢复会失效，一并告知
+        // 图片附件以 base64 内联进备份（D6），跨机恢复不再悬空
         const ok = await U.confirm({
           title: '导出数据',
-          message: '导出的备份文件包含明文 API 密钥（图片附件不包含在备份内）。请只保存在本机或可信位置，不要上传到网盘、聊天工具或代码仓库。确定继续导出？',
+          message: '导出的备份文件包含明文 API 密钥与图片附件（文件会明显变大）。请只保存在本机或可信位置，不要上传到网盘、聊天工具或代码仓库。确定继续导出？',
           okText: '导出'
         });
         if (!ok) return;
@@ -806,7 +811,7 @@ window.MM = window.MM || {};
           U.toast('导出失败：' + ((e && e.message) || e), true);
         }
       }
-    }, U.el('span', {}, '导出数据'), U.el('small', {}, '将模型配置与全部会话导出为 JSON 备份文件（含明文 API 密钥）')));
+    }, U.el('span', {}, '导出数据'), U.el('small', {}, '将模型配置与全部会话（含图片附件）导出为 JSON 备份文件（含明文 API 密钥）')));
 
     box.appendChild(U.el('button', {
       class: 'btn-secondary',
