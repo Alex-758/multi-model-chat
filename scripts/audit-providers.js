@@ -313,6 +313,63 @@ async function run() {
   catch (e) { err = e; }
   check('搜索外部中止立即抛"已停止"', !!err && /已停止/.test(err.message), err ? err.message : '未报错');
 
+  // 25) 未知 Content-Type 的 JSON 回退：cached 也要透传（与 JSON 路径同口径）
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'text/plain');
+    res.end(JSON.stringify({
+      choices: [{ message: { content: '完整回答' } }],
+      usage: { prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 80 } }
+    }));
+  };
+  out = await providers.streamChat(model(base), [{ role: 'user', content: 'hi' }], { onEvent: () => {} });
+  check('未知 CT 的 JSON 回退带 cached', out.usage && out.usage.input === 100 && out.usage.cached === 80,
+    JSON.stringify(out.usage));
+
+  // 26) Anthropic JSON 回退：input 要并上缓存段（与流式同口径，否则命中率 >100%）
+  const anthro = { apiFormat: 'anthropic', baseUrl: base + '/anthropic', provider: 'anthropic', modelId: 'claude-x', maxTokens: 100 };
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      content: [{ type: 'text', text: '完' }],
+      usage: { input_tokens: 10, cache_read_input_tokens: 150, output_tokens: 5 },
+      stop_reason: 'end_turn'
+    }));
+  };
+  out = await providers.streamChat(anthro, [{ role: 'user', content: 'hi' }], { onEvent: () => {} });
+  check('Anthropic JSON 回退 input 含缓存段', out.usage && out.usage.input === 160 && out.usage.cached === 150 && out.usage.output === 5,
+    JSON.stringify(out.usage));
+
+  // 27) Anthropic 流：message_start 缺 usage（网关剥离），缓存字段只在 message_delta 出现
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.write('data: {"type":"message_delta","usage":{"output_tokens":7,"cache_read_input_tokens":99}}\n\n');
+    res.end('data: [DONE]\n\n');
+  };
+  out = null; err = null;
+  try { out = await providers.streamChat(anthro, [{ role: 'user', content: 'hi' }], { onEvent: () => {} }); }
+  catch (e) { err = e; } // 无正文帧会按"空回答"抛错，usage 挂在 error 上带出
+  const u27 = (out && out.usage) || (err && err.usage);
+  check('message_delta 的缓存字段并进输入并保留 cached', u27 && u27.input === 99 && u27.cached === 99 && u27.output === 7,
+    JSON.stringify(u27));
+
+  // 28) SSE 错误帧抛出后客户端应 cancel 读端（连接尽快关闭，不滞留）
+  const closed = new Promise(resolve => {
+    handler = (req, res) => {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.write('data: {"error":{"message":"upstream boom"}}\n\n');
+      res.on('close', resolve); // 故意不 end：只有客户端 cancel 才会立刻触发
+    };
+  });
+  err = null;
+  try { await providers.streamChat(model(base), [{ role: 'user', content: 'hi' }], { onEvent: () => {} }); }
+  catch (e) { err = e; }
+  const cancelled = await Promise.race([
+    closed.then(() => true),
+    new Promise(r => setTimeout(() => r(false), 1500))
+  ]);
+  check('错误帧报错', !!err && /upstream boom/.test(err.message), err ? err.message : '未报错');
+  check('错误帧抛出后连接被 cancel（服务端 close 及时触发）', cancelled === true, 'cancelled=' + cancelled);
+
   server.close();
   console.log('---SUMMARY---');
   console.log(JSON.stringify(rows, null, 1));

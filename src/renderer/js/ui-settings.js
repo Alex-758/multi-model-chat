@@ -21,6 +21,8 @@ window.MM = window.MM || {};
     renderSynth();
     renderPrompt();
     renderData();
+    // 上次停在用量统计页签时，重开设置直接可见：补一次重算（其余页签本就每次重渲染）
+    if (U.$('#pane-usage').classList.contains('active') && MM.usage) MM.usage.render();
     // 模型目录每次运行只取一次（主进程有 7 天缓存）：避免每次打开设置页都跨进程传 1MB+
     if (!MM.state.catalog) {
       api.getCatalog().then(cat => {
@@ -276,7 +278,11 @@ window.MM = window.MM || {};
 
     function applyInfo(persist) {
       const id = midInput.value.trim();
-      if (!id) { infoHint.textContent = ''; return; }
+      if (!id) {
+        // 清空 ID 静默不生效会让内存与输入框背离（重开设置旧 ID 又回填）：明确告知
+        infoHint.textContent = '模型 ID 不能为空，修改未生效';
+        return;
+      }
       const meta = MM.modelInfo.guess(id, findMeta(p, id), MM.state.catalog, mo.multimodal, p.provider || p.id);
       const idChanged = id !== lastAutoId;
       // 用户手动改了模型 ID：不再算"预置自带"，否则下次启动会被旧 ID 迁移规则改写回去
@@ -632,6 +638,8 @@ window.MM = window.MM || {};
     keyInput.addEventListener('blur', () => {
       if (cfg.hasKey && !keyInput.value.trim()) keyInput.value = SKEY_MASK;
     });
+    // 与服务商密钥同款约定：失焦即提交新输入的密钥，未点「保存」直接关设置也不丢
+    keyInput.addEventListener('change', () => { commitSearchKeyIfTyped(); });
     const keyHint = U.el('div', { class: 'hint' });
     keyRow.appendChild(keyInput);
     keyRow.appendChild(keyHint);
@@ -909,6 +917,8 @@ window.MM = window.MM || {};
         pane.classList.remove('pane-in');
         void pane.offsetWidth;
         pane.classList.add('pane-in');
+        // 用量统计是派生视图：每次切入都重算，保证新完成的轮次立即入账
+        if (nav.dataset.pane === 'usage' && MM.usage) MM.usage.render();
       });
     }
   }

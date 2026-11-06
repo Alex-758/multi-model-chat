@@ -19,6 +19,7 @@ window.MM = window.MM || {};
   // 当前搜索阶段的请求 id：stopAll 同时中止它（此前停止只覆盖 chat，搜索会在
   // 主进程空跑到 15s 超时）
   let curSearchId = null;
+  let curSearchSessionId = null; // 搜索所属会话：删除会话时要能中止对应的搜索请求
   // 处于联网搜索阶段（尚未建立 pending）的轮次数。此时收到上一轮的 all-done 不能把
   // streaming 清空，否则刚开始的新一轮会被误判为"已取消"。
   let searchPhase = 0;
@@ -539,7 +540,7 @@ window.MM = window.MM || {};
     const statusSpan = U.el('span', { class: 'ac-status' });
     statusSpan.innerHTML = statusHtml(res);
     card.appendChild(U.el('div', { class: 'ac-head' },
-      U.el('span', { class: 'ac-dot', style: 'background:' + MM.settings.dotColor({ id: res.modelId }) }),
+      U.el('span', { class: 'ac-dot', style: 'background:' + MM.settings.dotColor(res.modelId) }),
       U.el('span', { class: 'ac-name' }, res.name || res.modelId),
       statusSpan
     ));
@@ -660,7 +661,7 @@ window.MM = window.MM || {};
   function answersGrid(am) {
     // 必须带 data-round：综合回答结束后要按它定位网格插回工具栏
     const grid = U.el('div', { class: 'answers', 'data-round': am.roundId });
-    for (const r of am.results) grid.appendChild(answerCard(r, false, am.roundId));
+    for (const r of (am.results || [])) grid.appendChild(answerCard(r, false, am.roundId));
     return grid;
   }
 
@@ -712,13 +713,19 @@ window.MM = window.MM || {};
 
   // 冷开大会话时逐卡装饰（分析+匹配+溯源）是秒级一次性开销（E2）：挪到空闲时段
   // 逐卡补——卡片先出内容，角标/溯源稍后跟上；卡片被替换/移除则跳过。
-  // finalize 路径（单卡）保持同步，保证综合完成瞬间角标即可点
+  // finalize 路径（单卡）保持同步，保证综合完成瞬间角标即可点。
+  // 回调触发时节点游离（冷开 1.2s 内切走）：保留 _decoArgs 与 .deco-pending 标记，
+  // renderAll 池命中复用该节点时据此补一次装饰，否则角标永久缺失
   function decorateMergeSourcesDeferred(body, msg, results, roundId) {
     if (!body || body._decoQueued) return;
     body._decoQueued = true;
+    body._decoArgs = [msg, results, roundId];
+    body.classList.add('deco-pending');
     const run = function () {
       body._decoQueued = false;
-      if (!body.isConnected) return;
+      if (!body.isConnected) return; // 游离：参数留在 _decoArgs，池命中方补装饰
+      body.classList.remove('deco-pending');
+      body._decoArgs = null;
       decorateMergeSources(body, msg, results, roundId);
     };
     if (typeof requestIdleCallback === 'function') requestIdleCallback(run, { timeout: 1200 });
@@ -853,7 +860,8 @@ window.MM = window.MM || {};
     const add = u => { if (u) sum += (u.input || 0) + (u.output || 0); };
     for (const v of (versions || [])) {
       if (!v) continue;
-      if (v.merge) add(v.merge.usage);
+      // partial 快照（单模型重试）的 merge 是上一份的副本：综合没重跑，不能再计一次
+      if (v.merge && !v.partial) add(v.merge.usage);
       if (!v.inherited) {
         // partial 快照只计重发的那一个模型（与 sessionTokens 同口径），
         // 否则裁剪时又把旧模型的用量多折一次
@@ -1053,6 +1061,16 @@ window.MM = window.MM || {};
             for (const el of hit.mids) frag.appendChild(el);
             lastRoundEls.push(hit.userEl);
             for (const el of hit.mids) lastRoundEls.push(el);
+            // 空闲装饰在游离期间被跳过的卡（切走太快）：复用进 DOM 后立即补装饰
+            for (const el of hit.mids) {
+              for (const pend of (el.querySelectorAll ? el.querySelectorAll('.deco-pending') : [])) {
+                pend._decoQueued = false;
+                pend.classList.remove('deco-pending');
+                const args = pend._decoArgs || null;
+                pend._decoArgs = null;
+                if (args) decorateMergeSources(pend, args[0], args[1], args[2]);
+              }
+            }
           } else {
             const userEl = renderUser(m);
             frag.appendChild(userEl);
@@ -1414,6 +1432,7 @@ window.MM = window.MM || {};
         }
         searchPhase++;
         curSearchId = nextReqId('sr');
+        curSearchSessionId = s.id;
         try {
           searchResults = await api.search(userMsg.content, 6, curSearchId);
           if (!searchResults) U.toast('联网搜索未返回结果（可在设置中检查搜索引擎）');
@@ -1429,6 +1448,7 @@ window.MM = window.MM || {};
         } finally {
           searchPhase--;
           curSearchId = null;
+          curSearchSessionId = null;
         }
         if (searchResults && searchResults.length) userMsg.sources = searchResults;
       }
@@ -1479,7 +1499,9 @@ window.MM = window.MM || {};
     // 可以少一次整份会话历史的 IPC 复制与磁盘写入。
 
     streaming = s.id;
-    setSendBtn(true);
+    // 搜索 await 期间用户可能已切到别的会话：只锁当前查看的就是本轮会话的输入框，
+    // 否则后台轮会把别的会话输入框锁成"生成中"（与 doMerge/doReview 的守卫同款）
+    if (MM.sessions.current() === s) setSendBtn(true);
     MM.sessions.render(); // 会话列表立刻出现"生成中"呼吸点（切到别的会话也能看到后台在跑）
 
     const grid = U.el('div', { class: 'answers anim-in', 'data-round': roundId });
@@ -1573,8 +1595,11 @@ window.MM = window.MM || {};
       MM.save();
       MM.sessions.render();
       // 整轮全失败时没有可合并的内容，不要弹「没有可合并的成功回答」；
-      // 单模型重试不自动重跑综合：用户只是补一个失败的模型，重写全部综合既慢又费钱
-      if (!ctx.singleRetry && hasUsefulResults(am.results)) {
+      // 单模型重试不自动重跑综合：用户只是补一个失败的模型，重写全部综合既慢又费钱。
+      // 用户点过停止的轮次（存在 stopped 半成品）不再自动发起综合/审查——
+      // 停止意图优先（与仲裁阶段停止同款考量），补全走「重新综合」「重新审查」
+      const userStopped = (am.results || []).some(r => r && r.status === 'stopped');
+      if (!ctx.singleRetry && !userStopped && hasUsefulResults(am.results)) {
         // 交叉审查开关开启时自动流程走审查（仲裁结论已覆盖综合的职责），自动综合让位；
         // 成功回答不足两份审不起来，退回普通综合
         if (U.$('#tgl-review').checked) {
@@ -1737,6 +1762,12 @@ window.MM = window.MM || {};
         pending.delete(reqId);
         Promise.resolve(api.stop(reqId)).catch(function () { });
       }
+    }
+    // 搜索阶段没有 pending 条目：按所属会话中止（否则删会话后搜索在主进程空跑到超时）
+    if (curSearchId && curSearchSessionId === sessionId) {
+      Promise.resolve(api.stop(curSearchId)).catch(function () { });
+      curSearchId = null;
+      curSearchSessionId = null;
     }
     if (streaming === sessionId) {
       streaming = null;
@@ -2161,7 +2192,7 @@ window.MM = window.MM || {};
         am.active = am.versions.length - 1;
       }
     }
-    const okResults = am.results
+    const okResults = (am.results || [])
       .filter(r => (r.status === 'done' || r.status === 'stopped') && r.content)
       .map(r => ({ modelId: r.modelId, name: r.name, content: r.content }));
     if (!okResults.length) { U.toast('没有可合并的成功回答', true); return; }
@@ -2211,6 +2242,10 @@ window.MM = window.MM || {};
       MM.save();
       return;
     }
+    // 模型归因：用量统计面板按模型拆分时综合回答要能落到具体模型（旧数据没有此字段，显示"未记录"）。
+    // modelId 用 flat id（providerId::modelId），与回答行的口径一致，否则同一模型被拆成两个系列
+    am.merge.modelId = model.id || model.modelId || '';
+    am.merge.modelName = model.name || model.modelId || '';
     streaming = s.id;
     if (MM.sessions.current() === s) setSendBtn(true); // 后台会话综合：不能锁当前视图的输入框
     MM.sessions.render(); // 呼吸点
@@ -2469,7 +2504,7 @@ window.MM = window.MM || {};
     const am = s.messages[idx];
     const userMsg = s.messages[idx - 1];
     if (!userMsg) return;
-    const okResults = am.results
+    const okResults = (am.results || [])
       .filter(r => (r.status === 'done' || r.status === 'stopped') && r.content)
       .map(r => ({ modelId: r.modelId, name: r.name, content: r.content }));
     if (okResults.length < 2) { U.toast('交叉审查至少需要两份成功回答', true); return; }
@@ -2570,15 +2605,20 @@ window.MM = window.MM || {};
         v.content += ev.text;
         if (refs) scheduleStreamPaint(refs.body, function () { paintStreamText(refs.body, v.content); });
       }
-      else if (ev.type === 'done' && ev.usage) { v.usage = ev.usage; v.ms = ev.ms || 0; }
+      else if (ev.type === 'done' && ev.usage) {
+        v.usage = ev.usage; v.ms = ev.ms || 0;
+        if (refs) refs.status.innerHTML = '✓'; // 仲裁块的 status 在此落终态，否则 spinner 永转
+      }
       else if (ev.type === 'error') {
         if (/已停止/.test(ev.message || '')) {
           v.stopped = true;
           if (ev.usage) v.usage = ev.usage;
           v.content += '\n\n（已停止，内容不完整，可点「重新审查」重出完整版）';
+          if (refs) refs.status.innerHTML = '<span class="badge muted">⏹</span>';
         } else {
           ctx.verdictFailed = true;
           v.content += '\n\n（仲裁失败：' + ev.message + '）';
+          if (refs) refs.status.innerHTML = '<span style="color:var(--danger)">✗</span>';
         }
       }
       return;
@@ -2654,7 +2694,12 @@ window.MM = window.MM || {};
       const prompt = MM.merge.verdictPrompt(ctx.userQuestion, ctx.okResults, reviews, budget);
       const msgs = sys ? [{ role: 'system', content: sys }] : [];
       msgs.push({ role: 'user', content: prompt });
-      review.verdict = { content: '', usage: null, ms: 0, stopped: false };
+      review.verdict = {
+        content: '', usage: null, ms: 0, stopped: false,
+        // 仲裁也消耗 token：记下仲裁模型（flat id，与回答行口径一致），用量面板按模型拆分时能归因
+        modelId: ctx.arbiter.id || ctx.arbiter.modelId || '',
+        modelName: ctx.arbiter.name || ctx.arbiter.modelId || ''
+      };
       const card = ctx.rvCard;
       if (card && card.isConnected) {
         ensureVerdictBlock(card);

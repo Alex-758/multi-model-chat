@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('app:flush', h);
     return () => ipcRenderer.removeListener('app:flush', h);
   },
+  // 保存失败弹闸门时通知主进程撤销强关定时器（闸门等用户决策，不能被兜底强关打断）
+  flushHeld: () => ipcRenderer.send('app:flush-held'),
   // 主进程的一次性提示（如第二实例触发时聚焦当前窗口）
   onNotice: (cb) => {
     const h = (e, d) => cb(d);

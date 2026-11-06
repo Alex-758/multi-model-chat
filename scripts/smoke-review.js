@@ -177,6 +177,9 @@ server.listen(0, '127.0.0.1', () => {
       check('场景 B：仲裁结论正文渲染为 Markdown（RAF 竞态曾覆盖回裸文本）', /<(p|li|h\d)[ >]/.test(vHtml), 'html=[' + vHtml.slice(0, 60) + ']');
       check('场景 B：互审 9 次（A/A2/B 轮各 3 次）、仲裁 1 次', cnt.review === 9 && cnt.verdict === 1, 'review=' + cnt.review + ' verdict=' + cnt.verdict);
       check('场景 B：仲裁提示词包含全部审查发现', reviewSeen.length === 9, 'seen=' + reviewSeen.length);
+      // 仲裁模型归因（写入端）：flat id 与回答行口径一致，用量面板按模型拆分时才能落到同一系列
+      const vid = (await js("(function(){var s=MM.sessions.current();var a=(s.messages||[]).filter(function(m){return m&&m.role==='assistant'&&m.review&&m.review.verdict;}).pop();return a?a.review.verdict.modelId:'';})()")) || '';
+      check('场景 B：仲裁结论记录仲裁模型（flat id）', vid === 'p1::m1', 'modelId=' + vid);
 
       // ===== 场景 C：只有一份成功回答 → 拦截并提示 =====
       await js("[].forEach.call(document.querySelectorAll('#model-chips .chip.on'), function(c){ c.click(); })");

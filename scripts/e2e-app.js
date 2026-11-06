@@ -142,6 +142,12 @@ function baseConfig(port) {
         id: 'p3', name: '智谱兼容', provider: 'zhipu', apiFormat: 'openai',
         baseUrl: 'http://127.0.0.1:' + port + '/v1', apiKey: 'k3', fullUrl: false, preset: false,
         models: [{ modelId: 'z1', name: '智谱模型', enabled: true, contextTokens: 100000, maxTokens: 4096 }]
+      },
+      {
+        // 存量 baseUrl 为空：设置界面新建服务商的默认态。渲染层伪造的 baseUrl 不得被采信
+        id: 'p9', name: '空地址服务商', provider: 'custom', apiFormat: 'openai',
+        baseUrl: '', apiKey: 'k9', fullUrl: false, preset: false,
+        models: [{ modelId: 'm9', name: '空地址模型', enabled: true, contextTokens: 100000, maxTokens: 4096 }]
       }
     ],
     search: { provider: 'none' },
@@ -271,6 +277,34 @@ server.listen(0, '127.0.0.1', () => {
       assert(/\/v1\/chat\/completions$/.test(hit[0].url), '实际端点=' + hit[0].url);
       assert(hit[0].headers.authorization === 'Bearer k1', 'auth=' + hit[0].headers.authorization);
       return JSON.stringify({ url: hit[0].url, auth: hit[0].headers.authorization });
+    });
+
+    // ---------- 2c. 密钥引流防线（存量 baseUrl 为空的可达状态） ----------
+    await run('安全：存量 baseUrl 为空时伪造 baseUrl 同样不被采信（密钥不外发）', async () => {
+      const before = requests.length;
+      const t = await js(`(function(){
+        return new Promise(function(resolve){
+          var kinds = [];
+          var off = api.onEvent(function(d){
+            if (!d || d.requestId !== 'sec2') return;
+            if (d.type === 'all-done') { off(); resolve({ ok: true, kinds: kinds }); }
+            else kinds.push(d.type);
+          });
+          api.send({ requestId: 'sec2', targets: [{ model: {
+              id: 'p9::m9', providerId: 'p9', modelId: 'm9', name: 'M9',
+              apiFormat: 'openai', baseUrl: 'http://127.0.0.1:${port}/evil', fullUrl: false,
+              maxTokens: 100, contextTokens: 100000 },
+            messages: [{ role: 'user', content: '空地址安全测试' }] }], searchOn: false });
+          setTimeout(function(){ off(); resolve({ ok: false, kinds: kinds }); }, 8000);
+        });
+      })()`);
+      assert(t.ok === true, '请求未完成');
+      const hit = requests.slice(before);
+      assert(hit.length === 0, '伪造请求到达了 mock（存量空 baseUrl 被渲染层值覆盖）：' + JSON.stringify(hit.map(h => h.url)));
+      // 空地址出不了请求：本轮应以 error 收场，而不是带着密钥打向伪造端点
+      assert(t.kinds.indexOf('done') < 0, '出现了 done 事件（伪造端点被使用？）: ' + JSON.stringify(t.kinds));
+      assert(t.kinds.indexOf('error') >= 0, '没有 error 事件: ' + JSON.stringify(t.kinds));
+      return JSON.stringify({ mockHits: hit.length, kinds: t.kinds });
     });
 
     await run('markdown：伪造占位符行不崩溃（越界索引按普通文本输出）', async () => {
@@ -739,7 +773,12 @@ server.listen(0, '127.0.0.1', () => {
           messages: [
             { id: 'iu', role: 'user', content: '导入的问题', createdAt: 5 },
             { id: 'ia', role: 'assistant', roundId: 'ir', createdAt: 6,
-              results: [{ modelId: 'imp::im', name: '导入模型', status: 'done', content: '导入的回答' }] }
+              results: [{ modelId: 'imp::im', name: '导入模型', status: 'done', content: '导入的回答' }],
+              // 图片物化降级路径：一张合法（物化换新 id）+ 一张超限坏图（保留原引用不阻断）
+              images: [
+                { id: 'img-good', ext: 'png', ocrText: '图一文字', dataB64: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' },
+                { id: 'img-bad', ext: 'png', ocrText: '图二文字', dataB64: Buffer.alloc(7600000, 65).toString('base64') }
+              ] }
           ]
         }]
       };
@@ -764,6 +803,18 @@ server.listen(0, '127.0.0.1', () => {
       assert(t.title === '导入会话', '标题=' + t.title);
       assert(t.hasKey === true && t.apiKey === undefined, JSON.stringify(t));
       assert(t.chip === true && t.cards === 1, JSON.stringify(t));
+      // 图片物化降级：好图换新 id、坏图（超限）保留原引用且 dataB64 已剥离、导入整体成功
+      const imgs = await js(`(function(){
+        var s = MM.state.sessions.find(function(x){ return x.title === '导入会话'; });
+        var m = s && s.messages && s.messages[1];
+        var ims = (m && m.images) || [];
+        return ims.map(function(im){ return { id: im.id, hasB64: 'dataB64' in im, ocr: im.ocrText || '' }; });
+      })()`);
+      assert(imgs.length === 2, '图片条数=' + imgs.length);
+      assert(imgs[0].id !== 'img-good' && imgs[0].hasB64 === false && imgs[0].ocr === '图一文字',
+        '好图未物化：' + JSON.stringify(imgs[0]));
+      assert(imgs[1].id === 'img-bad' && imgs[1].hasB64 === false && imgs[1].ocr === '图二文字',
+        '坏图降级失败：' + JSON.stringify(imgs[1]));
       await js('MM.settings.close()');
       await sleep(250);
       return JSON.stringify(t);
@@ -823,7 +874,7 @@ server.listen(0, '127.0.0.1', () => {
       })`);
       assert(t.require === 'undefined' && t.process === 'undefined', JSON.stringify(t));
       // API 面只允许白名单内的方法（并行开发可能新增导出类方法，逐一核对）
-      const allow = ['clearSecret','exportData','exportText','extractDoc','extractDocPath','getAll','getCatalog','importData','listModels','onEvent','onFlush','onNotice','onWinState','pickFiles','readTextPath','saveAll','saveImage','search','send','setSecret','stop','synthesize','testModel','testSearch','winControl'];
+      const allow = ['clearSecret','exportData','exportText','extractDoc','extractDocPath','flushHeld','getAll','getCatalog','importData','listModels','onEvent','onFlush','onNotice','onWinState','pickFiles','readTextPath','saveAll','saveImage','search','send','setSecret','stop','synthesize','testModel','testSearch','winControl'];
       const unknown = t.api.filter(k => allow.indexOf(k) < 0);
       assert(unknown.length === 0 && t.api.indexOf('send') >= 0 && t.api.indexOf('setSecret') >= 0, JSON.stringify(t.api));
       assert(/default-src 'self'/.test(t.csp) && /object-src 'none'/.test(t.csp) && /base-uri 'none'/.test(t.csp), t.csp);

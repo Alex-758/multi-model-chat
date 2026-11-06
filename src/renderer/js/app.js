@@ -383,6 +383,9 @@ MM.defaults = {
     for (const s of (Array.isArray(list) ? list : []) ) {
       if (!s || typeof s !== 'object') continue;
       if (!Array.isArray(s.messages)) s.messages = [];
+      // title 非字符串（手改/外部数据）会让侧栏渲染 appendChild(123) 抛错 → 启动即失败，
+      // 与 pinned/createdAt 的兜底同款
+      if (typeof s.title !== 'string') s.title = (s.title == null) ? '' : String(s.title);
       // id 缺失或重复都会让"按 id 选中/删除"命中错误会话（导入拼接/手改数据可触发）：
       // 缺的补新 id，重的换新 id，保证列表内唯一
       if (typeof s.id !== 'string' || !s.id || seen.has(s.id)) s.id = U.uid();
@@ -586,6 +589,10 @@ MM.defaults = {
   async function doFlushSave() {
     const kind = savePendingKind;
     savePendingKind = 0;
+    // 只 resolve 进入本次落盘的 waiter：await 期间新加入的留给下一次 flush——
+    // 否则被"在途 flush"抢答 true，调用方以为数据已落盘（最坏路径：导入备份后
+    // 主进程还没有旧密钥记录，回填不到，新密钥丢失）
+    const mine = saveWaiters.splice(0, saveWaiters.length);
     let ok = false;
     try {
       await api.saveAll(buildSavePayload(kind));
@@ -594,8 +601,7 @@ MM.defaults = {
       markSaveFail(e);
     }
     if (ok) { MM._dirty = false; dirtyRetryDelay = 3000; }
-    const waiters = saveWaiters.splice(0, saveWaiters.length);
-    for (const w of waiters) w(ok);
+    for (const w of mine) w(ok);
     return ok;
   }
   MM.save = function (opts) {
@@ -615,6 +621,8 @@ MM.defaults = {
   // 初始化失败时给出可见提示，而不是留下一个空白/半死的界面
   function showSaveFailGate() {
     if (document.getElementById('save-fail-gate')) return;
+    // 闸门在等用户决策：撤销主进程 2.5s 的关窗兜底强关，否则闸门活不过它要防护的场景
+    try { if (api.flushHeld) api.flushHeld(); } catch (e) { /* 通道异常时兜底定时器照旧 */ }
     const box = document.createElement('div');
     box.id = 'save-fail-gate';
     box.setAttribute('style', 'position:fixed;inset:0;z-index:1000;display:flex;align-items:center;justify-content:center;background:rgba(30,26,20,.6);padding:24px;');

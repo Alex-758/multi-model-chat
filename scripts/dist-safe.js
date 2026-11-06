@@ -35,6 +35,32 @@ if (r.status !== 0) {
   process.exit(r.status || 1);
 }
 
+// 产物完整性校验：Setup / Portable / latest.yml 三件套齐了才拷回。
+// 版本号例行手改（1.4.3→1.4.6 均如此），少校验就会新旧产物混在 dist/ 里没人发现
+const version = require(path.join(ROOT, 'package.json')).version;
+const expected = [
+  'Multi-Model Chat Setup ' + version + '.exe',
+  'Multi-Model-Chat-Portable-' + version + '.exe',
+  'latest.yml'
+];
+const built = fs.readdirSync(OUT);
+const missing = expected.filter(n => built.indexOf(n) < 0);
+if (missing.length) {
+  console.error('[dist-safe] 构建缺少预期产物：' + missing.join('、') + '。不拷回，dist/ 保持原状');
+  process.exit(1);
+}
+
+// 清掉 dist/ 旧产物（旧版本 exe / yml / blockmap）：版本递增后不再新旧混杂
+try { fs.mkdirSync(DIST, { recursive: true }); } catch (e) { /* 已存在 */ }
+for (const name of fs.readdirSync(DIST)) {
+  try {
+    fs.rmSync(path.join(DIST, name), { recursive: true, force: true });
+  } catch (e) {
+    // 占用（资源管理器预览等）不阻断：同名文件随后会被覆盖，旧版本残留会打警告
+    note('清理旧产物失败（可能被占用）：' + name + '（' + e.message + '）');
+  }
+}
+
 // 拷回输出目录顶层的构建产物（exe / blockmap / latest.yml）；
 // builder-debug.yml 是 electron-builder 的调试输出，不拷（dist 里不留构建调试垃圾）；
 // win-unpacked 等目录留在临时区不拷

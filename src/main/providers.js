@@ -145,7 +145,7 @@ function textOf(v) {
   return '';
 }
 function extractFull(j, format) {
-  const out = { content: '', reasoning: '', input: null, output: null, error: '', finish: '', sources: null };
+  const out = { content: '', reasoning: '', input: null, output: null, cached: null, error: '', finish: '', sources: null };
   if (!j || typeof j !== 'object') return out;
   if (format === 'anthropic') {
     for (const b of (Array.isArray(j.content) ? j.content : [])) {
@@ -154,8 +154,13 @@ function extractFull(j, format) {
       else if (b.type === 'thinking' && b.thinking) out.reasoning += b.thinking;
     }
     const u = j.usage || {};
-    if (u.input_tokens != null) out.input = u.input_tokens;
+    // 与流式路径同口径：输入含缓存段（cache_creation + cache_read），
+    // 否则同一请求走 JSON 回退时 input 偏小、命中率 = cached/input 会超 100%
+    const cachedIn = (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+    if (u.input_tokens != null) out.input = u.input_tokens + cachedIn;
+    else if (cachedIn) out.input = cachedIn;
     if (u.output_tokens != null) out.output = u.output_tokens;
+    if (u.cache_read_input_tokens != null) out.cached = u.cache_read_input_tokens;
     out.finish = mapStopReason(j.stop_reason);
   } else {
     const ch = (j.choices && j.choices[0]) || null;
@@ -170,6 +175,7 @@ function extractFull(j, format) {
     if (u.completion_tokens != null) out.output = u.completion_tokens;
     if (out.input == null && u.input_tokens != null) out.input = u.input_tokens;
     if (out.output == null && u.output_tokens != null) out.output = u.output_tokens;
+    if (u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens != null) out.cached = u.prompt_tokens_details.cached_tokens;
   }
   const e = j.error;
   if (e) out.error = String(typeof e === 'string' ? e : (e.message || e.msg || JSON.stringify(e))).slice(0, 200);
@@ -222,16 +228,22 @@ async function streamChat(m, messages, opts) {
   let content = '', reasoning = '';
   // 终止原因：length=截断、content_filter=内容安全拦截；界面据此提示"这不是完整回答"
   let finish = '';
-  // token 用量：各服务商字段名不同，统一归一成 {input, output}；无法取得时为 null，界面就不显示
+  // token 用量：各服务商字段名不同，统一归一成 {input, output}；无法取得时为 null，界面就不显示。
+  // cached = 命中缓存的输入段（OpenAI prompt_tokens_details.cached_tokens / Anthropic cache_read_input_tokens），
+  // 仅为用量统计面板服务，取不到时不设该字段
   let usage = null;
-  const noteUsage = (inp, out) => {
-    if (inp == null && out == null) return;
+  let activeReader = null; // 读流异常/错误帧抛出时 cancel 掉，连接不滞留
+  const noteUsage = (inp, out, cached) => {
+    if (inp == null && out == null && cached == null) return;
+    const prev = usage || {};
     usage = {
-      input: (usage && usage.input) || 0,
-      output: (usage && usage.output) || 0
+      input: prev.input || 0,
+      output: prev.output || 0
     };
+    if (prev.cached != null) usage.cached = prev.cached;
     if (inp != null) usage.input = Math.max(usage.input, Math.floor(inp));
     if (out != null) usage.output = Math.max(usage.output, Math.floor(out));
+    if (cached != null) usage.cached = Math.max(usage.cached || 0, Math.floor(cached));
   };
   try {
     let res;
@@ -277,11 +289,17 @@ async function streamChat(m, messages, opts) {
           const u = j.message && j.message.usage;
           if (u) {
             const cachedIn = (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
-            noteUsage(u.input_tokens != null ? u.input_tokens + cachedIn : (cachedIn || null), u.output_tokens);
+            noteUsage(u.input_tokens != null ? u.input_tokens + cachedIn : (cachedIn || null), u.output_tokens,
+              u.cache_read_input_tokens != null ? u.cache_read_input_tokens : null);
           }
         } else if (j.type === 'message_delta') {
           const u = j.usage;
-          if (u) noteUsage(u.input_tokens, u.output_tokens);
+          if (u) {
+            // 网关剥离 message_start.usage 时，缓存字段只出现在 delta：同样并入输入并带上 cached
+            const cachedIn = (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+            noteUsage(u.input_tokens != null ? u.input_tokens + cachedIn : (cachedIn || null), u.output_tokens,
+              u.cache_read_input_tokens != null ? u.cache_read_input_tokens : null);
+          }
           if (j.delta && j.delta.stop_reason) finish = mapStopReason(j.delta.stop_reason);
         } else if (j.type === 'error') {
           throw new Error(j.error && j.error.message || '流式返回错误');
@@ -298,7 +316,9 @@ async function streamChat(m, messages, opts) {
         if (j.usage) {
           const u = j.usage;
           noteUsage(u.prompt_tokens != null ? u.prompt_tokens : u.input_tokens,
-                    u.completion_tokens != null ? u.completion_tokens : u.output_tokens);
+                    u.completion_tokens != null ? u.completion_tokens : u.output_tokens,
+                    u.prompt_tokens_details && u.prompt_tokens_details.cached_tokens != null
+                      ? u.prompt_tokens_details.cached_tokens : null);
         }
         const ch = j.choices && j.choices[0];
         if (!ch) return;
@@ -330,18 +350,20 @@ async function streamChat(m, messages, opts) {
         if (full.reasoning) { reasoning = full.reasoning; onEvent({ type: 'reasoning', text: full.reasoning }); }
         if (full.sources) onEvent({ type: 'sources', sources: full.sources });
         if (full.finish) finish = full.finish;
-        noteUsage(full.input, full.output);
+        noteUsage(full.input, full.output, full.cached);
         return { content, reasoning, usage, finish };
       }
       // 不是 JSON：按 SSE 文本继续解析（有些端点 Content-Type 写错）
       for (const line of text.split('\n')) handleLine(line.trim());
       if (!content && !reasoning && !sawData) throw new Error('服务端未返回任何内容（响应格式无法识别）');
       if (!content && !reasoning) throw new Error('服务端未返回任何内容（可能被网关拦截或上游出错）');
+      noteUsage(full.input, full.output, full.cached); // 与 JSON 路径同口径：cached 不能丢
       return { content, reasoning, usage, finish };
     }
 
     // 流式读取（Content-Type 是 event-stream，或未声明为 JSON）
     const reader = res.body.getReader();
+    activeReader = reader;
     for (;;) {
       let chunk;
       try {
@@ -377,7 +399,7 @@ async function streamChat(m, messages, opts) {
         if (full.reasoning) { reasoning = full.reasoning; onEvent({ type: 'reasoning', text: full.reasoning }); }
         if (full.sources) onEvent({ type: 'sources', sources: full.sources });
         if (full.finish) finish = full.finish;
-        noteUsage(full.input, full.output);
+        noteUsage(full.input, full.output, full.cached); // 与 JSON 路径同口径：cached 不能丢
       } else if (full && full.error) {
         throw new Error('服务端返回错误：' + full.error);
       }
@@ -398,6 +420,8 @@ async function streamChat(m, messages, opts) {
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
     if (signal) signal.removeEventListener('abort', onAbort);
+    // 异常路径（错误帧抛出、读流中断）cancel 读端：连接不滞留到 GC
+    try { if (activeReader) activeReader.cancel(); } catch (err) { /* 流已结束 */ }
   }
 }
 

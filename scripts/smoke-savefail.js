@@ -54,10 +54,14 @@ app.whenReady().then(async () => {
       gated = await js("!!document.getElementById('save-fail-gate')");
     }
     check('关窗时保存失败弹出强提示横门', gated === true, '');
-    // 明确放弃 → 窗口才真正关闭
+    // 闸门在等用户决策：主进程的 2.5s 兜底强关必须已被撤销（否则闸门活不过它要防护的场景）
+    await sleep(3000);
+    check('闸门弹出 3 秒后窗口仍在（强关定时器已撤销）', !w.isDestroyed(), '');
+    // 明确放弃 → 窗口才真正关闭。window-all-closed 会触发 app.quit()，轮询的 sleep
+    // 可能赶不上退出节奏：改由 closed 事件先落结果，再让 run() 主动 app.exit
+    const closedP = new Promise(resolve => { try { w.once('closed', () => resolve(true)); } catch (e) { resolve(!w.isDestroyed() ? false : true); } });
     await js("(function(){ var b = [].slice.call(document.querySelectorAll('#save-fail-gate button')).filter(function(x){ return /放弃/.test(x.textContent); })[0]; if (b) b.click(); })()");
-    let closed = false;
-    for (let i = 0; i < 25 && !closed; i++) { await sleep(200); closed = w.isDestroyed(); }
+    const closed = await Promise.race([closedP, sleep(5000).then(() => false)]);
     check('明确放弃后窗口关闭', closed === true, '');
   } catch (e) {
     fail++;

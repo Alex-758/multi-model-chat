@@ -129,6 +129,11 @@ function save(data) {
   const f = file();
   const tmp = f + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(encryptSecrets(data)), 'utf8');
+  // fsync 后再 rename：否则断电时 rename 元数据可能先于数据块落盘，store.json 截断
+  try {
+    const fd = fs.openSync(tmp, 'r+');
+    try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  } catch (err) { /* fsync 失败不阻断保存：最坏退回无 fsync 的原行为 */ }
   fs.renameSync(tmp, f);
   lastMtime = currentMtime();
   return { conflict };

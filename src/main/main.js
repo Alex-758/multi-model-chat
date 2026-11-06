@@ -127,20 +127,29 @@ function createWindow() {
     callback(false);
   });
   // 关闭前先让渲染层把内存里的在途数据落盘（流式半成品、未保存的记账）：
-  // 渲染层收到 app:flush 后保存并再次 close 放行；渲染层已死时由超时兜底强关
+  // 渲染层收到 app:flush 后保存并再次 close 放行；渲染层已死时由超时兜底强关。
+  // 渲染层保存失败弹「保存失败闸门」时会发 app:flush-held 撤销强关定时器——
+  // 闸门在等用户决策，2.5s 兜底恰恰不能在它唯一要生效的场景里把窗口杀掉
   let flushing = false;
   win.on('close', (e) => {
     if (flushing) return; // 第二次 close：flush 已做过，放行
     flushing = true;
     e.preventDefault();
-    try { win.webContents.send('app:flush'); } catch (err) { /* 渲染层可能已崩溃 */ }
-    setTimeout(() => {
-      try { if (win && !win.isDestroyed()) win.destroy(); } catch (err) { /* 已销毁 */ }
+    const winRef = win; // 闭包抓当时的窗口实例：macOS activate 重建窗口后不能误杀新窗
+    try { winRef.webContents.send('app:flush'); } catch (err) { /* 渲染层可能已崩溃 */ }
+    flushKillTimer = setTimeout(() => {
+      flushKillTimer = null;
+      try { if (winRef && !winRef.isDestroyed()) winRef.destroy(); } catch (err) { /* 已销毁 */ }
     }, 2500);
   });
 }
 
 // ---------- 窗口控制（自绘三键 #win-controls） ----------
+// 关窗兜底强关定时器（createWindow 的 close 处理器设置）；渲染层闸门可撤销
+let flushKillTimer = null;
+ipcMain.on('app:flush-held', () => {
+  if (flushKillTimer) { clearTimeout(flushKillTimer); flushKillTimer = null; }
+});
 ipcMain.handle('win:control', (e, action) => {
   if (!win || win.isDestroyed()) return false;
   if (action === 'min') win.minimize();
@@ -184,7 +193,9 @@ function resolveModel(mLike) {
   const p = list.find(x => x && x.id === pid);
   const full = Object.assign({}, m, { apiKey: (p && p.apiKey) || '' });
   if (p) {
-    if (p.baseUrl) full.baseUrl = p.baseUrl;
+    // baseUrl 无条件覆盖（不能因为存量为空就放行渲染层传值）：带 Key 的服务商 + 空 baseUrl
+    // 是设置界面的可达状态，放行即等于把真实密钥引流到任意 URL
+    full.baseUrl = p.baseUrl || '';
     if (p.apiFormat) full.apiFormat = p.apiFormat;
     if (p.provider) full.provider = p.provider;
     full.fullUrl = !!p.fullUrl;

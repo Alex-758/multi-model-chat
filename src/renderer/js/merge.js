@@ -116,7 +116,8 @@
     const points = [];   // 文本要点（参与聚类）
     const tables = [];   // 表格块（不拆散、不聚类，去重后原文附后）
     for (const r of results) {
-      for (const p of splitPoints(r.content)) {
+      // capText 与 analyze 同款护栏：病态超长单回答会让聚类进入 O(n²) 深水区
+      for (const p of splitPoints(capText(r.content))) {
         if (p.startsWith('|')) tables.push(p);
         else points.push({ model: r.name, modelId: r.modelId, text: p, v: vecOf(p) });
       }
@@ -358,7 +359,8 @@
   // 解决"排在后面的回答被硬砍甚至整体丢失"
   function buildAnswersBlock(results, budget) {
     const total = Math.max(500, Number(budget) || 32000);
-    const raw = (results || []).map(r => String(r.content || ''));
+    // capText 护栏：重复度检测是两两 cos（O(P²)），病态超长输入会冻结 UI
+    const raw = (results || []).map(r => capText(String(r.content || '')));
     if (!raw.length) return '';
     const tks = raw.map(tokensOf);
     const sumTk = tks.reduce((a, b) => a + b, 0);

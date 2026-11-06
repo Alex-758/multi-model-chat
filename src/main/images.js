@@ -143,7 +143,9 @@ const OCR_PS = [
 
 function ocrFile(file) {
   return new Promise((resolve) => {
-    const script = OCR_PS.replace('__FILE__', String(file).replace(/'/g, "''"));
+    // 替换串用函数形式：字符串形式的 replace 会解释路径里的 $&、$$ 等 $ 序列，
+    // userData 路径含 $ 的用户会静默 OCR 失败
+    const script = OCR_PS.replace('__FILE__', () => String(file).replace(/'/g, "''"));
     const encoded = Buffer.from(script, 'utf16le').toString('base64');
     let child;
     try {
@@ -202,13 +204,16 @@ function runCmd(cmd, args, timeoutMs, opts) {
     } catch (e) { reject(e); return; }
     const out = [], err = [];
     let settled = false;
+    let outBytes = 0, errBytes = 0;
+    // 输出侧上限：20MB 的 xlsx 展开成 Markdown 可达数百 MB，无上限会吃爆主进程内存
+    const MAX_CAPTURE = 32 * 1024 * 1024;
     const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); fn(v); } };
     const timer = setTimeout(() => {
       try { child.kill(); } catch (e) { /* 已退出 */ }
       finish(reject, new Error('解析超时（文档过大或转换器卡住）'));
     }, timeoutMs || 90000);
-    child.stdout.on('data', d => out.push(d));
-    child.stderr.on('data', d => err.push(d));
+    child.stdout.on('data', d => { if (outBytes < MAX_CAPTURE) { out.push(d); outBytes += d.length; } });
+    child.stderr.on('data', d => { if (errBytes < MAX_CAPTURE) { err.push(d); errBytes += d.length; } });
     child.on('error', e => finish(reject, e));
     child.on('close', code => {
       if (code === 0) return finish(resolve, Buffer.concat(out).toString('utf8'));

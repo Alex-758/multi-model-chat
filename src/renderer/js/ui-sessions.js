@@ -38,7 +38,8 @@ window.MM = window.MM || {};
               for (const r of (v.results || [])) if (r) add(r.usage);
             }
           }
-          if (v.merge) add(v.merge.usage);
+          // partial 快照的 merge 是上一份的副本（重试不改综合）：再计一次就重复
+          if (v.merge && !v.partial) add(v.merge.usage);
         }
       } else {
         for (const r of (m.results) || []) if (r) add(r.usage);

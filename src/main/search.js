@@ -26,7 +26,8 @@ async function bingSearch(query, count, opts) {
       lastErr = new Error('必应搜索未解析到结果（可能被临时限流），可稍后重试或配置 Tavily/博查');
     } catch (e) {
       if (opts && opts.signal && opts.signal.aborted) throw new Error('已停止');
-      lastErr = e;
+      // 15s 超时的 AbortError 转中文（用户主动停止已在上面的 signal 检查里拦截）
+      lastErr = (e && e.name === 'AbortError') ? new Error('搜索超时：15 秒未响应') : e;
     }
   }
   throw lastErr || new Error('必应搜索失败');
@@ -93,6 +94,10 @@ async function webSearch(cfg, query, count = 6, opts) {
       return items.map(r => ({ title: r.name || '', url: r.url || '', snippet: (r.summary || r.snippet || '').slice(0, 300) }));
     }
     return null;
+  } catch (e) {
+    if (opts && opts.signal && opts.signal.aborted) throw new Error('已停止');
+    if (e && e.name === 'AbortError') throw new Error('搜索超时：15 秒未响应');
+    throw e;
   } finally { clearTimeout(timeout); }
 }
 
