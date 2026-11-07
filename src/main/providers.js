@@ -137,6 +137,27 @@ async function readError(res) {
   return friendlyHttpError(res.status, await readDetail(res));
 }
 
+// 带上限地读完响应体：JSON Content-Type 路径用。异常端点忽略 stream:true
+// 返回超大 JSON 时，一次性 res.text() 会把主进程内存吃穿，这里读超即断
+async function readTextCapped(res, max) {
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let out = '';
+  let truncated = false;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    out += dec.decode(value, { stream: true });
+    if (out.length > max) {
+      truncated = true;
+      try { Promise.resolve(reader.cancel()).catch(function () {}); } catch (e) { /* 已断 */ }
+      break;
+    }
+  }
+  if (!truncated) out += dec.decode();
+  return { text: out, truncated: truncated };
+}
+
 // 把"完整 JSON 响应"归一成与流式一致的形状（兼容 OpenAI / Anthropic）。
 // 部分兼容端点或代理会忽略 stream:true 直接返回完整 JSON，只按 SSE 解析会得到空白回答。
 function textOf(v) {
@@ -336,10 +357,13 @@ async function streamChat(m, messages, opts) {
       }
     };
 
-    // 明确是 JSON：一次性读完按完整响应解析（有些端点会忽略 stream:true）
+    // 明确是 JSON：一次性读完按完整响应解析（有些端点会忽略 stream:true）。
+    // 响应体读取设与流式回退相同的 10MB 上限：异常端点返回超大 JSON 时不能无限吃内存
     const ctype = String(res.headers.get('content-type') || '').toLowerCase();
     if (ctype.indexOf('json') >= 0 && ctype.indexOf('event-stream') < 0) {
-      const text = await res.text();
+      const body = await readTextCapped(res, 10 * 1024 * 1024);
+      if (body.truncated) throw new Error('服务端响应超过 10MB，已中止解析');
+      const text = body.text;
       let full = null;
       try { full = extractFull(JSON.parse(text), m.apiFormat); } catch (e) { full = null; }
       if (full) {
@@ -353,11 +377,13 @@ async function streamChat(m, messages, opts) {
         noteUsage(full.input, full.output, full.cached);
         return { content, reasoning, usage, finish };
       }
-      // 不是 JSON：按 SSE 文本继续解析（有些端点 Content-Type 写错）
+      // 不是 JSON：按 SSE 文本继续解析（有些端点 Content-Type 写错）。
+      // 此时 full 必为 null（上面 if (full) 已 return），usage 由 handleLine 的
+      // 流式记账收取，这里不能再引用 full——audit3 曾在此写 noteUsage(full.input…)
+      // 导致该路径必然 TypeError，把已流出的正文整卡替换成错误
       for (const line of text.split('\n')) handleLine(line.trim());
       if (!content && !reasoning && !sawData) throw new Error('服务端未返回任何内容（响应格式无法识别）');
       if (!content && !reasoning) throw new Error('服务端未返回任何内容（可能被网关拦截或上游出错）');
-      noteUsage(full.input, full.output, full.cached); // 与 JSON 路径同口径：cached 不能丢
       return { content, reasoning, usage, finish };
     }
 
@@ -378,6 +404,8 @@ async function streamChat(m, messages, opts) {
       bumpIdle(); // 收到数据，重置空闲计时
       const text = dec.decode(value, { stream: true });
       buf += text;
+      // 单行缓冲同样设上限：异常端点持续发数据但永不出换行时不能无限吃内存
+      if (buf.length > 10 * 1024 * 1024) throw new Error('服务端响应异常：单帧数据超过 10MB，已中止');
       // 回退解析缓冲设上限：异常端点一直不发 data: 行时不能无限吃内存
       //（正常聊天 JSON 远小于 10MB；超限后按截断文本走既有的解析失败路径）
       if (!sawData && rawText.length < 10 * 1024 * 1024) rawText += text;
@@ -420,8 +448,10 @@ async function streamChat(m, messages, opts) {
   } finally {
     if (idleTimer) clearTimeout(idleTimer);
     if (signal) signal.removeEventListener('abort', onAbort);
-    // 异常路径（错误帧抛出、读流中断）cancel 读端：连接不滞留到 GC
-    try { if (activeReader) activeReader.cancel(); } catch (err) { /* 流已结束 */ }
+    // 异常路径（错误帧抛出、读流中断）cancel 读端：连接不滞留到 GC。
+    // 流已 errored 时 cancel() 返回 rejected promise，必须接住，否则每次断流/停止
+    // 都会在主进程产生一条 unhandledRejection
+    try { if (activeReader) Promise.resolve(activeReader.cancel()).catch(function () {}); } catch (err) { /* 流已结束 */ }
   }
 }
 
@@ -535,6 +565,7 @@ async function listModels(m) {
     const seen = new Set();
     const out = [];
     for (const x of arr) {
+      if (!x || typeof x !== 'object') continue; // 网关可能在列表里混入 null：不能拖垮整个列表
       let id = x.id || x.name;
       if (stripModelsPrefix && /^models\//.test(id)) id = id.slice('models/'.length);
       if (!id || seen.has(id)) continue;

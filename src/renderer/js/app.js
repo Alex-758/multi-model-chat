@@ -264,6 +264,20 @@ MM.defaults = {
     return syn;
   }
 
+  // 统一排序：国内 → 国际（预置）→ 自定义（sort 稳定，自定义保持用户先后顺序）。
+  // normalizeConfig 每次加载调用；「恢复预置服务商」等往数组追加预置的路径也要调用，
+  // 否则侧栏按连续区间插分组头会在末尾多出一个「国内服务商」组
+  MM.sortProviders = function (providers) {
+    const order = MM.defaults.PROVIDER_ORDER;
+    const rank = p => {
+      if (!p.preset) return 1000;                       // 自定义始终最后
+      const i = order.indexOf(p.id);
+      return i < 0 ? 500 : i;                           // 未知预置排在国际之后、自定义之前
+    };
+    (providers || []).sort((a, b) => rank(a) - rank(b));
+    return providers;
+  };
+
   // 把任意来源的配置（磁盘数据 / 导入备份 / 全新安装）统一为当前结构。
   // 启动加载与「导入数据」共用这一条迁移路径，避免两边行为不一致。
   // 注意：1.0 备份迁移后 providers 上仍带明文密钥，调用方落盘后需用 stripSecrets 剥离。
@@ -328,16 +342,8 @@ MM.defaults = {
       refreshPresetModelMeta(providers);
       cfg.presetVersion = 4;
     }
-    // 统一排序：国内 → 国际（预置）→ 自定义。
-    // 每次加载都重排，保证老配置里被追加到末尾的预置服务商（如迁移补进来的 Kimi）回到正确位置。
-    // 自定义服务商之间保持用户添加的先后顺序（sort 稳定）。
-    const order = MM.defaults.PROVIDER_ORDER;
-    const rank = p => {
-      if (!p.preset) return 1000;                       // 自定义始终最后
-      const i = order.indexOf(p.id);
-      return i < 0 ? 500 : i;                           // 未知预置排在国际之后、自定义之前
-    };
-    providers = providers.slice().sort((a, b) => rank(a) - rank(b));
+    // 统一排序：每次加载都重排，保证老配置里被追加到末尾的预置服务商（如迁移补进来的 Kimi）回到正确位置
+    providers = MM.sortProviders(providers);
     // 保留 modelLists 等其余字段（此前启动时被整体丢弃，导致模型列表缓存永远无法跨重启生效）
     const synthesis = normalizeSynth(cfg.synthesis, providers);
     // 综合来源指向的模型/服务商已被删除时回落前端合并：

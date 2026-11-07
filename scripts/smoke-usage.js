@@ -289,6 +289,62 @@ server.listen(0, '127.0.0.1', () => {
       await sleep(300);
       const sumNow = await js(`(document.querySelector('.uu-sumline') || {}).textContent || ''`);
       check('面板显示 14 个请求', sumNow.indexOf('14 个请求') >= 0, sumNow);
+
+      // ---------- 6. 边界回归（audit4）：临时替换会话数组做隔离验证，结束后原样恢复 ----------
+      // a) 全部行缺时间戳：collect 的 ts 链兜底为 0，「全部」必须锚到今天（单桶），
+      //    不能从 1970 铺 2 万个桶把设置页卡死
+      const noTs = await js(`(function(){
+        const saved = MM.state.sessions;
+        MM.state.sessions = [{ id: 't0', messages: [
+          { role: 'user' },
+          { role: 'assistant', results: [{ modelId: 'p1::m1', name: '模型一', status: 'done', usage: { input: 10, output: 5 } }] }
+        ] }];
+        try {
+          const agg = MM.usage.testHooks.aggregate();
+          return { buckets: agg.buckets.length, total: agg.kpi.total, tokens: agg.kpi.tokens };
+        } finally { MM.state.sessions = saved; }
+      })()`);
+      check('全部行缺时间戳：单桶 + KPI 可见', noTs.buckets === 1 && noTs.total === 1 && noTs.tokens === 15, JSON.stringify(noTs));
+      // b) 坏时间戳（1970 年）：桶数封顶 400，不随时间跨度无界增长
+      const oldTs = await js(`(function(){
+        const saved = MM.state.sessions;
+        MM.state.sessions = [{ id: 'old', createdAt: 86400000, messages: [
+          { role: 'user', createdAt: 86400000 },
+          { role: 'assistant', createdAt: 86400000, results: [{ modelId: 'p1::m1', name: '模型一', status: 'done', usage: { input: 10, output: 5 } }] }
+        ] }];
+        try {
+          const agg = MM.usage.testHooks.aggregate();
+          return { buckets: agg.buckets.length, total: agg.kpi.total };
+        } finally { MM.state.sessions = saved; }
+      })()`);
+      check('坏时间戳桶数封顶 400', oldTs.buckets === 400 && oldTs.total === 1, JSON.stringify(oldTs));
+      // c) 无 usage 但有正文的综合/仲裁：归为「完成」而不是终身「进行中」（成功率分母不再虚高）
+      const noUsage = await js(`(function(){
+        const saved = MM.state.sessions;
+        MM.state.sessions = [{ id: 'nu', title: '无用量', createdAt: Date.now(), messages: [
+          { role: 'user', createdAt: Date.now() },
+          { role: 'assistant', createdAt: Date.now(), versions: [{ results: [
+              { modelId: 'p1::m1', name: '模型一', status: 'done', usage: null }
+            ], merge: { content: '报告正文', mode: 'model', createdAt: Date.now() }, at: Date.now() }], active: 0,
+            review: { createdAt: Date.now(), items: [
+              { modelId: 'p1::m2', name: '模型二', status: 'done', usage: null, content: '审查意见' }
+            ], verdict: { content: '最终结论', stopped: false } } }
+        ] }];
+        try {
+          const agg = MM.usage.testHooks.aggregate();
+          const mergeRow = agg.f.find(function (r) { return r.kind === 'merge'; });
+          const verdictRow = agg.f.find(function (r) { return r.kind === 'review' && r.name === '仲裁'; });
+          return { merge: mergeRow && mergeRow.status, verdict: verdictRow && verdictRow.status, run: agg.kpi.run, rate: agg.kpi.rate };
+        } finally { MM.state.sessions = saved; }
+      })()`);
+      check('无 usage 有正文的综合/仲裁=完成（run=0，成功率 100%）',
+        noUsage.merge === 'ok' && noUsage.verdict === 'ok' && noUsage.run === 0 && noUsage.rate === 100, JSON.stringify(noUsage));
+      // d) CSV：含 CR 的值引号包裹（不裸断行）；数字列负值不加前缀；文本列公式防护仍在
+      const csvEdge = await js(hooks + '.csvOf([{ ts: 1750000000000, kind: "chat", modelId: "x", name: "a\\r b", status: "ok", err: "", input: -5, output: 0, cached: 0, ms: 0, session: "=CMD" }])');
+      const edgeLines = csvEdge.split('\r\n');
+      check('CSV 含 CR 的值被引号包裹', edgeLines.length === 2 && edgeLines[1].indexOf('"a\r b"') >= 0, JSON.stringify(edgeLines));
+      check('CSV 数字列负值不加引号前缀', edgeLines.length === 2 && edgeLines[1].indexOf(',-5,') >= 0, JSON.stringify(edgeLines));
+      check('CSV 文本列公式前缀防护仍在', edgeLines.length === 2 && edgeLines[1].indexOf("'=CMD") >= 0, JSON.stringify(edgeLines));
     }
 
     run().then(() => {

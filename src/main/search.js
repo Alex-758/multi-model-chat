@@ -12,7 +12,9 @@ function wireExternal(signal, ctrl) {
 }
 
 async function bingSearch(query, count, opts) {
-  // 双端点兜底：www 失败或解析不到结果时换 cn 端点再试一次（已中止则不再重试）
+  // 双端点兜底：www 失败或解析不到结果时换 cn 端点再试一次（已中止则不再重试）。
+  // 两个端点共享一个 15 秒总预算：否则第一个端点超时后还要再等 15s，最坏 30s
+  const deadline = Date.now() + 15000;
   const endpoints = [
     'https://www.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=zh-CN&count=' + Math.max(count + 4, 10),
     'https://cn.bing.com/search?q=' + encodeURIComponent(query) + '&setlang=zh-CN&count=' + Math.max(count + 4, 10)
@@ -20,8 +22,10 @@ async function bingSearch(query, count, opts) {
   let lastErr = null;
   for (const url of endpoints) {
     if (opts && opts.signal && opts.signal.aborted) throw new Error('已停止');
+    const remain = deadline - Date.now();
+    if (remain <= 500) { lastErr = lastErr || new Error('搜索超时：15 秒未响应'); break; }
     try {
-      const out = await bingAttempt(url, count, opts);
+      const out = await bingAttempt(url, count, opts, remain);
       if (out.length) return out;
       lastErr = new Error('必应搜索未解析到结果（可能被临时限流），可稍后重试或配置 Tavily/博查');
     } catch (e) {
@@ -33,9 +37,9 @@ async function bingSearch(query, count, opts) {
   throw lastErr || new Error('必应搜索失败');
 }
 
-async function bingAttempt(url, count, opts) {
+async function bingAttempt(url, count, opts, budgetMs) {
   const ctrl = new AbortController();
-  const timeout = setTimeout(() => ctrl.abort(), 15000);
+  const timeout = setTimeout(() => ctrl.abort(), budgetMs > 0 ? budgetMs : 15000);
   wireExternal(opts && opts.signal, ctrl);
   try {
     const res = await fetch(url, {

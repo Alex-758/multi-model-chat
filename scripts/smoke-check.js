@@ -94,6 +94,23 @@ app.whenReady().then(async () => {
   check('组合输入中按 Esc 不清空过滤词', o.duringCompose === '重排', r);
   check('组合结束后按 Esc 正常清空', o.afterEnd === '', r);
 
+  // ===== 修复 3：恢复预置服务商后必须归位排序（否则侧栏末尾多出第二个「国内服务商」组） =====
+  r = await js(`(function(){
+    MM.state.config = MM.normalizeConfig({});
+    // 模拟用户配置缺 deepseek/dashscope（历史原因条目被删）
+    MM.state.config.providers = MM.state.config.providers.filter(function(p){ return p.id !== 'deepseek' && p.id !== 'dashscope'; });
+    MM.settings.open('models');
+    var btns = [].filter.call(document.querySelectorAll('.model-list button'), function(b){ return b.textContent.indexOf('恢复预置服务商') >= 0; });
+    if (!btns.length) return JSON.stringify({ err: 'no-restore-btn' });
+    btns[0].click();
+    var ids = MM.state.config.providers.map(function(p){ return p.id; });
+    var groups = [].map.call(document.querySelectorAll('.model-list-group'), function(e){ return e.textContent; });
+    return JSON.stringify({ ids: ids, groups: groups });
+  })()`);
+  o = JSON.parse(r);
+  check('恢复后 deepseek 回到首位、dashscope 归位国内组', o.ids && o.ids[0] === 'deepseek' && o.ids.indexOf('dashscope') === 2, r);
+  check('侧栏分组头只有 国内|国际 各一个（不出现第二个国内组）', o.groups && o.groups.join('|') === '国内服务商|国际服务商', r);
+
   console.log('\nRESULT pass=' + pass + ' fail=' + fail);
   w.destroy(); app.exit(fail ? 1 : 0);
 });

@@ -34,6 +34,13 @@ window.MM = window.MM || {};
     }
   }
   function close() {
+    // Esc 关闭不经过鼠标，聚焦中的输入框不会触发 blur→change：已输入未提交的
+    // 密钥会静默丢失。这里先补一次 blur（change 会同步触发 commit），把这条路径
+    // 与「点 X / 点遮罩天然先 blur」对齐；遮罩/空值时 commit 是无副作用 no-op
+    const ae = document.activeElement;
+    if (ae && ae !== document.body && typeof ae.blur === 'function') {
+      try { ae.blur(); } catch (e) { /* 已失焦 */ }
+    }
     const overlay = U.$('#settings-overlay');
     overlay.classList.add('closing'); // 播放淡出动画
     if (closeTimer) clearTimeout(closeTimer);
@@ -202,6 +209,8 @@ window.MM = window.MM || {};
             providers().push(copy);
           }
         }
+        // 追加的预置按 国内→国际 归位：侧栏分组头按连续区间插，末尾单开一组是错的
+        MM.sortProviders(providers());
         MM.save({ configOnly: true }); renderModels(); syncModelConsumers();
         U.toast('已恢复预置服务商');
       }

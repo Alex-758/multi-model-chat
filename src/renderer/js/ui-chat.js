@@ -1361,12 +1361,18 @@ window.MM = window.MM || {};
     if (sendLock) return;
     sendLock = true;
     try {
-      // OCR/文档提取可能还在跑：等它们完成，否则图片会被静默丢掉
+      // OCR/文档提取可能还在跑：等它们完成，否则图片会被静默丢掉。
+      // 等待期间用户可能切走会话：先锁定目标，恢复后校验，消息绝不能落进切换后的会话
+      const target = MM.sessions.current();
       await Promise.all(pendingAttach.map(a => a.ready).filter(Boolean));
+      if (MM.sessions.current() !== target) {
+        U.toast('附件处理期间已切换会话，发送已取消', true);
+        return; // 输入框与附件条原样保留，切回原会话可重发
+      }
       const atts = pendingAttach.filter(a => !a.failed && (a.kind !== 'image' || a.id));
       if (!text && !atts.length) { U.toast('附件处理失败，请移除后重试', true); return; }
 
-      const s = MM.sessions.current() || MM.sessions.createSilent();
+      const s = target || MM.sessions.createSilent();
       const userMsg = { id: U.uid(), role: 'user', content: text, createdAt: Date.now() };
       const imgs = atts.filter(a => a.kind === 'image')
         .map(a => ({ id: a.id, ext: a.ext, name: a.name, w: a.w, h: a.h, size: a.size, text: a.text || '' }));

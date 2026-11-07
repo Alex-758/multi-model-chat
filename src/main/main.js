@@ -400,8 +400,9 @@ ipcMain.handle('attach:extractDoc', (e, p) => images.extractDoc(p));
 const pickedPaths = new Map(); // path -> expiresAt
 function consumePickedPath(p) {
   const exp = pickedPaths.get(p);
-  if (!exp || exp < Date.now()) return false;
-  pickedPaths.delete(p);
+  if (!exp) return false;
+  pickedPaths.delete(p); // 过期与有效都取走：没人消费的条目不能永久留在 Map 里
+  if (exp < Date.now()) return false;
   return true;
 }
 // 「+」按钮：原生文件选择框。沙箱渲染层读不了任意路径——
@@ -504,29 +505,37 @@ ipcMain.handle('data:import', async () => {
     properties: ['openFile']
   });
   if (r.canceled || !r.filePaths || !r.filePaths[0]) return null;
+  // 大小上限：误选超大文件（日志导出、npm lockfile 等）会长时间阻塞主进程并吃穿内存；
+  // 本应用导出的备份（含内联图片）远达不到该量级
+  let parsed;
   try {
-    const parsed = JSON.parse(fs.readFileSync(r.filePaths[0], 'utf8'));
-    if (!parsed || !parsed.config || typeof parsed.config !== 'object' || !Array.isArray(parsed.sessions)) {
-      throw new Error('缺少 config/sessions 字段');
-    }
-    // 兼容导入本应用内部的 store.json（密钥为 safeStorage 密文）：先解密再落盘
-    const imported = store.decryptData(parsed);
-    // 会话条目必须过滤：null/字符串会让渲染层排序直接抛错，写回磁盘后下次启动即不可用
-    const sessions = imported.sessions.filter(s => s && typeof s === 'object');
-    for (const s of sessions) if (!Array.isArray(s.messages)) s.messages = [];
-    // 备份里内联的图片附件物化回 images/ 目录并改写引用（旧格式备份无 dataB64，原样通过）
-    await images.importAttach(sessions);
-    // 覆盖前给当前数据留一份副本：导入是覆盖性操作，选错文件要能退回来
-    const backupPath = store.snapshot('pre-import');
-    db = { config: imported.config, sessions: sessions };
-    store.save(db);
-    // 1.0 平铺旧结构原样返回（含密钥）：渲染层迁移逻辑需要读密钥并经 store:save 合并回主进程；
-    // 新结构返回剥离密钥后的数据
-    const legacyFlat = Array.isArray(imported.config.models) && imported.config.models.length;
-    return { config: legacyFlat ? imported.config : sanitizeConfig(imported.config), sessions: db.sessions, backup: backupPath };
+    const st = fs.statSync(r.filePaths[0]);
+    if (st.size > 256 * 1024 * 1024) throw new Error('文件超过 256MB，不是有效的备份数据');
+    parsed = JSON.parse(fs.readFileSync(r.filePaths[0], 'utf8'));
   } catch (err) {
     throw new Error('文件解析失败：' + err.message);
   }
+  if (!parsed || !parsed.config || typeof parsed.config !== 'object' || !Array.isArray(parsed.sessions)) {
+    throw new Error('文件解析失败：缺少 config/sessions 字段');
+  }
+  // 兼容导入本应用内部的 store.json（密钥为 safeStorage 密文）：先解密再落盘
+  const imported = store.decryptData(parsed);
+  // 会话条目必须过滤：null/字符串会让渲染层排序直接抛错，写回磁盘后下次启动即不可用
+  const sessions = imported.sessions.filter(s => s && typeof s === 'object');
+  for (const s of sessions) if (!Array.isArray(s.messages)) s.messages = [];
+  // 备份里内联的图片附件物化回 images/ 目录并改写引用（旧格式备份无 dataB64，原样通过）
+  await images.importAttach(sessions);
+  // 覆盖前给当前数据留一份副本：导入是覆盖性操作，选错文件要能退回来
+  const backupPath = store.snapshot('pre-import');
+  // 先落盘成功再换内存 db：写盘失败（磁盘满/无权限）时内存与磁盘保持一致，
+  // 渲染层拿到的是失败拒绝，内存里的旧数据继续可用
+  const newDb = { config: imported.config, sessions: sessions };
+  store.save(newDb);
+  db = newDb;
+  // 1.0 平铺旧结构原样返回（含密钥）：渲染层迁移逻辑需要读密钥并经 store:save 合并回主进程；
+  // 新结构返回剥离密钥后的数据
+  const legacyFlat = Array.isArray(imported.config.models) && imported.config.models.length;
+  return { config: legacyFlat ? imported.config : sanitizeConfig(imported.config), sessions: db.sessions, backup: backupPath };
 });
 
 app.whenReady().then(() => {

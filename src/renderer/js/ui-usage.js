@@ -32,7 +32,7 @@ window.MM = window.MM || {};
     if (st === 'stopped') return 'stopped';
     if (st === 'skipped') return 'skipped'; // 多模态跳过的模型：请求从未发出，不能算"进行中"
     if (st === 'pending' || st === 'streaming' || st === 'searching') return 'run';
-    // 历史数据可能没有 status 字段：有真实用量即视为完成
+    // 历史数据可能没有 status 字段：有真实用量或正文即视为完成
     return hasUsage ? 'ok' : 'run';
   }
 
@@ -44,7 +44,9 @@ window.MM = window.MM || {};
       modelId: r.modelId || '',
       // 结果/审查员用 name，仲裁 verdict 用 modelName（ui-chat 写入字段不同）
       name: r.name || r.modelName || r.modelId || fallbackName || '未知模型',
-      status: statusOf(r.status, !!u, !!r.stopped),
+      // 完成信号 = 有真实用量 或 已有正文（仲裁/无 usage 回传的端点也能归为完成，
+      // 否则永远显示「进行中」并抬高成功率分母）；stopped/error 仍按字段优先
+      status: statusOf(r.status, !!u || !!r.content, !!r.stopped),
       err: r.error ? String(r.error) : '',
       input: u ? (Number(u.input) || 0) : 0,
       output: u ? (Number(u.output) || 0) : 0,
@@ -63,7 +65,9 @@ window.MM = window.MM || {};
       kind: 'merge',
       modelId: mg.modelId || '',
       name: mg.modelName || mg.modelId || '综合（未记录模型）',
-      status: mg.stopped ? 'stopped' : (u ? 'ok' : 'run'),
+      // merge 数据层没有 status：完成态以正文为准（与综合卡片的渲染语义一致），
+      // 服务端没回 usage 的端点不再终身「进行中」
+      status: mg.stopped ? 'stopped' : ((u || mg.content) ? 'ok' : 'run'),
       err: '',
       input: u ? (Number(u.input) || 0) : 0,
       output: u ? (Number(u.output) || 0) : 0,
@@ -162,13 +166,21 @@ window.MM = window.MM || {};
     let start = norm(rangeStart());
     if (range === 'all') {
       // 「全部」的起点取最早一条数据（取整到天/周），不能从 0（1970）铺桶，
-      // 否则按周分桶会有几千个空桶，柱子全挤在最右边一格
+      // 否则按周分桶会有几千个空桶，柱子全挤在最右边一格。
+      // 所有行都缺时间戳（导入/手改的旧数据两级 createdAt 都没有）时锚到今天：
+      // 这些行进不了图（indexOf 跳过 ts<=0），但 KPI 与流水照常可见
       let min = Infinity;
       for (const r of f) if (r.ts > 0 && r.ts < min) min = r.ts;
-      if (min !== Infinity) start = norm(min);
+      start = min !== Infinity ? norm(min) : norm(Date.now());
     }
     const end = norm(Date.now());
-    const n = Math.max(1, Math.round((end - start) / stepMs) + 1);
+    let n = Math.max(1, Math.round((end - start) / stepMs) + 1);
+    // 坏时间戳（如秒/毫秒混淆产生的极小值）仍可能铺出几千桶：桶数封顶 400
+    //（周桶约 7.7 年），只保留最近 400 桶，更早的行不进图但 KPI/流水不受影响
+    if (n > 400) {
+      start = end - (400 - 1) * stepMs;
+      n = 400;
+    }
     for (let i = 0; i < n; i++) {
       const d = new Date(start + i * stepMs);
       list.push({ label: (d.getMonth() + 1) + '/' + d.getDate(), show: true, value: 0, count: 0, series: {} });
@@ -438,19 +450,20 @@ window.MM = window.MM || {};
   }
 
   function csvOf(rows) {
-    // 公式注入防护：= + - @ 开头的单元格前置单引号（Excel/WPS 不再当公式求值），
-    // 是 CSV 注入的标准缓解；数字列不受影响
-    const escCell = v => {
+    // 公式注入防护：= + - @ 开头的文本单元格前置单引号（Excel/WPS 不再当公式求值），
+    // 是 CSV 注入的标准缓解；数字列（输入/输出/缓存/耗时）跳过前缀，避免负值被变成文本。
+    // 含 CR 的值也要引号包裹：否则裸 \r 会断行破坏 CSV 结构
+    const escCell = (v, isNum) => {
       v = String(v == null ? '' : v);
-      if (/^[=+\-@\t\r]/.test(v)) v = "'" + v;
-      return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+      if (!isNum && /^[=+\-@\t\r]/.test(v)) v = "'" + v;
+      return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
     };
     const lines = ['时间,会话,模型,用途,状态,输入,输出,缓存命中,耗时(ms)'];
     for (const r of rows) {
       lines.push([
         fmtLogTs(r.ts), r.session, r.name, KIND_LABEL[r.kind], STATUS_LABEL[r.status],
         r.input, r.output, r.cached, r.ms
-      ].map(escCell).join(','));
+      ].map((v, i) => escCell(v, i >= 5)).join(','));
     }
     return '\uFEFF' + lines.join('\r\n');
   }

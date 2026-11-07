@@ -370,6 +370,57 @@ async function run() {
   check('错误帧报错', !!err && /upstream boom/.test(err.message), err ? err.message : '未报错');
   check('错误帧抛出后连接被 cancel（服务端 close 及时触发）', cancelled === true, 'cancelled=' + cancelled);
 
+  // 29) 回归（audit4）：Content-Type 标成 JSON 但实为 SSE 的端点——按 SSE 文本回退解析后
+  // 不能再引用恒为 null 的 full（audit3 曾在此写 noteUsage(full.input…) 必然 TypeError，
+  // 把已流出的正文整卡替换成错误）。usage 由 handleLine 的流式记账收取
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.write('data: {"choices":[{"delta":{"content":"回退"}}]}\n\n');
+    res.write('data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":9}}\n\n');
+    res.end('data: [DONE]\n\n');
+  };
+  out = null; err = null;
+  try { out = await providers.streamChat(model(base), [{ role: 'user', content: 'hi' }], { onEvent: () => {} }); }
+  catch (e) { err = e; }
+  check('JSON CT + SSE 正文回退正常返回且 usage 记账',
+    !!out && out.content === '回退' && !!out.usage && out.usage.input === 50 && out.usage.output === 9,
+    err ? ('报错=' + err.message) : JSON.stringify({ content: out.content, usage: out.usage }));
+
+  // 30) /models 列表混入 null 条目：跳过它，不能拖垮整个列表
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ data: [null, { id: 'm1' }, 'oops', { name: 'm2', context_length: 4096 }] }));
+  };
+  const lm = await providers.listModels(Object.assign(model(base), { baseUrl: base }));
+  check('listModels 跳过 null/非对象条目', lm.length === 2 && lm[0].id === 'm1' && lm[1].id === 'm2' && lm[1].context === 4096,
+    JSON.stringify(lm));
+
+  // 31) 流式单行缓冲上限：持续发数据但永不出换行时按解析失败中止（防内存无界增长）
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    const chunk = 'x'.repeat(1024 * 1024);
+    let sent = 0;
+    const t = setInterval(() => {
+      res.write(chunk);
+      sent += 1;
+      if (sent >= 12) { clearInterval(t); res.end(); } // 12MB 无换行：超过 10MB 上限即应中止
+    }, 5);
+  };
+  err = null;
+  try { await providers.streamChat(model(base), [{ role: 'user', content: 'hi' }], { onEvent: () => {} }); }
+  catch (e) { err = e; }
+  check('无换行的超大单帧被上限中止', !!err && /10MB/.test(err.message), err ? err.message : '未报错');
+
+  // 32) JSON Content-Type 响应体上限：忽略 stream:true 且返回超大 JSON 时中止读取
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.end('{"choices":[{"message":{"content":"' + 'y'.repeat(11 * 1024 * 1024) + '"}}]}');
+  };
+  err = null;
+  try { await providers.streamChat(model(base), [{ role: 'user', content: 'hi' }], { onEvent: () => {} }); }
+  catch (e) { err = e; }
+  check('超大 JSON 响应体被上限中止', !!err && /10MB/.test(err.message), err ? err.message : '未报错');
+
   server.close();
   console.log('---SUMMARY---');
   console.log(JSON.stringify(rows, null, 1));
