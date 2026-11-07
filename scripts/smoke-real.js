@@ -82,6 +82,10 @@ app.whenReady().then(async () => {
     const corrupts = fs.readdirSync(tmp).filter(f => f.indexOf('.corrupt-') >= 0);
     check('未产生损坏备份', corrupts.length === 0, JSON.stringify(corrupts));
 
+    // 每日自动备份：当天第一次保存前自动留底 store.json.auto-<日期>（启动迁移已触发过保存）
+    let autos = fs.readdirSync(tmp).filter(f => /\.auto-\d{8}$/.test(f));
+    check('每日自动备份已生成（.auto-<日期>）', autos.length >= 1, JSON.stringify(autos));
+
     // 非法 chat:send payload 不应让渲染层一直停在"生成中"
     const done = await js(`new Promise(function(resolve){
       var off = api.onEvent(function(d){
@@ -105,6 +109,18 @@ app.whenReady().then(async () => {
     await sleep(500);
     baks = fs.readdirSync(tmp).filter(f => /\.bak-\d+$/.test(f));
     check('冲突备份只保留最近 5 份', baks.length === 5, 'n=' + baks.length);
+
+    // 自动备份：同一天重复保存不再新增 + 滚动只保留最近 7 份
+    const d = new Date();
+    const dayKey = 'store.json.auto-' + d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+    autos = fs.readdirSync(tmp).filter(f => /\.auto-\d{8}$/.test(f));
+    check('当天重复保存只保留一份自动备份', autos.filter(f => f === dayKey).length === 1, JSON.stringify(autos));
+    for (let i = 1; i <= 9; i++) fs.writeFileSync(path.join(tmp, 'store.json.auto-2025010' + i), 'x', 'utf8');
+    fs.appendFileSync(storePath, ' ');
+    await js('MM.save()');
+    await sleep(500);
+    autos = fs.readdirSync(tmp).filter(f => /\.auto-\d{8}$/.test(f));
+    check('自动备份滚动保留 7 份（更旧的被清理）', autos.length === 7, 'n=' + autos.length);
   } catch (e) {
     console.log('SMOKE_ERROR ' + (e && (e.stack || e.message)));
   }

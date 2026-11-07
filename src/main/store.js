@@ -100,6 +100,33 @@ function decryptInfo() { return decryptFailures; }
 // 当前系统是否支持加密（Windows 下为 DPAPI）。不可用时密钥会以明文落盘，界面需要提示。
 function encryptionAvailable() { return canEncrypt(); }
 
+// 每日自动备份：当天第一次保存前，把磁盘上的旧数据复制为 store.json.auto-<日期>。
+// 快照的是"覆盖前的磁盘状态"——当天任何一次写坏（渲染层送来坏数据、导入出错），
+// 都能退回到昨天的样子。每天最多一份，滚动保留最近 7 份
+function autoBackup() {
+  try {
+    if (!fs.existsSync(file())) return; // 首次启动还没有数据文件，无从备份
+    const d = new Date();
+    const day = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+    const dest = file() + '.auto-' + day;
+    if (fs.existsSync(dest)) return; // 当天已备份过
+    fs.copyFileSync(file(), dest);
+    pruneAutos();
+  } catch (e) { /* 备份失败不阻断保存 */ }
+}
+
+// 只保留最近 7 份 .auto-<日期>（文件名里的日期按字典序排序就是时间序）
+function pruneAutos() {
+  try {
+    const dir = path.dirname(file());
+    const prefix = path.basename(file()) + '.auto-';
+    const autos = fs.readdirSync(dir).filter(n => n.startsWith(prefix)).sort();
+    for (const n of autos.slice(0, Math.max(0, autos.length - 7))) {
+      try { fs.unlinkSync(path.join(dir, n)); } catch (e) { /* 占用等：下次再清 */ }
+    }
+  } catch (e) { /* 目录不可读：跳过 */ }
+}
+
 // 覆盖类操作（导入）前给当前数据留一份带时间戳的副本。
 // .bak 是多实例冲突检测专用的固定名，不能混用；返回副本路径，失败返回空串不阻断主流程
 function snapshot(tag) {
@@ -112,6 +139,7 @@ function snapshot(tag) {
 }
 
 function save(data) {
+  autoBackup(); // 每天第一次保存前，把磁盘旧数据留底（详见 autoBackup 注释）
   // 并发检测：磁盘上的 mtime 与本进程记录不一致 => 被其他实例/进程改过
   let conflict = false;
   const cur = currentMtime();

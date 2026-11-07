@@ -200,7 +200,7 @@ server.listen(0, '127.0.0.1', () => {
       check('CSV 带表头 + 11 行数据 + BOM',
         csv.indexOf('\uFEFF') === 0 && csv.split('\r\n').length === 12 && csv.indexOf('时间,会话,模型,用途,状态,输入,输出,缓存命中,耗时(ms)') === 1,
         csv.slice(0, 80));
-      check('CSV 逗号字段转义', csv.indexOf('"') >= 0 || csv.split('\r\n').every(l => (l.match(/,/g) || []).length === 8));
+      check('CSV 逗号字段转义', csv.indexOf('"') >= 0 || csv.split('\r\n').every(l => (l.match(/,/g) || []).length === 9)); // 10 列：1.4.8 起新增「花费(元)」
 
       // ---------- 3. 面板渲染 ----------
       await js("document.querySelector('#btn-settings').click()");
@@ -345,6 +345,43 @@ server.listen(0, '127.0.0.1', () => {
       check('CSV 含 CR 的值被引号包裹', edgeLines.length === 2 && edgeLines[1].indexOf('"a\r b"') >= 0, JSON.stringify(edgeLines));
       check('CSV 数字列负值不加引号前缀', edgeLines.length === 2 && edgeLines[1].indexOf(',-5,') >= 0, JSON.stringify(edgeLines));
       check('CSV 文本列公式前缀防护仍在', edgeLines.length === 2 && edgeLines[1].indexOf("'=CMD") >= 0, JSON.stringify(edgeLines));
+
+      // e) 花费估算（C1）：手填单价按 (输入×in + 输出×out + 缓存×cache)/1M×汇率 折算；
+      // 单价未知为 null 不计入 KPI；CSV 增加「花费(元)」列。临时替换 providers/sessions，结束恢复
+      const costAgg = await js(`(function(){
+        const savedP = MM.state.config.providers;
+        MM.state.config.providers = savedP.concat([{ id: 'pr', name: '计价商', models: [
+          { modelId: 'paid', name: '计价模型', enabled: true, priceIn: 2, priceOut: 10, priceCache: 0.1 }
+        ] }]);
+        MM.state.config.fxRate = 7.2;
+        const savedS = MM.state.sessions;
+        try {
+          MM.state.sessions = [{ id: 'c1', title: '花费会话', createdAt: Date.now(), messages: [
+            { role: 'user', createdAt: Date.now() },
+            { role: 'assistant', createdAt: Date.now(), versions: [{ results: [
+                { modelId: 'pr::paid', name: '计价模型', status: 'done', usage: { input: 1000000, output: 100000, cached: 500000 } },
+                { modelId: 'p1::noprice-x7', name: '无价模型', status: 'done', usage: { input: 10, output: 5 } }
+              ], merge: null, at: Date.now() }], active: 0 }
+          ] }];
+          const agg = MM.usage.testHooks.aggregate();
+          const row = agg.f.find(function (r) { return r.modelId === 'pr::paid'; });
+          const noPrice = agg.f.find(function (r) { return r.modelId === 'p1::noprice-x7'; });
+          const csv = MM.usage.testHooks.csvOf([{ ts: 1750000000000, kind: 'chat', modelId: 'x', name: 'm', status: 'ok', err: '', input: 1, output: 2, cached: 0, cost: 0.5, ms: 0, session: 's' }]);
+          // 模板字符串里写 \\r\\n，注入渲染层的才是 split('\\r\\n') 字面量（注释里也不能出现裸转义）
+          const lines = csv.split('\\r\\n');
+          return { cost: row && row.cost, costNull: noPrice ? noPrice.cost === null : null,
+            kpiCost: agg.kpi.cost, kpiKnown: agg.kpi.costKnown,
+            head10: lines[0].split(',')[9], cell10: lines[1].split(',')[9] };
+        } finally { MM.state.sessions = savedS; MM.state.config.providers = savedP; }
+      })()`);
+      // 1M×$2 + 0.1M×$10 + 0.5M×$0.1 = $3.05 → ×7.2 = ¥21.96
+      check('手填单价请求行花费 21.96（缓存按 cache_read 价计）',
+        costAgg.cost != null && Math.abs(costAgg.cost - 21.96) < 1e-9, JSON.stringify(costAgg));
+      check('无单价请求行花费为 null（不显示不估算）', costAgg.costNull === true, JSON.stringify(costAgg));
+      check('KPI 花费只累计单价已知的请求', costAgg.kpiCost != null && Math.abs(costAgg.kpiCost - 21.96) < 1e-9 && costAgg.kpiKnown === 1,
+        JSON.stringify({ kpiCost: costAgg.kpiCost, kpiKnown: costAgg.kpiKnown }));
+      check('CSV 第 10 列为花费(元)', costAgg.head10 === '花费(元)' && costAgg.cell10 === '0.5',
+        JSON.stringify({ head10: costAgg.head10, cell10: costAgg.cell10 }));
     }
 
     run().then(() => {

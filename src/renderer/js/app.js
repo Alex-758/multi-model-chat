@@ -15,32 +15,34 @@ MM.defaults = {
       id: 'deepseek', name: 'DeepSeek', provider: 'deepseek',
       apiFormat: 'openai', baseUrl: 'https://api.deepseek.com', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', enabled: true, contextTokens: 1048576, maxTokens: 393216, multimodal: false },
-        { modelId: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', enabled: true, contextTokens: 1048576, maxTokens: 393216, multimodal: true }
+        // priceIn/priceOut/priceCache：官方单价（美元 / 百万 tokens，cache=缓存读取价），
+        // 来源 models.dev 官方桶；用户可在设置里手填覆盖
+        { modelId: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', enabled: true, contextTokens: 1048576, maxTokens: 393216, multimodal: false, priceIn: 0.66, priceOut: 1.98, priceCache: 0.022 },
+        { modelId: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', enabled: true, contextTokens: 1048576, maxTokens: 393216, multimodal: true, priceIn: 0.15, priceOut: 0.6, priceCache: 0.003 }
       ]
     },
     {
       id: 'moonshot', name: 'Kimi 月之暗面', provider: 'moonshot',
       apiFormat: 'openai', baseUrl: 'https://api.moonshot.cn/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'kimi-k3', name: 'Kimi K3', enabled: true, contextTokens: 1048576, maxTokens: 1048576, multimodal: true },
-        { modelId: 'kimi-k2.6', name: 'Kimi K2.6', enabled: true, contextTokens: 262144, maxTokens: 262144, multimodal: true }
+        { modelId: 'kimi-k3', name: 'Kimi K3', enabled: true, contextTokens: 1048576, maxTokens: 1048576, multimodal: true, priceIn: 2.9879, priceOut: 14.9395, priceCache: 0.2988 },
+        { modelId: 'kimi-k2.6', name: 'Kimi K2.6', enabled: true, contextTokens: 262144, maxTokens: 262144, multimodal: true, priceIn: 0.9711, priceOut: 4.0337, priceCache: 0.1643 }
       ]
     },
     {
       id: 'dashscope', name: '阿里百炼', provider: 'dashscope',
       apiFormat: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'qwen3.8-max', name: 'Qwen3.8 Max', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true },
-        { modelId: 'qwen3.8-flash', name: 'Qwen3.8 Flash', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true }
+        { modelId: 'qwen3.8-max', name: 'Qwen3.8 Max', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true, priceIn: 2, priceOut: 6, priceCache: 0.25 },
+        { modelId: 'qwen3.8-flash', name: 'Qwen3.8 Flash', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true, priceIn: 0.15, priceOut: 0.47, priceCache: 0.016 }
       ]
     },
     {
       id: 'zhipu', name: '智谱 BigModel', provider: 'zhipu',
       apiFormat: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'glm-5.3', name: 'GLM-5.3', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: false },
-        { modelId: 'glm-5.3-flash', name: 'GLM-5.3 Flash', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true }
+        { modelId: 'glm-5.3', name: 'GLM-5.3', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: false, priceIn: 1.1952, priceOut: 4.1831, priceCache: 0.2988 },
+        { modelId: 'glm-5.3-flash', name: 'GLM-5.3 Flash', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true, priceIn: 0.1195, priceOut: 0.4183, priceCache: 0.0344 }
       ]
     },
     {
@@ -48,16 +50,16 @@ MM.defaults = {
       id: 'minimax', name: 'MiniMax', provider: 'minimax',
       apiFormat: 'anthropic', baseUrl: 'https://api.minimax.cn/anthropic', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'MiniMax-M3.1-Flash', name: 'MiniMax M3.1 Flash', enabled: true, contextTokens: 1000000, maxTokens: 524288, multimodal: true },
-        { modelId: 'MiniMax-M3', name: 'MiniMax M3', enabled: true, contextTokens: 1000000, maxTokens: 524288, multimodal: true }
+        { modelId: 'MiniMax-M3.1-Flash', name: 'MiniMax M3.1 Flash', enabled: true, contextTokens: 1000000, maxTokens: 524288, multimodal: true, priceIn: 0.15, priceOut: 0.6, priceCache: 0.015 },
+        { modelId: 'MiniMax-M3', name: 'MiniMax M3', enabled: true, contextTokens: 1000000, maxTokens: 524288, multimodal: true, priceIn: 0.3, priceOut: 1.2, priceCache: 0.06 }
       ]
     },
     {
       id: 'openai', name: 'OpenAI', provider: 'openai',
       apiFormat: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true },
-        { modelId: 'gpt-5.6', name: 'GPT-5.6', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true }
+        { modelId: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 },
+        { modelId: 'gpt-5.6', name: 'GPT-5.6', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 4, priceOut: 20, priceCache: 0.4 }
       ]
     },
     {
@@ -65,8 +67,8 @@ MM.defaults = {
       id: 'anthropic', name: 'Anthropic', provider: 'anthropic',
       apiFormat: 'anthropic', baseUrl: 'https://api.anthropic.com', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'claude-opus-5-5', name: 'Claude Opus 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true },
-        { modelId: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true }
+        { modelId: 'claude-opus-5-5', name: 'Claude Opus 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 4, priceOut: 20, priceCache: 0.2 },
+        { modelId: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 }
       ]
     },
     {
@@ -74,16 +76,16 @@ MM.defaults = {
       id: 'google', name: 'Google Gemini', provider: 'google',
       apiFormat: 'openai', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'gemini-4-argon', name: 'Gemini 4 Argon', enabled: true, contextTokens: 1048576, maxTokens: 32768, multimodal: true },
-        { modelId: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', enabled: true, contextTokens: 1048576, maxTokens: 65536, multimodal: true }
+        { modelId: 'gemini-4-argon', name: 'Gemini 4 Argon', enabled: true, contextTokens: 1048576, maxTokens: 32768, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 },
+        { modelId: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', enabled: true, contextTokens: 1048576, maxTokens: 65536, multimodal: true, priceIn: 0.75, priceOut: 3.75, priceCache: 0.075 }
       ]
     },
     {
       id: 'openrouter', name: 'OpenRouter', provider: 'openrouter',
       apiFormat: 'openai', baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
-        { modelId: 'openai/gpt-6.1-sol', name: 'GPT-6.1 Sol', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true },
-        { modelId: 'anthropic/claude-sonnet-5.5', name: 'Claude Sonnet 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true }
+        { modelId: 'openai/gpt-6.1-sol', name: 'GPT-6.1 Sol', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 },
+        { modelId: 'anthropic/claude-sonnet-5.5', name: 'Claude Sonnet 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 }
       ]
     }
   ],
@@ -93,7 +95,9 @@ MM.defaults = {
     search: { provider: 'bing', apiKey: '' },
     synthesis: { synthSource: 'frontend', autoMerge: true, crossReview: false },
     // 全局系统提示词：对所有模型、所有会话生效（按会话覆盖见 session.systemPrompt）
-    systemPrompt: ''
+    systemPrompt: '',
+    // 花费显示汇率（官方单价是美元/百万 tokens，×汇率折成人民币估算显示）
+    fxRate: 7.2
   }
 };
 
@@ -228,9 +232,10 @@ MM.defaults = {
     }
   }
 
-  // 官方模型数据刷新（一次性，presetVersion 4）：
-  // 把预置服务商里「模型 ID 与当前预置一致」的条目，其上下文/最大输出/多模态同步为最新官方值。
+  // 官方模型数据刷新（一次性，随 presetVersion 版本推进）：
+  // 把预置服务商里「模型 ID 与当前预置一致」的条目，其上下文/最大输出/多模态/单价同步为最新官方值。
   // 用户自己加的模型（ID 不在预置里）一律不动；改过 ID 的视为自定义，保持原样。
+  // 单价是例外：只在缺失时补官方值，用户手填过（含改成 0）的条目保留手填值
   function refreshPresetModelMeta(providers) {
     for (const p of (providers || [])) {
       if (!p || !p.preset) continue;
@@ -243,6 +248,9 @@ MM.defaults = {
         mo.contextTokens = target.contextTokens;
         mo.maxTokens = target.maxTokens;
         mo.multimodal = target.multimodal;
+        if (mo.priceIn == null && target.priceIn != null) mo.priceIn = target.priceIn;
+        if (mo.priceOut == null && target.priceOut != null) mo.priceOut = target.priceOut;
+        if (mo.priceCache == null && target.priceCache != null) mo.priceCache = target.priceCache;
       }
     }
   }
@@ -276,6 +284,37 @@ MM.defaults = {
     };
     (providers || []).sort((a, b) => rank(a) - rank(b));
     return providers;
+  };
+
+  // ---------- 花费估算（C1）----------
+  // 单价解析：模型条目手填价（两个字段都填了才算）优先 → models.dev 目录价。
+  // 返回 {in, out, cache, fx}（美元/百万 tokens + 汇率）或 null。modelId 形如 'providerId::modelId'
+  MM.priceOf = function (modelId) {
+    const cfg = MM.state && MM.state.config;
+    if (!cfg) return null;
+    const s = String(modelId || '');
+    const i = s.indexOf('::');
+    const pid = i >= 0 ? s.slice(0, i) : '';
+    const mid = i >= 0 ? s.slice(i + 2) : s;
+    const p = (Array.isArray(cfg.providers) ? cfg.providers : []).find(x => x && x.id === pid);
+    const mo = p && (p.models || []).find(x => x && x.modelId === mid);
+    let price = null;
+    if (mo && mo.priceIn != null && mo.priceOut != null) {
+      price = { in: mo.priceIn, out: mo.priceOut, cache: mo.priceCache != null ? mo.priceCache : null };
+    } else if (p) {
+      price = MM.modelInfo.catalogPrice(mid, p.provider || p.id, MM.state.catalog);
+    }
+    if (!price || (!price.in && !price.out)) return null; // 0/0：订阅制或未定价，不显示金额
+    return {
+      in: price.in, out: price.out, cache: price.cache != null ? price.cache : null,
+      fx: (typeof cfg.fxRate === 'number' && cfg.fxRate > 0) ? cfg.fxRate : 7.2
+    };
+  };
+  // 一次请求的花费（人民币估算）；单价未知返回 null，界面不显示金额
+  MM.costOf = function (modelId, usage) {
+    const pr = MM.priceOf(modelId);
+    if (!pr) return null;
+    return MM.modelInfo.costCny(usage, pr, pr.fx);
   };
 
   // 把任意来源的配置（磁盘数据 / 导入备份 / 全新安装）统一为当前结构。
@@ -337,10 +376,11 @@ MM.defaults = {
       }
       cfg.presetVersion = 3;
     }
-    // 官方模型数据刷新（一次性，版本号 4）：预置模型的上下文/最大输出/多模态对齐最新官方值
-    if (!(cfg.presetVersion >= 4)) {
+    // 官方模型数据刷新（一次性，版本号 4→5）：预置模型的上下文/最大输出/多模态对齐官方值；
+    // 5 补单价（老配置的预置模型没有 priceIn/priceOut，补齐后花费统计立即可用）
+    if (!(cfg.presetVersion >= 5)) {
       refreshPresetModelMeta(providers);
-      cfg.presetVersion = 4;
+      cfg.presetVersion = 5;
     }
     // 统一排序：每次加载都重排，保证老配置里被追加到末尾的预置服务商（如迁移补进来的 Kimi）回到正确位置
     providers = MM.sortProviders(providers);
@@ -359,7 +399,9 @@ MM.defaults = {
       search: Object.assign({ provider: 'bing' }, cfg.search || {}),
       synthesis,
       // 老配置没有此字段：显式归一成字符串，避免界面取到 undefined
-      systemPrompt: (typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt : '')
+      systemPrompt: (typeof cfg.systemPrompt === 'string' ? cfg.systemPrompt : ''),
+      // 花费显示汇率：非法值回落默认（0/负数/非数字），不阻止启动
+      fxRate: (typeof cfg.fxRate === 'number' && cfg.fxRate > 0) ? cfg.fxRate : 7.2
     });
   };
 
@@ -557,6 +599,13 @@ MM.defaults = {
     MM.chat.renderChips();
     MM.chat.renderTitle();
     MM.chat.renderAll();
+    // 目录启动即取（主进程有 7 天缓存，每次运行只跨进程传一次）：预置模型单价已内置，
+    // 自定义模型的花费估算依赖目录价，不打开设置页也要能显示
+    if (!MM.state.catalog && api.getCatalog) {
+      api.getCatalog().then(function (cat) {
+        if (cat && MM.state) MM.state.catalog = cat;
+      }).catch(function () { /* 离线：花费只对手填单价的模型可用 */ });
+    }
   }
 
   const U = MM.util;

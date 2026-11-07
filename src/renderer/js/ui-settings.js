@@ -29,6 +29,8 @@ window.MM = window.MM || {};
         if (cat && cat !== MM.state.catalog) {
           MM.state.catalog = cat;
           renderModelEntries(); // 目录到达后刷新识别信息
+          const hint = document.getElementById('catalog-hint');
+          if (hint) hint.textContent = catalogHintText();
         }
       }).catch(() => {});
     }
@@ -228,8 +230,53 @@ window.MM = window.MM || {};
     body.appendChild(U.el('div', { class: 'pane-sub', style: 'margin-bottom:14px' },
       '每个服务商（共享地址与密钥）可配置多个模型；启用后出现在聊天输入框上方，可同时多选并发调用。'));
     body.appendChild(layout);
+
+    // ---- 模型目录与单价卡片：识别数据源状态 + 手动更新 + 花费汇率 ----
+    const refreshBtn = U.el('button', { class: 'btn-secondary' }, '立即更新');
+    refreshBtn.addEventListener('click', async () => {
+      refreshBtn.disabled = true; refreshBtn.textContent = '更新中…';
+      try {
+        const cat = await api.getCatalog(true); // force=true：绕过主进程 7 天缓存强刷
+        if (cat) {
+          MM.state.catalog = cat;
+          renderModelEntries(); // 目录刷新后模型行的识别信息与单价跟着刷新
+        }
+        const hint = document.getElementById('catalog-hint');
+        if (hint) hint.textContent = catalogHintText();
+        U.toast('模型目录已更新');
+      } catch (e) {
+        U.toast('目录更新失败：' + ((e && e.message) || e), true);
+      }
+      refreshBtn.disabled = false; refreshBtn.textContent = '立即更新';
+    });
+    const fxInput = U.el('input', { type: 'number', step: 'any', min: '0', style: 'width:90px', title: '美元单价 × 汇率 = 界面上的「≈¥」估算显示' });
+    fxInput.value = MM.state.config.fxRate;
+    fxInput.addEventListener('change', () => {
+      const n = Number(fxInput.value);
+      MM.state.config.fxRate = (isFinite(n) && n > 0) ? n : 7.2; // 非法值回落默认
+      fxInput.value = MM.state.config.fxRate;
+      saveSoon();
+    });
+    body.appendChild(U.el('div', { class: 'p-card' },
+      U.el('div', { class: 'p-card-h' },
+        U.el('span', {}, '模型目录与单价'),
+        U.el('div', { class: 'ops' }, refreshBtn)),
+      U.el('div', { class: 'p-card-b' },
+        U.el('div', { class: 'hint', id: 'catalog-hint', style: 'margin-top:0' }, catalogHintText()),
+        hrow('汇率（1 美元兑）', fxInput,
+          U.el('div', { class: 'hint' }, '回答卡片与用量面板的花费按 官方美元单价 × 汇率 折算显示；单价来自模型目录，也可在上方模型行里手填覆盖。改汇率不影响已保存的数据，只影响显示。')))));
     // 切换服务商时右侧表单区淡入（整页重建后的视觉缓冲）
     form.classList.add('pane-in');
+  }
+
+  // 目录状态文案（设置页打开时与「立即更新」后都要刷新，抽成纯函数共用）
+  function catalogHintText() {
+    const cat = MM.state.catalog;
+    if (!cat || !cat.byId) return '模型目录（models.dev）：尚未加载，用于自动识别上下文/最大输出/多模态/单价，每 7 天自动更新。';
+    const n = Object.keys(cat.byId).length;
+    const d = cat.fetchedAt ? new Date(cat.fetchedAt) : null;
+    const at = d ? (d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')) : '未知';
+    return '模型目录（models.dev，' + n + ' 个模型）：' + at + ' 更新，每 7 天自动更新；用于自动识别上下文/最大输出/多模态/单价。';
   }
 
   function getCache() {
@@ -273,6 +320,10 @@ window.MM = window.MM || {};
     const nameInput = U.el('input', { type: 'text', value: mo.name || '', placeholder: '展示名（可选）', style: 'width:100%' });
     const ctxInput = U.el('input', { type: 'number', value: mo.contextTokens || '', placeholder: '自动', style: 'width:90px' });
     const outInput = U.el('input', { type: 'number', value: mo.maxTokens || '', placeholder: '自动', style: 'width:90px' });
+    // 单价（美元 / 百万 tokens）：留空 = 由目录自动识别；两个都填 = 手填覆盖目录价
+    const PRICE_TIP = '美元 / 百万 tokens。留空按模型库自动识别；两个都填则覆盖目录价';
+    const pinInput = U.el('input', { type: 'number', step: 'any', min: '0', value: mo.priceIn != null ? mo.priceIn : '', placeholder: '自动', style: 'width:74px', title: PRICE_TIP });
+    const poutInput = U.el('input', { type: 'number', step: 'any', min: '0', value: mo.priceOut != null ? mo.priceOut : '', placeholder: '自动', style: 'width:74px', title: PRICE_TIP });
     const enCheck = U.el('input', { type: 'checkbox', title: '启用', ...(mo.enabled !== false ? { checked: '' } : {}) });
     const delBtn = U.el('button', { class: 'm-del', title: '删除此模型', html: U.svgIcon('x', 10) });
     const infoHint = U.el('div', { class: 'hint' });
@@ -298,11 +349,18 @@ window.MM = window.MM || {};
       if (idChanged && id) delete mo.fromPreset;
       if ((idChanged || !ctxInput.value) && meta.contextTokens) ctxInput.value = meta.contextTokens;
       if ((idChanged || !outInput.value) && meta.maxOutputTokens) outInput.value = meta.maxOutputTokens;
+      // 单价：模型 ID 变了或留空时才用目录价回填，绝不覆盖用户手填值
+      if ((idChanged || (pinInput.value === '' && poutInput.value === '')) && meta.price) {
+        pinInput.value = meta.price.in != null ? meta.price.in : '';
+        poutInput.value = meta.price.out != null ? meta.price.out : '';
+      }
       lastAutoId = id;
       mo.modelId = id;
       mo.contextTokens = parseNum(ctxInput.value);
       mo.maxTokens = parseNum(outInput.value);
       mo.multimodal = meta.multimodal != null ? meta.multimodal : mo.multimodal;
+      mo.priceIn = parseNum(pinInput.value);
+      mo.priceOut = parseNum(poutInput.value);
       // 挂载时的自动识别不落盘：打开设置页会为每个模型行触发一次，没必要写盘。
       // 用户真正编辑（失焦/选择下拉）时才保存；关闭设置页也会统一保存一次。
       if (persist !== false) saveSoon();
@@ -357,6 +415,8 @@ window.MM = window.MM || {};
     nameInput.addEventListener('input', () => { mo.name = nameInput.value.trim(); saveSoon(); });
     ctxInput.addEventListener('change', () => { mo.contextTokens = parseNum(ctxInput.value); saveSoon(); });
     outInput.addEventListener('change', () => { mo.maxTokens = parseNum(outInput.value); saveSoon(); });
+    pinInput.addEventListener('change', () => { mo.priceIn = parseNum(pinInput.value); saveSoon(); });
+    poutInput.addEventListener('change', () => { mo.priceOut = parseNum(poutInput.value); saveSoon(); });
     enCheck.addEventListener('change', () => {
       mo.enabled = enCheck.checked;
       saveSoon();
@@ -389,6 +449,8 @@ window.MM = window.MM || {};
       U.el('div', { class: 'm-row m-row2' },
         U.el('span', { class: 'mini-label' }, '上下文'), ctxInput,
         U.el('span', { class: 'mini-label' }, '最大输出'), outInput,
+        U.el('span', { class: 'mini-label', title: PRICE_TIP }, '输入价'), pinInput,
+        U.el('span', { class: 'mini-label', title: PRICE_TIP }, '输出价'), poutInput,
         infoHint));
     // 挂载后回填识别信息（只补空字段）
     setTimeout(() => applyInfo(false), 0); // 挂载时只回填识别信息，不触发保存
@@ -532,7 +594,7 @@ window.MM = window.MM || {};
     for (const mo of (p.models || [])) entries.appendChild(modelEntryRow(p, mo, listCache));
     modelCard.appendChild(U.el('div', { class: 'p-card-b' },
       entries,
-      U.el('div', { class: 'hint' }, '模型 ID 可手动输入，或点 ▾ 从已获取的列表中选择；上下文/最大输出/多模态由模型 ID 自动识别，可手动修改。')));
+      U.el('div', { class: 'hint' }, '模型 ID 可手动输入，或点 ▾ 从已获取的列表中选择；上下文/最大输出/多模态/单价由模型 ID 自动识别，可手动修改（单价留空按模型库识别，两个都填则覆盖）。')));
     wrap.appendChild(modelCard);
 
     // ---- 常驻标题行按钮：删除（仅自定义）/ 测试连接 / 保存 ----

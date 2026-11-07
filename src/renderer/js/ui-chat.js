@@ -632,23 +632,29 @@ window.MM = window.MM || {};
       // 看起来和完整回答一样，用户会误以为内容是全的
       if (res.finish === 'length') h += '<span class="badge warn" title="回答因达到最大输出长度被截断，可调大该模型的最大输出">已截断</span>';
       else if (res.finish === 'content_filter') h += '<span class="badge err" title="回答被内容安全策略拦截，可能不完整">内容被拦截</span>';
-      return h + usageBadge(res.usage);
+      return h + usageBadge(res.usage, { modelId: res.modelId });
     }
-    if (res.status === 'error') return '<span class="badge err">✗ 失败</span>' + usageBadge(res.usage);
-    if (res.status === 'stopped') return '<span class="badge muted">⏹ 已停止</span>' + usageBadge(res.usage);
+    if (res.status === 'error') return '<span class="badge err">✗ 失败</span>' + usageBadge(res.usage, { modelId: res.modelId });
+    if (res.status === 'stopped') return '<span class="badge muted">⏹ 已停止</span>' + usageBadge(res.usage, { modelId: res.modelId });
     if (res.status === 'skipped') return '<span class="badge muted" title="' + U.esc(res.error || '') + '">⏭ 已跳过</span>';
     return '';
   }
 
-  // token 用量徽标。悬停看输入/输出拆分——只显示总数会让「为什么这么贵」查不到原因。
+  // token 用量徽标。悬停看输入/输出拆分与花费——只显示总数会让「为什么这么贵」查不到原因。
   // 用量是服务端回传的，某些端点不返回时此处自然为空，不猜不估算。
-  function usageBadge(u) {
+  // opts.modelId：按该模型单价解析花费；opts.cost：调用方已算好的花费（交叉审查是多模型聚合，
+  // 没有单一 modelId 可解析）。单价未知就不显示金额，绝不猜
+  function usageBadge(u, opts) {
     if (!u) return '';
     const a = num(u.input), b = num(u.output);
     if (!a && !b) return '';
     const total = a + b;
-    const tip = '输入 ' + a + ' + 输出 ' + b + ' tokens';
-    return '<span class="badge tok" title="' + tip + '">' + MM.modelInfo.fmtTokens(total) + ' tok</span>';
+    let cost = null;
+    if (opts && opts.cost != null) cost = opts.cost;
+    else if (opts && opts.modelId && MM.costOf) cost = MM.costOf(opts.modelId, u);
+    const tip = '输入 ' + a + ' + 输出 ' + b + ' tokens' + (cost != null ? ' · 花费约 ' + MM.modelInfo.fmtCost(cost) : '');
+    return '<span class="badge tok" title="' + tip + '">' + MM.modelInfo.fmtTokens(total) + ' tok' +
+      (cost != null ? ' · ≈' + MM.modelInfo.fmtCost(cost) : '') + '</span>';
   }
 
   // 本轮合计用量（供轮次工具栏显示）；没有任何模型回传时返回 null，界面不显示
@@ -672,7 +678,7 @@ window.MM = window.MM || {};
     // 非流式（历史快照）也要带上完成标记与用量，否则重开会话后综合卡片的头部是空的
     mStatus.innerHTML = live ? '<span class="spinner"></span>'
       : (msg.stopped ? '<span class="badge muted">⏹ 已停止</span>'
-        : '✓ ' + (msg.mode === 'model' ? '完成' : '已合并')) + usageBadge(msg.usage);
+        : '✓ ' + (msg.mode === 'model' ? '完成' : '已合并')) + usageBadge(msg.usage, { modelId: msg.modelId });
     card.appendChild(U.el('div', { class: 'ac-head' },
       U.el('span', { class: 'ac-name' }, label),
       mStatus
@@ -961,10 +967,17 @@ window.MM = window.MM || {};
     const total = roundUsage(am);
     if (total) {
       const n = (am.results || []).filter(r => r.usage && (r.usage.input || r.usage.output)).length;
+      // 本轮花费合计：按各模型单价分别解析；一个已知的都没有就不显示金额
+      let cost = 0, costAny = false;
+      for (const r of (am.results || [])) {
+        const c = MM.costOf ? MM.costOf(r.modelId, r.usage) : null;
+        if (c != null) { costAny = true; cost += c; }
+      }
       tools.appendChild(U.el('span', {
         class: 'round-tok',
-        title: '本轮 ' + n + ' 个模型的 token 用量合计（输入+输出）'
-      }, 'Σ ' + MM.modelInfo.fmtTokens(total) + ' tok'));
+        title: '本轮 ' + n + ' 个模型的 token 用量合计（输入+输出）' +
+          (costAny ? '；花费 ≈' + MM.modelInfo.fmtCost(cost) + '（单价未知的模型不计入）' : '')
+      }, 'Σ ' + MM.modelInfo.fmtTokens(total) + ' tok' + (costAny ? ' · ≈' + MM.modelInfo.fmtCost(cost) : '')));
     }
     return tools;
   }
@@ -1636,7 +1649,7 @@ window.MM = window.MM || {};
       else if (ev.type === 'done' && ev.usage) {
         // 综合也是真实请求，占用量要一并记下并显示，否则统计会漏掉这一项
         ctx.mergeMsg.usage = ev.usage;
-        status.innerHTML = '✓ 完成' + usageBadge(ev.usage);
+        status.innerHTML = '✓ 完成' + usageBadge(ev.usage, { modelId: ctx.mergeMsg.modelId });
       }
       else if (ev.type === 'error') {
         if (/已停止/.test(ev.message || '')) {
@@ -1645,7 +1658,7 @@ window.MM = window.MM || {};
           ctx.mergeMsg.stopped = true;
           if (ev.usage) ctx.mergeMsg.usage = ev.usage;
           ctx.mergeMsg.content += '\n\n（已停止，内容不完整，可点「重新综合」重出完整版）';
-          status.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(ctx.mergeMsg.usage);
+          status.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(ctx.mergeMsg.usage, { modelId: ctx.mergeMsg.modelId });
         } else {
           // 综合失败：回滚 merge 状态，允许用户再次点击“综合回答”
           ctx.mergeFailed = true; // 标记失败，随后的 all-done 不能把状态改回“完成”
@@ -2329,9 +2342,10 @@ window.MM = window.MM || {};
     // 失败/已停止时保留失败标记，不能被覆盖成完成状态；
     // 综合请求的 token 用量一并显示（用量存在 mergeMsg 上，会随版本快照一起保留）
     const mu = ctx.mergeMsg.usage;
-    if (failed) status.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(mu);
-    else if (ctx.mergeMsg.stopped) status.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(mu);
-    else status.innerHTML = (ctx.mergeMsg.mode === 'model' ? '✓ 完成' : '✓ 已合并') + usageBadge(mu);
+    const mBadge = { modelId: ctx.mergeMsg.modelId };
+    if (failed) status.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(mu, mBadge);
+    else if (ctx.mergeMsg.stopped) status.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(mu, mBadge);
+    else status.innerHTML = (ctx.mergeMsg.mode === 'model' ? '✓ 完成' : '✓ 已合并') + usageBadge(mu, mBadge);
     // 恢复工具栏（综合回答入口随 am.merge 状态更新）
     const wrap = U.$('#messages');
     const grid = byRound('.answers', ctx.roundId, wrap);
@@ -2354,6 +2368,18 @@ window.MM = window.MM || {};
     for (const it of (review.items || [])) add(it.usage);
     if (review.verdict) add(review.verdict.usage);
     return any ? { input: input, output: output } : null;
+  }
+  // 交叉审查卡片的花费合计：互审的各模型 + 仲裁模型，按各自单价分别解析再求和；
+  // 一个单价已知的都没有就返回 null（徽标不显示金额）
+  function reviewCost(review) {
+    let sum = 0, any = false;
+    const add = (u, mid) => {
+      const c = MM.costOf ? MM.costOf(mid, u) : null;
+      if (c != null) { any = true; sum += c; }
+    };
+    for (const it of (review.items || [])) add(it.usage, it.modelId);
+    if (review.verdict) add(review.verdict.usage, review.verdict.modelId);
+    return any ? sum : null;
   }
   function reviewHasContent(review) {
     return !!review && (!!review.verdict || (review.items || []).some(i => i.content));
@@ -2402,10 +2428,11 @@ window.MM = window.MM || {};
     if (live) rStatus.innerHTML = '<span class="spinner"></span> ' + (phase === 3 ? '仲裁中…' : '互审中…');
     else {
       const u = reviewUsage(review);
-      if (!review.verdict && review.stopped) rStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u);
-      else if (review.verdict && review.verdict.stopped) rStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u);
-      else if (review.verdict) rStatus.innerHTML = '✓ 完成' + usageBadge(u);
-      else rStatus.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(u);
+      const rBadge = { cost: reviewCost(review) };
+      if (!review.verdict && review.stopped) rStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u, rBadge);
+      else if (review.verdict && review.verdict.stopped) rStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u, rBadge);
+      else if (review.verdict) rStatus.innerHTML = '✓ 完成' + usageBadge(u, rBadge);
+      else rStatus.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(u, rBadge);
     }
     card.appendChild(U.el('div', { class: 'card-foot' },
       U.el('button', { class: 'ac-copy', onclick: function () { U.copyTextFrom(body); U.toast('已复制'); } }, '复制')));
@@ -2482,9 +2509,10 @@ window.MM = window.MM || {};
         decorateMergeSources(vr.body, v, ctx.am.results, ctx.roundId);
       }
       const u = reviewUsage(review);
-      if (failed) ctx.rvRefs.headStatus.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(u);
-      else if ((review.stopped && !v) || (v && v.stopped)) ctx.rvRefs.headStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u);
-      else ctx.rvRefs.headStatus.innerHTML = '✓ 完成' + usageBadge(u);
+      const rBadge = { cost: reviewCost(review) };
+      if (failed) ctx.rvRefs.headStatus.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(u, rBadge);
+      else if ((review.stopped && !v) || (v && v.stopped)) ctx.rvRefs.headStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u, rBadge);
+      else ctx.rvRefs.headStatus.innerHTML = '✓ 完成' + usageBadge(u, rBadge);
       if (failed || (review.stopped && !v) || (v && v.stopped)) addReviewRetryBtn(card, ctx.roundId);
     }
     // 恢复工具栏（交叉审查入口随 am.review 状态更新）

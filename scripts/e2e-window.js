@@ -101,6 +101,9 @@ app.whenReady().then(async () => {
     // 窗口销毁后从磁盘验证这条未保存的改动确实写进去了（无此机制则整轮丢失）。
     // app.quit 的竞态会抢在轮询循环之后杀掉进程，断言必须挂在 'closed' 事件里——
     // 它在 window-all-closed 之前同步触发，时序有保证；断言后直接 app.exit 收尾（promise 不再 resolve）
+    // 先改一次窗口尺寸/位置：close 事件应把还原边界写进 window-state.json
+    w.setBounds({ x: 40, y: 40, width: 1200, height: 800 });
+    await sleep(300);
     await js("(function(){ MM.state.sessions[0].title = 'flush-未保存标记'; })()");
     await new Promise(() => {
       const t1 = setTimeout(() => {
@@ -118,6 +121,16 @@ app.whenReady().then(async () => {
             JSON.stringify(disk.sessions.map(s => s && s.title)));
         } catch (e) {
           check('关闭前自动落盘（app:flush 把未保存改动写入磁盘）', false, String(e && e.message));
+        }
+        try {
+          const ws = JSON.parse(fs.readFileSync(path.join(DATA, 'window-state.json'), 'utf8'));
+          // Windows 无边框窗口带 2px 不可见伸缩边：getNormalBounds 会比 setBounds 多出 2px，±4px 容差内视为一致
+          const near = (v, want) => Math.abs(v - want) <= 4;
+          check('关闭时保存窗口状态（位置/尺寸/未最大化）',
+            ws && near(ws.x, 40) && near(ws.y, 40) && near(ws.width, 1200) && near(ws.height, 800) && ws.max === false,
+            JSON.stringify(ws));
+        } catch (e) {
+          check('关闭时保存窗口状态（位置/尺寸/未最大化）', false, String(e && e.message));
         }
         console.log('\nRESULT pass=' + pass + ' fail=' + fail);
         app.exit(fail ? 1 : 0);

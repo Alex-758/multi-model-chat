@@ -51,6 +51,8 @@ window.MM = window.MM || {};
       input: u ? (Number(u.input) || 0) : 0,
       output: u ? (Number(u.output) || 0) : 0,
       cached: u && u.cached != null ? (Number(u.cached) || 0) : 0,
+      // 花费（人民币估算）：单价未知的请求为 null，KPI/流水/CSV 显示为「—」不计入合计
+      cost: u && MM.costOf ? MM.costOf(r.modelId, u) : null,
       ms: Number(r.ms) || 0,
       session: session || ''
     });
@@ -72,6 +74,7 @@ window.MM = window.MM || {};
       input: u ? (Number(u.input) || 0) : 0,
       output: u ? (Number(u.output) || 0) : 0,
       cached: u && u.cached != null ? (Number(u.cached) || 0) : 0,
+      cost: u && MM.costOf ? MM.costOf(mg.modelId, u) : null,
       ms: 0,
       session: session || ''
     });
@@ -237,9 +240,11 @@ window.MM = window.MM || {};
   function kpis(f, pruned) {
     let input = 0, output = 0, cached = 0, ok = 0, error = 0, stopped = 0, run = 0;
     let synth = 0, review = 0;
+    let cost = 0, costKnown = 0;
     const mss = [];
     for (const r of f) {
       input += r.input; output += r.output; cached += r.cached;
+      if (r.cost != null) { cost += r.cost; costKnown++; }
       if (r.status === 'ok') { ok++; if (r.ms > 0) mss.push(r.ms); }
       else if (r.status === 'error') error++;
       else if (r.status === 'stopped') stopped++;
@@ -256,6 +261,8 @@ window.MM = window.MM || {};
       input, output, cached, pruned,
       // KPI 总量含已裁剪历史（真实消耗过的 token）；sub 行注明，图表按天拆不出这部分所以对不上是预期
       tokens: input + output + pruned,
+      // 花费合计：只累计单价已知的请求；costKnown < total 时界面注明差额
+      cost: costKnown ? cost : null, costKnown,
       total, ok, error, stopped, run,
       rate: decided ? Math.round(ok / decided * 100) : null,
       synth, review,
@@ -416,19 +423,20 @@ window.MM = window.MM || {};
     const rows = applyLogFilters(curF).sort((a, b) => b.ts - a.ts);
     const k = kpis(rows, 0);
     const cachedStr = k.cached > 0 ? ' · 缓存读取 ' + MM.modelInfo.fmtTokens(k.cached) : '';
+    const costStr = k.cost != null && k.cost > 0 ? ' · 花费 ≈<b>' + MM.modelInfo.fmtCost(k.cost) + '</b>' : '';
     const avgStr = k.avgMs ? U.fmtMs(k.avgMs) : '—';
     let html = '<div class="uu-sumline"><b>' + k.total.toLocaleString() + '</b> 个请求 · 输入 <b>' + MM.modelInfo.fmtTokens(k.input) +
-      '</b> · 输出 <b>' + MM.modelInfo.fmtTokens(k.output) + '</b>' + cachedStr +
+      '</b> · 输出 <b>' + MM.modelInfo.fmtTokens(k.output) + '</b>' + cachedStr + costStr +
       (k.error ? ' · <span class="dn">' + k.error + ' 次失败</span>' : '') +
       (k.stopped ? ' · ' + k.stopped + ' 次停止' : '') + (k.run ? ' · ' + k.run + ' 个进行中' : '') +
       ' · 平均耗时 <b>' + avgStr + '</b></div>';
     html += '<div class="uu-tscroll"><table class="uu-tb"><thead><tr>' +
       '<th>时间</th><th>会话</th><th>模型</th><th>用途</th>' +
-      '<th class="num">输入</th><th class="num">输出</th><th class="num">耗时</th><th class="num">状态</th>' +
+      '<th class="num">输入</th><th class="num">输出</th><th class="num">花费</th><th class="num">耗时</th><th class="num">状态</th>' +
       '</tr></thead><tbody>';
     const show = rows.slice(0, 200);
     if (!show.length) {
-      html += '<tr><td colspan="8" style="text-align:center;color:var(--muted);padding:24px 0">当前筛选下没有请求</td></tr>';
+      html += '<tr><td colspan="9" style="text-align:center;color:var(--muted);padding:24px 0">当前筛选下没有请求</td></tr>';
     }
     for (const r of show) {
       html += '<tr>' +
@@ -438,6 +446,7 @@ window.MM = window.MM || {};
         '<td><span class="uu-badge ' + r.kind + '">' + KIND_LABEL[r.kind] + '</span></td>' +
         '<td class="num" title="' + (r.cached > 0 ? '含缓存读取 ' + MM.modelInfo.fmtTokens(r.cached) : '') + '">' + (r.input ? r.input.toLocaleString() : '—') + '</td>' +
         '<td class="num">' + (r.output ? r.output.toLocaleString() : '—') + '</td>' +
+        '<td class="num">' + (r.cost != null ? MM.modelInfo.fmtCost(r.cost) : '—') + '</td>' +
         '<td class="num">' + (r.ms > 0 ? U.fmtMs(r.ms) : '—') + '</td>' +
         '<td class="num"><span class="uu-st ' + r.status + '" title="' + U.esc(r.err) + '"><i></i>' + STATUS_LABEL[r.status] + '</span></td>' +
         '</tr>';
@@ -458,11 +467,12 @@ window.MM = window.MM || {};
       if (!isNum && /^[=+\-@\t\r]/.test(v)) v = "'" + v;
       return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
     };
-    const lines = ['时间,会话,模型,用途,状态,输入,输出,缓存命中,耗时(ms)'];
+    const lines = ['时间,会话,模型,用途,状态,输入,输出,缓存命中,耗时(ms),花费(元)'];
     for (const r of rows) {
       lines.push([
         fmtLogTs(r.ts), r.session, r.name, KIND_LABEL[r.kind], STATUS_LABEL[r.status],
-        r.input, r.output, r.cached, r.ms
+        r.input, r.output, r.cached, r.ms,
+        r.cost != null ? Number(r.cost.toFixed(6)) : ''
       ].map((v, i) => escCell(v, i >= 5)).join(','));
     }
     return '\uFEFF' + lines.join('\r\n');
@@ -534,6 +544,13 @@ window.MM = window.MM || {};
       '输入 ' + MM.modelInfo.fmtTokens(k.input) + ' · 输出 ' + MM.modelInfo.fmtTokens(k.output) +
       (k.cached > 0 ? ' · 缓存读取 ' + MM.modelInfo.fmtTokens(k.cached) : '') +
       (k.pruned > 0 ? '<br>含已裁剪历史 ' + MM.modelInfo.fmtTokens(k.pruned) : '')));
+    // 花费卡：有任一单价可知才显示；汇率与「未计入」差额都要交代清楚
+    if (k.cost != null && k.cost > 0) {
+      const fx = (typeof MM.state.config.fxRate === 'number' && MM.state.config.fxRate > 0) ? MM.state.config.fxRate : 7.2;
+      kpis2.appendChild(kpiCard('花费（估）', MM.modelInfo.fmtCost(k.cost),
+        '按官方美元单价 × 汇率 ' + fx + ' 折算' +
+        (k.costKnown < k.total ? '<br>' + (k.total - k.costKnown) + ' 个请求无单价未计入' : '')));
+    }
     kpis2.appendChild(kpiCard('请求', k.total.toLocaleString(),
       (k.rate == null ? '' : '<span class="up">成功率 ' + k.rate + '%</span> · ') +
       '<span class="dn">失败 ' + k.error + '</span> · 停止 ' + k.stopped + (k.run ? ' · 进行中 ' + k.run : '')));

@@ -186,27 +186,61 @@ window.MM = window.MM || {};
         contextTokens: apiMeta.context || null,
         maxOutputTokens: null,
         multimodal: apiMeta.multimodal != null ? apiMeta.multimodal : null,
+        price: null,
         source: 'api'
       };
     }
     // 2. models.dev 目录
     const c = lookupCatalog(catalog, provider, id);
     if (c && (c.ctx || c.mm)) {
-      return { contextTokens: c.ctx || null, maxOutputTokens: c.out || null, multimodal: c.mm, source: 'catalog' };
+      return { contextTokens: c.ctx || null, maxOutputTokens: c.out || null, multimodal: c.mm, price: c.cost || null, source: 'catalog' };
     }
     // 3. 内置规则库（先试全名，再试裸名）
     const hit = matchRules(raw, s) || matchRules(s, s);
     if (hit) {
       if (hit.multimodal == null && savedMm != null) hit.multimodal = savedMm;
+      hit.price = null;
       return hit;
     }
     // 4. 启发式
     const h = heuristic(lower);
     if (h.ctx || h.mm != null) {
-      return { contextTokens: h.ctx, maxOutputTokens: h.out, multimodal: h.mm, source: 'guess' };
+      return { contextTokens: h.ctx, maxOutputTokens: h.out, multimodal: h.mm, price: null, source: 'guess' };
     }
     // 5. 完全未知
-    return { contextTokens: null, maxOutputTokens: null, multimodal: savedMm != null ? savedMm : null, source: 'none' };
+    return { contextTokens: null, maxOutputTokens: null, multimodal: savedMm != null ? savedMm : null, price: null, source: 'none' };
+  }
+
+  // 目录单价查询（美元 / 百万 tokens）：花费估算的第二优先级来源（第一是用户手填）。
+  // 返回 {in, out, cache} 或 null；0/0 的订阅制价格原样返回，由 costCny 统一按无价处理
+  function catalogPrice(id, provider, catalog) {
+    const c = lookupCatalog(catalog, provider, id);
+    if (!c || !c.cost) return null;
+    return { in: c.cost.in, out: c.cost.out, cache: c.cost.cache != null ? c.cost.cache : null };
+  }
+
+  /**
+   * 一次请求的花费估算（人民币）。usage {input, output, cached}，price {in, out, cache}
+   * 单位均为美元/百万 tokens（cache 缺省按输入价计），fx 为美元→人民币汇率。
+   * 输入输出单价都为 0 视为订阅制/未定价，返回 null（界面不显示金额，绝不猜）
+   */
+  function costCny(usage, price, fx) {
+    if (!usage || !price) return null;
+    const a = Number(usage.input) || 0, b = Number(usage.output) || 0, c = Number(usage.cached) || 0;
+    if (!price.in && !price.out) return null;
+    const cacheP = price.cache != null ? price.cache : price.in;
+    const usd = (a * price.in + b * price.out + c * cacheP) / 1000000;
+    const rate = (typeof fx === 'number' && fx > 0) ? fx : 7.2;
+    return usd * rate;
+  }
+
+  // 金额显示：小额给足精度，大额取整；「≈」估算前缀由调用方负责
+  function fmtCost(n) {
+    if (n == null || !isFinite(n)) return '';
+    if (n >= 100) return '¥' + Math.round(n).toLocaleString();
+    if (n >= 1) return '¥' + n.toFixed(2);
+    if (n >= 0.01) return '¥' + n.toFixed(3);
+    return '¥' + n.toFixed(4);
   }
 
   function fmtTokens(n) {
@@ -216,5 +250,5 @@ window.MM = window.MM || {};
     return String(n);
   }
 
-  MM.modelInfo = { guess, fmtTokens };
+  MM.modelInfo = { guess, catalogPrice, costCny, fmtCost, fmtTokens };
 })();

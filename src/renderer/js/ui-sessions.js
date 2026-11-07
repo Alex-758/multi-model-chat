@@ -55,6 +55,43 @@ window.MM = window.MM || {};
     return total;
   }
 
+  // 整个会话累计花费（人民币估算）：与 sessionTokens 完全同一套遍历口径，
+  // 但每笔用量按各自模型单价解析，单价未知的请求整笔跳过（绝不估）；
+  // prunedTokens 是裁剪折算的纯数字、无法按模型归价，不计入
+  function sessionCost(s) {
+    let total = 0, any = false;
+    const add = (u, modelId) => {
+      const c = MM.costOf ? MM.costOf(modelId, u) : null;
+      if (c != null) { any = true; total += c; }
+    };
+    for (const m of (s && s.messages) || []) {
+      if (!m || m.role !== 'assistant') continue;
+      const versions = Array.isArray(m.versions) && m.versions.length ? m.versions : null;
+      if (versions) {
+        for (const v of versions) {
+          if (!v) continue;
+          if (!v.inherited) {
+            if (v.partial && v.partialModelId) {
+              const r = (v.results || []).find(x => x && x.modelId === v.partialModelId);
+              if (r) add(r.usage, r.modelId);
+            } else {
+              for (const r of (v.results || [])) if (r) add(r.usage, r.modelId);
+            }
+          }
+          if (v.merge && !v.partial) add(v.merge.usage, v.merge.modelId);
+        }
+      } else {
+        for (const r of (m.results) || []) if (r) add(r.usage, r.modelId);
+        if (m.merge) add(m.merge.usage, m.merge.modelId);
+      }
+      if (m.review) {
+        for (const it of (m.review.items || [])) if (it) add(it.usage, it.modelId);
+        if (m.review.verdict) add(m.review.verdict.usage, m.review.verdict.modelId);
+      }
+    }
+    return any ? total : null;
+  }
+
   function createSilent() {
     const s = { id: U.uid(), title: '新会话', createdAt: Date.now(), updatedAt: Date.now(), pinned: false, messages: [] };
     MM.state.sessions.unshift(s);
@@ -205,6 +242,7 @@ window.MM = window.MM || {};
       const roundCount = (s.messages || []).filter(m => m.role === 'user').length;
       const timeLabel = U.fmtTime(s.updatedAt || s.createdAt);
       const tok = sessionTokens(s);
+      const cost = sessionCost(s);
       // 后台正在生成的会话加呼吸点标记（切到别的会话也能看到它还在跑）
       const live = !!(MM.chat.isStreamingSession && MM.chat.isStreamingSession(s.id));
       const item = U.el('div', {
@@ -219,7 +257,8 @@ window.MM = window.MM || {};
             s.title),
           U.el('div', { class: 's-time' },
             (timeLabel ? timeLabel + ' · ' : '') + roundCount + ' 轮' +
-            (tok ? ' · ' + MM.modelInfo.fmtTokens(tok) + ' tok' : ''))
+            (tok ? ' · ' + MM.modelInfo.fmtTokens(tok) + ' tok' : '') +
+            (cost != null && cost > 0 ? ' · ≈' + MM.modelInfo.fmtCost(cost) : ''))
         ),
         U.el('div', { class: 's-actions' },
           U.el('button', { title: s.pinned ? '取消置顶' : '置顶', onclick: e => { e.stopPropagation(); togglePin(s.id); } }, s.pinned ? '已顶' : '置顶'),
@@ -268,6 +307,7 @@ window.MM = window.MM || {};
     clearFilter,
     // 给 smoke 测试用的出口，不影响线上逻辑
     _sessionTokensForTest: sessionTokens,
+    _sessionCostForTest: sessionCost,
     _setFilterForTest: function (text) { filterText = String(text || ''); },
     _matchesFilterForTest: matchesFilter
   };

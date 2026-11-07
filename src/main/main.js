@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const store = require('./store');
@@ -62,10 +62,38 @@ function makeEmitter(requestId, modelId) {
   return { send, flush };
 }
 
+// ---------- 窗口状态记忆 ----------
+// 位置/尺寸存 userData/window-state.json，与 store.json 分开：导出备份不该带走本机窗口参数。
+// screen 模块只能在 app ready 之后调用，而这里全部在 whenReady → createWindow 路径里执行
+function loadWindowState() {
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(store.dir(), 'window-state.json'), 'utf8'));
+    return (s && typeof s === 'object') ? s : null;
+  } catch (e) { return null; } // 无文件/损坏：用默认窗口
+}
+function saveWindowState(w) {
+  try {
+    // getNormalBounds：最大化时拿到的是"还原后"的边界，恢复时不会以巨尺寸开窗
+    const b = w.getNormalBounds();
+    fs.writeFileSync(path.join(store.dir(), 'window-state.json'),
+      JSON.stringify({ x: b.x, y: b.y, width: b.width, height: b.height, max: w.isMaximized() }));
+  } catch (e) { /* 记录失败不影响关闭，下次用默认窗口 */ }
+}
+// 保存的位置必须落在某块屏幕的工作区内才采用：拔掉显示器/改分辨率后
+// 原地开窗会跑到屏幕外（窗口看得见标题栏也点不着）
+function boundsOnScreen(b) {
+  if (!b || typeof b.x !== 'number' || typeof b.y !== 'number') return false;
+  return screen.getAllDisplays().some(d =>
+    b.x >= d.workArea.x - 10 && b.x < d.workArea.x + d.workArea.width &&
+    b.y >= d.workArea.y - 10 && b.y < d.workArea.y + d.workArea.height);
+}
+
 function createWindow() {
-  win = new BrowserWindow({
-    width: 1440,
-    height: 920,
+  const saved = loadWindowState();
+  const MIN_W = 980, MIN_H = 640;
+  const winOpts = {
+    width: saved && saved.width >= MIN_W ? saved.width : 1440,
+    height: saved && saved.height >= MIN_H ? saved.height : 920,
     minWidth: 980,
     minHeight: 640,
     backgroundColor: '#faf9f5',
@@ -81,7 +109,11 @@ function createWindow() {
       sandbox: true
     },
     show: false
-  });
+  };
+  if (boundsOnScreen(saved)) { winOpts.x = saved.x; winOpts.y = saved.y; }
+  win = new BrowserWindow(winOpts);
+  // show 之前最大化：避免先闪一下默认尺寸再跳到最大化
+  if (saved && saved.max) win.maximize();
   win.once('ready-to-show', () => {
     win.show();
     win.focus();
@@ -132,6 +164,7 @@ function createWindow() {
   // 闸门在等用户决策，2.5s 兜底恰恰不能在它唯一要生效的场景里把窗口杀掉
   let flushing = false;
   win.on('close', (e) => {
+    try { saveWindowState(win); } catch (err) { /* 状态记录失败不影响关闭 */ }
     if (flushing) return; // 第二次 close：flush 已做过，放行
     flushing = true;
     e.preventDefault();
@@ -348,8 +381,9 @@ ipcMain.handle('models:test', (e, { model }) => providers.chatOnce(resolveModel(
 ipcMain.handle('catalog:get', async (e, force) => {
   const file = path.join(store.dir(), 'catalog.json');
   const TTL = 7 * 24 * 3600 * 1000;
-  // 渲染层需要 byProvider 做服务商精确匹配（同名模型跨服务商时避免误判），故两者都返回
-  const expose = c => (c && c.byId ? { byId: c.byId, byProvider: c.byProvider || {} } : null);
+  // 渲染层需要 byProvider 做服务商精确匹配（同名模型跨服务商时避免误判），故两者都返回；
+  // fetchedAt 供设置页显示目录新鲜度与「立即更新」按钮
+  const expose = c => (c && c.byId ? { byId: c.byId, byProvider: c.byProvider || {}, fetchedAt: c.fetchedAt || 0 } : null);
   let cached = null;
   try { cached = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (err) { /* ignore */ }
   const stale = !cached || !cached.byId || !cached.byProvider; // 旧版缓存无 byProvider，视为过期
@@ -370,7 +404,13 @@ ipcMain.handle('catalog:get', async (e, force) => {
         const info = {
           ctx: (mod.limit && mod.limit.context) || null,
           out: (mod.limit && mod.limit.output) || null,
-          mm: !!(mod.modalities && mod.modalities.input && mod.modalities.input.indexOf('image') >= 0)
+          mm: !!(mod.modalities && mod.modalities.input && mod.modalities.input.indexOf('image') >= 0),
+          // 官方单价（美元 / 百万 tokens）：花费估算用；0/0 视为订阅制或未定价，解析层按无价处理
+          cost: mod.cost ? {
+            in: mod.cost.input || 0,
+            out: mod.cost.output || 0,
+            cache: mod.cost.cache_read != null ? mod.cost.cache_read : null
+          } : null
         };
         const key = mid.toLowerCase();
         byId[key] = info;
