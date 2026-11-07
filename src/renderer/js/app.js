@@ -26,7 +26,8 @@ MM.defaults = {
       apiFormat: 'openai', baseUrl: 'https://api.moonshot.cn/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
         { modelId: 'kimi-k3', name: 'Kimi K3', enabled: true, contextTokens: 1048576, maxTokens: 1048576, multimodal: true, priceIn: 2.9879, priceOut: 14.9395, priceCache: 0.2988 },
-        { modelId: 'kimi-k2.6', name: 'Kimi K2.6', enabled: true, contextTokens: 262144, maxTokens: 262144, multimodal: true, priceIn: 0.9711, priceOut: 4.0337, priceCache: 0.1643 }
+        { modelId: 'kimi-k2.6', name: 'Kimi K2.6', enabled: true, contextTokens: 262144, maxTokens: 262144, multimodal: true, priceIn: 0.9711, priceOut: 4.0337, priceCache: 0.1643 },
+        { modelId: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro', enabled: true, contextTokens: 1048576, maxTokens: 1048576, multimodal: true, priceIn: 1.9437, priceOut: 10.1671, priceCache: 0.1944 }
       ]
     },
     {
@@ -34,7 +35,8 @@ MM.defaults = {
       apiFormat: 'openai', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
         { modelId: 'qwen3.8-max', name: 'Qwen3.8 Max', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true, priceIn: 2, priceOut: 6, priceCache: 0.25 },
-        { modelId: 'qwen3.8-flash', name: 'Qwen3.8 Flash', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true, priceIn: 0.15, priceOut: 0.47, priceCache: 0.016 }
+        { modelId: 'qwen3.8-flash', name: 'Qwen3.8 Flash', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true, priceIn: 0.15, priceOut: 0.47, priceCache: 0.016 },
+        { modelId: 'qwen3.8-omni-flash', name: 'Qwen3.8 Omni-Flash', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true, priceIn: 0.15, priceOut: 0.47, priceCache: 0.016 }
       ]
     },
     {
@@ -42,7 +44,9 @@ MM.defaults = {
       apiFormat: 'openai', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', apiKey: '', fullUrl: false, preset: true,
       models: [
         { modelId: 'glm-5.3', name: 'GLM-5.3', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: false, priceIn: 1.1952, priceOut: 4.1831, priceCache: 0.2988 },
-        { modelId: 'glm-5.3-flash', name: 'GLM-5.3 Flash', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true, priceIn: 0.1195, priceOut: 0.4183, priceCache: 0.0344 }
+        { modelId: 'glm-5.3-flash', name: 'GLM-5.3 Flash', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true, priceIn: 0.1195, priceOut: 0.4183, priceCache: 0.0344 },
+        { modelId: 'glm-5.3-flashx', name: 'GLM-5.3 FlashX', enabled: true, contextTokens: 1000000, maxTokens: 131072, multimodal: true, priceIn: 0.2988, priceOut: 1.0458, priceCache: 0.0852 },
+        { modelId: 'glm-5v-turbo', name: 'GLM-5V Turbo', enabled: true, contextTokens: 200000, maxTokens: 131072, multimodal: true, priceIn: 0.747, priceOut: 3.2867, priceCache: 0.1793 }
       ]
     },
     {
@@ -59,7 +63,10 @@ MM.defaults = {
       apiFormat: 'openai', baseUrl: 'https://api.openai.com/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
         { modelId: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 },
-        { modelId: 'gpt-5.6', name: 'GPT-5.6', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 4, priceOut: 20, priceCache: 0.4 }
+        { modelId: 'gpt-5.6', name: 'GPT-5.6', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 4, priceOut: 20, priceCache: 0.4 },
+        { modelId: 'gpt-6-astra', name: 'GPT-6 Astra', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 10, priceOut: 50, priceCache: 1 },
+        { modelId: 'gpt-6.1-terra', name: 'GPT-6.1 Terra', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 1, priceOut: 5, priceCache: 0.05 },
+        { modelId: 'gpt-6-luna', name: 'GPT-6 Luna', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 0.1, priceOut: 0.5, priceCache: 0.01 }
       ]
     },
     {
@@ -68,7 +75,9 @@ MM.defaults = {
       apiFormat: 'anthropic', baseUrl: 'https://api.anthropic.com', apiKey: '', fullUrl: false, preset: true,
       models: [
         { modelId: 'claude-opus-5-5', name: 'Claude Opus 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 4, priceOut: 20, priceCache: 0.2 },
-        { modelId: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 }
+        { modelId: 'claude-sonnet-5-5', name: 'Claude Sonnet 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 },
+        { modelId: 'claude-fable-5-1', name: 'Claude Fable 5.1', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 10, priceOut: 50, priceCache: 0.25 },
+        { modelId: 'claude-haiku-5-5', name: 'Claude Haiku 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 0.1, priceOut: 0.5, priceCache: 0.01 }
       ]
     },
     {
@@ -85,7 +94,9 @@ MM.defaults = {
       apiFormat: 'openai', baseUrl: 'https://openrouter.ai/api/v1', apiKey: '', fullUrl: false, preset: true,
       models: [
         { modelId: 'openai/gpt-6.1-sol', name: 'GPT-6.1 Sol', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 },
-        { modelId: 'anthropic/claude-sonnet-5.5', name: 'Claude Sonnet 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 }
+        { modelId: 'anthropic/claude-sonnet-5.5', name: 'Claude Sonnet 5.5', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 2, priceOut: 10, priceCache: 0.1 },
+        { modelId: 'openai/gpt-6.1-terra', name: 'GPT-6.1 Terra', enabled: true, contextTokens: 1050000, maxTokens: 128000, multimodal: true, priceIn: 1, priceOut: 5, priceCache: 0.05 },
+        { modelId: 'anthropic/claude-fable-5.1', name: 'Claude Fable 5.1', enabled: true, contextTokens: 1000000, maxTokens: 128000, multimodal: true, priceIn: 10, priceOut: 50, priceCache: 0.25 }
       ]
     }
   ],
@@ -381,6 +392,25 @@ MM.defaults = {
     if (!(cfg.presetVersion >= 5)) {
       refreshPresetModelMeta(providers);
       cfg.presetVersion = 5;
+    }
+    // 新模型补发（一次性，版本号 6）：给现存的预置服务商补齐目录里新增的模型，
+    // 条目自带官方单价；既有模型的单价不动（fill-missing 语义，手填保护）。
+    // 与 v2/v3 同款一次性语义：升级时补一次，之后用户删掉不再回加（踩坑 7）。
+    // 整个服务商被删除的不补（按现存服务商遍历自然跳过）；模型被用户清空的也不补。
+    if (!(cfg.presetVersion >= 6)) {
+      for (const p of providers) {
+        if (!p.preset || !p.models.length) continue;
+        const def = MM.defaults.PRESET_PROVIDERS.find(x => x.id === p.id);
+        if (!def) continue;
+        for (const mo of (def.models || [])) {
+          if (p.models.some(x => x.modelId === mo.modelId)) continue;
+          const copy = JSON.parse(JSON.stringify(mo));
+          copy.fromPreset = true;
+          p.models.push(copy);
+        }
+      }
+      refreshPresetModelMeta(providers); // 上下文/最大输出/多模态随目录对齐官方值
+      cfg.presetVersion = 6;
     }
     // 统一排序：每次加载都重排，保证老配置里被追加到末尾的预置服务商（如迁移补进来的 Kimi）回到正确位置
     providers = MM.sortProviders(providers);

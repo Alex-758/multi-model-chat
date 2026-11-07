@@ -20,6 +20,7 @@ const ELECTRON = path.join(ROOT, 'node_modules', 'electron', 'dist', 'electron.e
 // surfaces: 改了什么就该跑哪些——定向拉起用，避免全量
 const SUITES = [
   { name: 'smoke-merge-report', tier: 'node',     timeout:  60, surfaces: 'merge.js 分句/聚类/溯源角标' },
+  { name: 'smoke-preset',       tier: 'node',     timeout:  60, surfaces: 'app.js 预置模型目录/官方单价/presetVersion 6 新模型补发迁移' },
   { name: 'audit-providers',    tier: 'node',     timeout:  60, surfaces: 'providers.js 请求契约/错误处理' },
   { name: 'smoke-check',        tier: 'electron', timeout: 180, surfaces: '设置页/导出/启动 DOM' },
   { name: 'smoke-sessions',     tier: 'electron', timeout: 180, surfaces: 'ui-sessions.js 会话 CRUD/渲染' },
