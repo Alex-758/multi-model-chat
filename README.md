@@ -6,7 +6,7 @@
 
 ![框架](https://img.shields.io/badge/framework-Electron%2044-47848f)
 
-![版本](https://img.shields.io/badge/version-1.5-green)
+![版本](https://img.shields.io/badge/version-1.5.0-green)
 
 ## 功能特性
 
