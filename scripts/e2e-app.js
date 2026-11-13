@@ -169,6 +169,9 @@ server.listen(0, '127.0.0.1', () => {
     await sleep(1600);
     const w = BrowserWindow.getAllWindows()[0];
     if (!w) { console.log('FAIL | 窗口未创建'); app.exit(1); return; }
+    // 窗口被遮挡/隐藏时 Electron 节流 RAF，流式绘制（RAF 批处理）随之停摆：
+    // 「停止生成」等块断言流中已渲染文本，遮挡时会随机挂（请求在发、正文零字符）
+    try { w.setBackgroundThrottling(false); } catch (e) { /* 老版本无此 API 时按原样跑 */ }
     const js = code => w.webContents.executeJavaScript(code, true);
 
     async function waitFor(expr, timeout) {
@@ -689,6 +692,56 @@ server.listen(0, '127.0.0.1', () => {
       return JSON.stringify({ before: before, after: after, back: back });
     });
 
+    // ---------- 16.5 检查更新（GitHub Releases API：进程内 stub fetch，不动真实网络） ----------
+    await run('检查更新：发现新版本/已是最新/未发布 三态 + 下载外链转交', async () => {
+      const cur = await js('window.api.appVersion()');
+      const origFetch = global.fetch;
+      let ghMode = 'newer';
+      // dev harness 里 app.getVersion() 是 electron.exe 自身版本（如 44.3.0），生产打包才是应用版本；
+      // 「新版本」tag 必须动态大于当前版本，不能写死
+      global.fetch = async (url, opts) => {
+        if (String(url).indexOf('api.github.com') >= 0) {
+          if (ghMode === 'newer') return { ok: true, status: 200, json: async () => ({ tag_name: 'v999.0.0', html_url: 'https://github.com/Alex-758/multi-model-chat/releases/tag/v999.0.0' }) };
+          if (ghMode === 'same') return { ok: true, status: 200, json: async () => ({ tag_name: 'v' + cur, html_url: 'https://github.com/Alex-758/multi-model-chat/releases/tag/v' + cur }) };
+          return { ok: false, status: 404, json: async () => ({ message: 'Not Found' }) };
+        }
+        return origFetch(url, opts); // 其余请求（chat/catalog）走原通道
+      };
+      try {
+        await js("(function(){ MM.settings.open(); document.querySelector('.settings-nav[data-pane=\"data\"]').click(); })()");
+        await sleep(250);
+        // 当前版本行显示（app:version IPC）
+        const ver = await js("(function(){ var rows=[].slice.call(document.querySelectorAll('#pane-data .hrow')); var r=rows.filter(function(x){return x.textContent.indexOf('当前版本')>=0;})[0]; return r?r.textContent:''; })()");
+        assert(ver.indexOf('v' + cur) >= 0, '当前版本未显示: ' + ver);
+        const clickCheck = async () => {
+          await js("[].slice.call(document.querySelectorAll('#pane-data button')).filter(function(b){return b.textContent==='检查更新';})[0].click()");
+          await sleep(250);
+          return js("(document.querySelector('#pane-data .test-result') || {}).textContent");
+        };
+        // 有新版本：显示发现新版本 + 当前版本对照
+        let r = await clickCheck();
+        assert(/发现新版本 v999\.0\.0/.test(r || '') && r.indexOf('当前 v' + cur) >= 0, JSON.stringify(r) + ' cur=' + JSON.stringify(cur));
+        // 前往下载 → window.open → setWindowOpenHandler 转交系统浏览器（opened 收集器）
+        opened.length = 0;
+        await js("[].slice.call(document.querySelectorAll('#pane-data .test-result button')).filter(function(b){return b.textContent==='前往下载';})[0].click()");
+        await sleep(150);
+        assert(opened.indexOf('https://github.com/Alex-758/multi-model-chat/releases/tag/v999.0.0') >= 0, '下载链接未转交系统浏览器: ' + JSON.stringify(opened));
+        // 已是最新
+        ghMode = 'same';
+        r = await clickCheck();
+        assert(/已是最新/.test(r || '') && r.indexOf('v' + cur) >= 0, JSON.stringify(r) + ' cur=' + JSON.stringify(cur));
+        // 未发布任何版本（404）→ 明确失败提示而非空白
+        ghMode = 'none';
+        r = await clickCheck();
+        assert(/检查失败/.test(r || '') && /还没有发布任何版本/.test(r || ''), JSON.stringify(r));
+        await js('MM.settings.close()');
+        await sleep(250);
+      } finally {
+        global.fetch = origFetch;
+      }
+      return 'cur=' + cur;
+    });
+
     // ---------- 17. 导出 ----------
     await run('导出数据：确认提示 + 文件内容 + 图片附件内联（D6）', async () => {
       // 当前会话放一条带图片引用的消息：图片本体在 images/ 目录
@@ -874,7 +927,7 @@ server.listen(0, '127.0.0.1', () => {
       })`);
       assert(t.require === 'undefined' && t.process === 'undefined', JSON.stringify(t));
       // API 面只允许白名单内的方法（并行开发可能新增导出类方法，逐一核对）
-      const allow = ['clearSecret','exportData','exportText','extractDoc','extractDocPath','flushHeld','getAll','getCatalog','importData','listModels','onEvent','onFlush','onNotice','onWinState','pickFiles','readTextPath','saveAll','saveImage','search','send','setSecret','stop','synthesize','testModel','testSearch','winControl'];
+      const allow = ['appVersion','checkUpdate','clearSecret','exportData','exportText','extractDoc','extractDocPath','flushHeld','getAll','getCatalog','importData','listModels','onEvent','onFlush','onNotice','onWinState','pickFiles','readTextPath','saveAll','saveImage','search','send','setSecret','stop','synthesize','testModel','testSearch','winControl'];
       const unknown = t.api.filter(k => allow.indexOf(k) < 0);
       assert(unknown.length === 0 && t.api.indexOf('send') >= 0 && t.api.indexOf('setSecret') >= 0, JSON.stringify(t.api));
       assert(/default-src 'self'/.test(t.csp) && /object-src 'none'/.test(t.csp) && /base-uri 'none'/.test(t.csp), t.csp);

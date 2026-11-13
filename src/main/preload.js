@@ -34,6 +34,9 @@ contextBridge.exposeInMainWorld('api', {
   listModels: (model) => ipcRenderer.invoke('models:list', { model }),
   testModel: (model) => ipcRenderer.invoke('models:test', { model }),
   getCatalog: (force) => ipcRenderer.invoke('catalog:get', force),
+  // 版本与更新检查（设置页「关于与更新」卡片）
+  appVersion: () => ipcRenderer.invoke('app:version'),
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
   // 搜索（requestId 用于 chat:stop 中止搜索阶段的网络请求）
   search: (query, count, requestId) => ipcRenderer.invoke('search:query', { query, count, requestId }),
   testSearch: (cfg) => ipcRenderer.invoke('search:test', cfg),

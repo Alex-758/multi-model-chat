@@ -429,6 +429,41 @@ ipcMain.handle('catalog:get', async (e, force) => {
   }
 });
 
+// ---------- IPC：版本与更新检查（GitHub Releases API，设置页手动触发，不后台轮询） ----------
+const RELEASES_URL = 'https://github.com/Alex-758/multi-model-chat/releases';
+ipcMain.handle('app:version', () => app.getVersion());
+// 版本比较：按点分段取数字比大小（1.4.10 > 1.4.9；段数不足补 0；非数字段按 0）
+function isNewerVersion(a, b) {
+  const pa = String(a).split('.'), pb = String(b).split('.');
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = parseInt(pa[i], 10) || 0, y = parseInt(pb[i], 10) || 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+ipcMain.handle('update:check', async () => {
+  const ctrl = new AbortController();
+  const timeout = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    const res = await fetch('https://api.github.com/repos/Alex-758/multi-model-chat/releases/latest', {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'Multi-Model-Chat/' + app.getVersion(), 'Accept': 'application/vnd.github+json' }
+    });
+    if (res.status === 404) throw new Error('仓库还没有发布任何版本');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const j = await res.json();
+    const latest = String(j.tag_name || '').replace(/^v/i, '').trim();
+    if (!latest) throw new Error('返回数据缺少版本号');
+    const current = app.getVersion();
+    return { current, latest, isNewer: isNewerVersion(latest, current), url: j.html_url || RELEASES_URL };
+  } catch (e) {
+    if (e && (e.name === 'AbortError' || /abort/i.test(String(e.name)))) throw new Error('检查超时：网络无响应');
+    throw e;
+  } finally {
+    if (timeout) clearTimeout(timeout); // 失败路径也要清掉计时器
+  }
+});
+
 // ---------- IPC：附件 ----------
 // 渲染层贴图/拖图后把 base64 交给这里：落盘 + 系统 OCR 提取文字，返回引用 id
 ipcMain.handle('images:save', (e, p) => images.saveImage(p));

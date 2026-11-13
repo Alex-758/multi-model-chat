@@ -108,6 +108,9 @@ server.listen(0, '127.0.0.1', () => {
     await sleep(1600);
     const w = BrowserWindow.getAllWindows()[0];
     if (!w) { console.log('FAIL | 窗口未创建'); app.exit(1); return; }
+    // 窗口被遮挡/隐藏时 Electron 节流 RAF，流式绘制（RAF 批处理）随之停摆：
+    // 本套件三处断言流中已渲染文本，遮挡时会随机挂（请求在发、正文零字符）
+    try { w.setBackgroundThrottling(false); } catch (e) { /* 老版本无此 API 时按原样跑 */ }
     const js = code => w.webContents.executeJavaScript(code, true);
     async function waitFor(expr, timeout) {
       const t0 = Date.now();

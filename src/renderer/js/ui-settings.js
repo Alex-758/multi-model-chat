@@ -571,9 +571,12 @@ window.MM = window.MM || {};
     const getListBtn = U.el('button', {
       class: 'btn-secondary',
       onclick: async (e) => {
+        // 事件派发结束后 DOM 会把 currentTarget 置 null：await 之后才读拿到的是 null，
+        // 「获取中…/禁用」反馈会整段失效。必须在挂起前捕获
+        const btn = e.currentTarget;
         p.baseUrl = U.$('#p-url').value.trim();
         if (!(await commitKeyIfTyped())) return; // 输入了新密钥先保存
-        const list = await fetchList(p, e.currentTarget);
+        const list = await fetchList(p, btn);
         if (list) { U.toast('获取到 ' + list.length + ' 个模型'); renderModelEntries(); }
       }
     }, '获取模型列表');
@@ -925,6 +928,10 @@ window.MM = window.MM || {};
           MM.state.currentId = top ? top.id : null;
           U.$('#tgl-auto').checked = !!MM.state.config.synthesis.autoMerge;
           U.$('#tgl-auto').closest('.toggle').classList.toggle('on', !!MM.state.config.synthesis.autoMerge);
+          // 顶栏开关的行为读的是 DOM、权威在 config：导入后每个开关都要同步。
+          // 漏了 tgl-review 会「界面关着却自动审查」或「界面开着却不审查」，重启后状态又翻转
+          U.$('#tgl-review').checked = !!MM.state.config.synthesis.crossReview;
+          U.$('#tgl-review').closest('.toggle').classList.toggle('on', !!MM.state.config.synthesis.crossReview);
           // 旧备份迁移后带明文密钥：先落盘交给主进程保管，再从渲染层状态剥离。
           // 落盘失败时不要剥离：否则明文密钥只存在于内存里的旧值，用户又没收到任何提示。
           const savedOk = await MM.save();
@@ -958,6 +965,47 @@ window.MM = window.MM || {};
     }, U.el('span', {}, '清空所有会话'), U.el('small', {}, '删除全部聊天记录，保留模型配置')));
 
     pane.appendChild(box);
+
+    // ---- 关于与更新：当前版本 + 应用内检查（GitHub Releases API）+ 跳转下载页 ----
+    // 外链一律走 window.open：主进程 setWindowOpenHandler 会转交系统浏览器（应用内不导航）
+    const RELEASES_URL = 'https://github.com/Alex-758/multi-model-chat/releases';
+    const verEl = U.el('span', {}, '…');
+    api.appVersion().then(v => { verEl.textContent = 'v' + v; }).catch(() => { verEl.textContent = '未知'; });
+    const checkBtn = U.el('button', { class: 'btn-secondary' }, '检查更新');
+    const updResult = U.el('div', { class: 'test-result' });
+    const gotoBtn = U.el('button', { class: 'btn-secondary' }, '前往 GitHub Releases');
+    gotoBtn.addEventListener('click', () => { window.open(RELEASES_URL); });
+    checkBtn.addEventListener('click', async () => {
+      checkBtn.disabled = true; checkBtn.textContent = '检查中…';
+      updResult.className = 'test-result';
+      try {
+        const r = await api.checkUpdate();
+        if (r.isNewer) {
+          updResult.className = 'test-result ok';
+          updResult.textContent = '发现新版本 v' + r.latest + '（当前 v' + r.current + '）';
+          const dl = U.el('button', { class: 'btn-primary', style: 'margin-left:10px' }, '前往下载');
+          dl.addEventListener('click', () => { window.open(r.url); });
+          updResult.appendChild(dl);
+        } else {
+          updResult.className = 'test-result ok';
+          updResult.textContent = '已是最新（v' + r.current + '）';
+        }
+      } catch (e) {
+        updResult.className = 'test-result err';
+        updResult.textContent = '✗ 检查失败：' + ((e && e.message) || e);
+      }
+      checkBtn.disabled = false; checkBtn.textContent = '检查更新';
+    });
+    // 宽度与上方 .data-actions 卡片（max-width:420px）对齐：左缘同起点、右缘不铺满整行；
+    // 与上方卡片拉开一段呼吸间距
+    pane.appendChild(U.el('div', { class: 'p-card', style: 'max-width:420px;margin-top:26px' },
+      U.el('div', { class: 'p-card-h' }, U.el('span', {}, '关于与更新')),
+      U.el('div', { class: 'p-card-b' },
+        hrow('当前版本', verEl, gotoBtn),
+        hrow('检查更新', checkBtn),
+        updResult,
+        U.el('div', { class: 'hint', style: 'margin-top:10px' },
+          '对比 GitHub Releases 上的最新版本；未发布任何版本或离线时会提示失败，可点上方按钮前往发布页。'))));
   }
 
   // ---------- 事件绑定 ----------

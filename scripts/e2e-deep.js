@@ -34,6 +34,12 @@ const server = http.createServer(async (req, res) => {
   let raw = '';
   req.on('data', c => { raw += c; });
   req.on('end', async () => {
+    if (req.url.indexOf('/vslow/models') >= 0) {
+      await sleep(500); // 「获取模型列表」按钮反馈回归：需要一个可观察的窗口期
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'sm1' }, { id: 'sm2' }] }));
+      return;
+    }
     if (req.url.indexOf('/models') >= 0) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ data: [{ id: 'm1' }, { id: 'm2' }] }));
@@ -120,6 +126,10 @@ server.listen(0, '127.0.0.1', () => {
     await sleep(1600);
     const w = BrowserWindow.getAllWindows()[0];
     if (!w) { console.log('FAIL | 窗口未创建'); app.exit(1); return; }
+    // 窗口被遮挡/隐藏时 Electron 会节流 RAF，流式绘制（RAF 批处理）随之停摆：
+    // 「流式中导入/清空」断言的是流中已渲染文本，是全套件唯一依赖它的两块——
+    // 曾随机挂掉（请求在发、卡片在、正文 6 秒零字符）。测试环境关掉节流拿到真实帧
+    try { w.setBackgroundThrottling(false); } catch (e) { /* 老版本无此 API 时按原样跑 */ }
     const js = code => w.webContents.executeJavaScript(code, true);
 
     const consoleErrors = [];
@@ -685,6 +695,30 @@ server.listen(0, '127.0.0.1', () => {
       return 'ok';
     });
 
+    await run('获取模型列表：按钮进入「获取中…」并禁用（await 后读 currentTarget 曾使反馈整段失效）', async () => {
+      try {
+        await js(`(function(){ MM.settings.open(); document.querySelector('.settings-nav[data-pane="models"]').click();
+          [].slice.call(document.querySelectorAll('#pane-models button')).filter(function(b){return b.textContent.indexOf('添加自定义服务商')>=0;})[0].click(); })()`);
+        await sleep(250);
+        await js("(function(){ document.querySelector('#p-url').value='http://127.0.0.1:" + port + "/v1/vslow'; })()");
+        await js("(function(){ var b=[].slice.call(document.querySelectorAll('#pane-models button')).filter(function(x){return x.textContent==='获取模型列表';})[0]; b.click(); })()");
+        // commitKeyIfTyped 先 await，fetchList 的禁用在微任务续体里：留一拍再取态
+        // （mock 500ms 才回，120ms 时必然仍在「获取中…」窗口内）
+        await sleep(120);
+        const during = await js("(function(){ var b=[].slice.call(document.querySelectorAll('#pane-models button')).filter(function(x){return x.textContent==='获取中…';})[0]; return b ? { seen: true, disabled: b.disabled } : { seen: false }; })()");
+        assert(during.seen && during.disabled === true, '按钮未进入获取中…/禁用态: ' + JSON.stringify(during));
+        const restored = await waitFor("(function(){ var b=[].slice.call(document.querySelectorAll('#pane-models button')).filter(function(x){return x.textContent==='获取模型列表';})[0]; return b && !b.disabled; })()", 6000);
+        assert(restored, '完成后按钮未恢复');
+        const toast = await js("document.querySelector('#toast').textContent");
+        assert(/获取到 2 个模型/.test(toast), 'toast=' + toast);
+        await js("document.querySelector('#toast').classList.add('hidden')"); // 残留 toast 会污染下一块的断言
+      } finally {
+        await js('MM.settings.close()');
+        await sleep(250);
+      }
+      return 'ok';
+    });
+
     // ================= E. 导入容错 =================
     async function importJson(obj, file) {
       nextOpen = path.join(DATA, file);
@@ -743,11 +777,33 @@ server.listen(0, '127.0.0.1', () => {
       return 'ok';
     });
 
+    // 顶栏开关的行为读 DOM、权威在 config：导入后必须全部同步（曾漏 tgl-review，
+    // 导入含 crossReview 的备份后界面关着却按配置走，重启又翻转）
+    await run('导入同步顶栏开关：交叉审查/自动综合及胶囊高亮', async () => {
+      const cfgA = JSON.parse(JSON.stringify(savedConfig));
+      cfgA.synthesis = { synthSource: 'frontend', autoMerge: false, crossReview: true };
+      await importJson({ config: cfgA, sessions: [{ id: 'bk1', title: '开', createdAt: 1, updatedAt: 1, pinned: false, messages: [] }] }, 'tgl-on.json');
+      const a = await js("(function(){ return { auto: document.querySelector('#tgl-auto').checked, autoOn: document.querySelector('#tgl-auto').closest('.toggle').classList.contains('on'), rv: document.querySelector('#tgl-review').checked, rvOn: document.querySelector('#tgl-review').closest('.toggle').classList.contains('on') }; })()");
+      assert(a.rv === true && a.rvOn === true && a.auto === false && a.autoOn === false, JSON.stringify(a));
+      const cfgB = JSON.parse(JSON.stringify(savedConfig));
+      cfgB.synthesis = { synthSource: 'frontend', autoMerge: true, crossReview: false };
+      await importJson({ config: cfgB, sessions: [{ id: 'bk2', title: '关', createdAt: 1, updatedAt: 1, pinned: false, messages: [] }] }, 'tgl-off.json');
+      const b = await js("(function(){ return { auto: document.querySelector('#tgl-auto').checked, rv: document.querySelector('#tgl-review').checked, rvOn: document.querySelector('#tgl-review').closest('.toggle').classList.contains('on') }; })()");
+      assert(b.rv === false && b.rvOn === false && b.auto === true, JSON.stringify(b));
+      await restoreConfig();
+      return 'on=' + JSON.stringify(a) + ' off=' + JSON.stringify(b);
+    });
+
     await run('流式中导入：旧请求立即中止，可马上发送', async () => {
       await newSession();
       await setChips(['p1::slow']);
       await sendText('流式中导入');
-      assert(await waitFor("(document.querySelector('.ac-body') && document.querySelector('.ac-body').textContent.length > 2)", 6000), '没有开始输出');
+      // 失败时必须能区分「请求没发出」还是「卡片没渲染」：两者修法完全不同
+      const started = await waitFor("(document.querySelector('.ac-body') && document.querySelector('.ac-body').textContent.length > 2)", 6000);
+      if (!started) {
+        const d = await js("(function(){ return { chipsOn: [].map.call(document.querySelectorAll('#model-chips .chip.on'), function(c){return c.getAttribute('data-model-id');}), cards: document.querySelectorAll('.answer-card').length, stop: document.querySelector('#btn-send').classList.contains('stop'), toast: document.querySelector('#toast').textContent }; })()");
+        throw new Error('没有开始输出 reqs=' + requests.length + ' dom=' + JSON.stringify(d));
+      }
       const disk = JSON.parse(fs.readFileSync(path.join(DATA, 'store.json'), 'utf8'));
       await importJson({ config: disk.config, sessions: [{ id: 'imp', title: '导入流式中', createdAt: 9, updatedAt: 9, pinned: false, messages: [] }] }, 'imp-stream.json');
       const t = await js(`({ title: document.querySelector('#session-title').textContent,
@@ -767,7 +823,11 @@ server.listen(0, '127.0.0.1', () => {
       await newSession();
       await setChips(['p1::slow']);
       await sendText('流式中清空');
-      assert(await waitFor("(document.querySelector('.ac-body') && document.querySelector('.ac-body').textContent.length > 2)", 6000), '没有开始输出');
+      const started2 = await waitFor("(document.querySelector('.ac-body') && document.querySelector('.ac-body').textContent.length > 2)", 6000);
+      if (!started2) {
+        const d = await js("(function(){ return { chipsOn: [].map.call(document.querySelectorAll('#model-chips .chip.on'), function(c){return c.getAttribute('data-model-id');}), cards: document.querySelectorAll('.answer-card').length, stop: document.querySelector('#btn-send').classList.contains('stop'), toast: document.querySelector('#toast').textContent }; })()");
+        throw new Error('没有开始输出 reqs=' + requests.length + ' dom=' + JSON.stringify(d));
+      }
       await js(`(function(){
         MM.settings.open();
         document.querySelector('.settings-nav[data-pane="data"]').click();
