@@ -493,12 +493,12 @@ window.MM = window.MM || {};
   // ---------- 渲染 ----------
   function renderTitle() {
     const s = MM.sessions.current();
-    U.$('#session-title').textContent = s ? s.title : 'Multi-Model Chat';
+    U.$('#session-title').textContent = s ? s.title : 'Jury';
   }
 
   function emptyState() {
     const box = U.el('div', { class: 'empty-state' },
-      U.el('h1', {}, 'Multi-Model Chat'),
+      U.el('h1', {}, 'Jury'),
       U.el('p', {}, '在下方输入问题，同时获得多个模型的回答'));
     // 没有任何已配置密钥的模型时显示引导（配置过后不再出现）
     const hasUsableModel = MM.settings.allFlatModels().some(m => m.hasKey);

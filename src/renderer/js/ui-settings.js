@@ -968,7 +968,7 @@ window.MM = window.MM || {};
 
     // ---- 关于与更新：当前版本 + 应用内检查（GitHub Releases API）+ 跳转下载页 ----
     // 外链一律走 window.open：主进程 setWindowOpenHandler 会转交系统浏览器（应用内不导航）
-    const RELEASES_URL = 'https://github.com/Alex-758/multi-model-chat/releases';
+    const RELEASES_URL = 'https://github.com/Alex-758/jury/releases';
     const verEl = U.el('span', {}, '…');
     api.appVersion().then(v => { verEl.textContent = 'v' + v; }).catch(() => { verEl.textContent = '未知'; });
     const checkBtn = U.el('button', { class: 'btn-secondary' }, '检查更新');

@@ -97,7 +97,7 @@ function createWindow() {
     minWidth: 980,
     minHeight: 640,
     backgroundColor: '#faf9f5',
-    title: 'Multi-Model Chat',
+    title: 'Jury',
     icon: path.join(__dirname, '../../build/icon.ico'),
     // 一体化标题栏：隐藏系统标题条；右上角三键由渲染层自绘（#win-controls，
     // 经 win:control IPC 调 minimize/maximize/close）。原生 WCO 的按钮区是系统
@@ -273,7 +273,7 @@ ipcMain.handle('store:save', (e, data) => {
     dialog.showMessageBox({
       type: 'warning',
       title: '检测到多实例写入',
-      message: '检测到另一个 Multi-Model Chat 实例修改了数据文件。\n\n旧数据已自动备份为 store.json.bak-<时间戳>（位于 %APPDATA%\\Multi-Model Chat，保留最近 5 份），本次保存可能覆盖另一实例的最新改动。请尽量避免同时运行多个实例。'
+      message: '检测到另一个 Jury 实例修改了数据文件。\n\n旧数据已自动备份为 store.json.bak-<时间戳>（位于 %APPDATA%\\Jury，保留最近 5 份），本次保存可能覆盖另一实例的最新改动。请尽量避免同时运行多个实例。'
     });
   }
   return true;
@@ -430,7 +430,7 @@ ipcMain.handle('catalog:get', async (e, force) => {
 });
 
 // ---------- IPC：版本与更新检查（GitHub Releases API，设置页手动触发，不后台轮询） ----------
-const RELEASES_URL = 'https://github.com/Alex-758/multi-model-chat/releases';
+const RELEASES_URL = 'https://github.com/Alex-758/jury/releases';
 ipcMain.handle('app:version', () => app.getVersion());
 // 版本比较：按点分段取数字比大小（1.4.10 > 1.4.9；段数不足补 0；非数字段按 0）
 function isNewerVersion(a, b) {
@@ -445,9 +445,9 @@ ipcMain.handle('update:check', async () => {
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), 12000);
   try {
-    const res = await fetch('https://api.github.com/repos/Alex-758/multi-model-chat/releases/latest', {
+    const res = await fetch('https://api.github.com/repos/Alex-758/jury/releases/latest', {
       signal: ctrl.signal,
-      headers: { 'User-Agent': 'Multi-Model-Chat/' + app.getVersion(), 'Accept': 'application/vnd.github+json' }
+      headers: { 'User-Agent': 'Jury/' + app.getVersion(), 'Accept': 'application/vnd.github+json' }
     });
     if (res.status === 404) throw new Error('仓库还没有发布任何版本');
     if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -551,7 +551,7 @@ ipcMain.handle('search:test', (e, cfg) => {
 ipcMain.handle('data:export', async () => {
   const r = await dialog.showSaveDialog(win, {
     title: '导出数据',
-    defaultPath: 'multi-model-chat-backup.json',
+    defaultPath: 'jury-backup.json',
     filters: [{ name: 'JSON', extensions: ['json'] }]
   });
   if (r.canceled || !r.filePath) return null;
@@ -613,7 +613,38 @@ ipcMain.handle('data:import', async () => {
   return { config: legacyFlat ? imported.config : sanitizeConfig(imported.config), sessions: db.sessions, backup: backupPath };
 });
 
+// ---------- 改名迁移（Multi-Model Chat → Jury）----------
+// 把旧 userData 目录的 store.json / catalog.json / window-state.json / images/ 复制到新目录
+// （复制不删除：旧目录原样保留作回退保险）；只在新目录还没有 store.json 时执行，幂等。
+// 独立成 (freshDir, legacyDir) 纯参数函数：smoke-migrate 套件直接对临时目录做回归
+function migrateLegacyData(freshDir, legacyDir) {
+  const out = { migrated: false, copied: [] };
+  try {
+    if (fs.existsSync(path.join(freshDir, 'store.json'))) return out; // 新目录已有数据
+    if (!fs.existsSync(path.join(legacyDir, 'store.json'))) return out; // 旧目录无数据
+    fs.mkdirSync(freshDir, { recursive: true }); // 首次启动新目录可能尚未创建
+    for (const f of ['store.json', 'catalog.json', 'window-state.json']) {
+      const s = path.join(legacyDir, f);
+      if (fs.existsSync(s)) { fs.copyFileSync(s, path.join(freshDir, f)); out.copied.push(f); }
+    }
+    const si = path.join(legacyDir, 'images');
+    if (fs.existsSync(si)) {
+      fs.cpSync(si, path.join(freshDir, 'images'), { recursive: true });
+      out.copied.push('images/');
+    }
+    out.migrated = true;
+    console.log('[jury] 已从旧数据目录迁移: ' + legacyDir + ' -> ' + freshDir + '（' + out.copied.join(', ') + '）');
+  } catch (e) {
+    console.warn('[jury] 旧数据迁移失败（不影响启动，也可用「导入数据」恢复）：', e && e.message);
+  }
+  return out;
+}
+
 app.whenReady().then(() => {
+  // 改名迁移（Multi-Model Chat → Jury）：userData 目录名跟随应用名，改名后首次启动
+  // 指向空的 %APPDATA%\Jury，老用户的密钥与会话在旧目录里。必须在 store.init 前执行。
+  // 仅打包版迁移：开发/测试环境用临时 userData（防止把真实密钥复制进测试目录）
+  if (app.isPackaged) migrateLegacyData(app.getPath('userData'), path.join(app.getPath('appData'), 'Multi-Model Chat'));
   store.init(app.getPath('userData'));
   const loaded = store.load();
   if (loaded) db = { config: loaded.config || {}, sessions: loaded.sessions || [] };
@@ -660,3 +691,6 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+
+// 测试出口（不影响线上逻辑）：smoke-migrate 对临时目录回归迁移逻辑
+module.exports = { _migrateForTest: migrateLegacyData };

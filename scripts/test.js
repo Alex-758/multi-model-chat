@@ -29,6 +29,7 @@ const SUITES = [
   { name: 'smoke-usage',        tier: 'electron', timeout: 180, surfaces: 'ui-usage.js 用量统计面板/派生口径/缓存命中' },
   { name: 'smoke-real',         tier: 'electron', timeout: 180, surfaces: 'store.js 异常路径/错误遮罩/冲突备份' },
   { name: 'smoke-corrupt',      tier: 'electron', timeout: 120, surfaces: 'store.js 损坏启动/图片 gc 保护' },
+  { name: 'smoke-migrate',      tier: 'electron', timeout:  60, surfaces: 'main.js 改名数据迁移（Jury ← Multi-Model Chat）' },
   { name: 'smoke-savefail',     tier: 'electron', timeout: 120, surfaces: 'store.js 写盘失败/脏标记/关窗横门' },
   { name: 'e2e-app',            tier: 'electron', timeout: 180, surfaces: 'preload/main.js 安全面/CSP/密钥隔离/XSS' },
   { name: 'e2e-attach',         tier: 'electron', timeout: 180, surfaces: 'images.js 附件/图片/文档提取' },

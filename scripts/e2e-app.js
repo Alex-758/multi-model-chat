@@ -701,8 +701,8 @@ server.listen(0, '127.0.0.1', () => {
       // 「新版本」tag 必须动态大于当前版本，不能写死
       global.fetch = async (url, opts) => {
         if (String(url).indexOf('api.github.com') >= 0) {
-          if (ghMode === 'newer') return { ok: true, status: 200, json: async () => ({ tag_name: 'v999.0.0', html_url: 'https://github.com/Alex-758/multi-model-chat/releases/tag/v999.0.0' }) };
-          if (ghMode === 'same') return { ok: true, status: 200, json: async () => ({ tag_name: 'v' + cur, html_url: 'https://github.com/Alex-758/multi-model-chat/releases/tag/v' + cur }) };
+          if (ghMode === 'newer') return { ok: true, status: 200, json: async () => ({ tag_name: 'v999.0.0', html_url: 'https://github.com/Alex-758/jury/releases/tag/v999.0.0' }) };
+          if (ghMode === 'same') return { ok: true, status: 200, json: async () => ({ tag_name: 'v' + cur, html_url: 'https://github.com/Alex-758/jury/releases/tag/v' + cur }) };
           return { ok: false, status: 404, json: async () => ({ message: 'Not Found' }) };
         }
         return origFetch(url, opts); // 其余请求（chat/catalog）走原通道
@@ -725,7 +725,7 @@ server.listen(0, '127.0.0.1', () => {
         opened.length = 0;
         await js("[].slice.call(document.querySelectorAll('#pane-data .test-result button')).filter(function(b){return b.textContent==='前往下载';})[0].click()");
         await sleep(150);
-        assert(opened.indexOf('https://github.com/Alex-758/multi-model-chat/releases/tag/v999.0.0') >= 0, '下载链接未转交系统浏览器: ' + JSON.stringify(opened));
+        assert(opened.indexOf('https://github.com/Alex-758/jury/releases/tag/v999.0.0') >= 0, '下载链接未转交系统浏览器: ' + JSON.stringify(opened));
         // 已是最新
         ghMode = 'same';
         r = await clickCheck();

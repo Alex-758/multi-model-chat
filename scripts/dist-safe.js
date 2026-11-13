@@ -39,8 +39,8 @@ if (r.status !== 0) {
 // 版本号例行手改（1.4.3→1.4.6 均如此），少校验就会新旧产物混在 dist/ 里没人发现
 const version = require(path.join(ROOT, 'package.json')).version;
 const expected = [
-  'Multi-Model Chat Setup ' + version + '.exe',
-  'Multi-Model-Chat-Portable-' + version + '.exe',
+  'Jury Setup ' + version + '.exe',
+  'Jury-Portable-' + version + '.exe',
   'latest.yml'
 ];
 const built = fs.readdirSync(OUT);

@@ -750,7 +750,7 @@ MM.defaults = {
     const panel = document.createElement('div');
     panel.setAttribute('style', 'max-width:640px;width:100%;background:#fffdf9;color:#3d3929;border-radius:12px;padding:22px 24px;font-size:13px;line-height:1.7;box-shadow:0 18px 60px rgba(0,0,0,.35);');
     panel.innerHTML = '<h2 style="font-size:16px;margin:0 0 8px">应用初始化失败</h2>' +
-      '<p style="margin:0 0 10px;color:#6b675a">数据文件可能已损坏或格式异常。请先备份 <code>%APPDATA%\\Multi-Model Chat\\store.json</code>，再重新加载；如需重置，可删除该文件后重启（会话记录会丢失）。</p>';
+      '<p style="margin:0 0 10px;color:#6b675a">数据文件可能已损坏或格式异常。请先备份 <code>%APPDATA%\\Jury\\store.json</code>，再重新加载；如需重置，可删除该文件后重启（会话记录会丢失）。</p>';
     const pre = document.createElement('pre');
     pre.setAttribute('style', 'max-height:180px;overflow:auto;background:#f2f0e8;border-radius:8px;padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all;');
     pre.textContent = detail;

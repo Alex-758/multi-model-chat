@@ -35,7 +35,7 @@ function modelsEndpoint(m) {
 }
 
 function authHeaders(m) {
-  const h = { 'Content-Type': 'application/json', 'User-Agent': 'Multi-Model-Chat/1.0' };
+  const h = { 'Content-Type': 'application/json', 'User-Agent': 'Jury/1.0' };
   const key = (m.apiKey || '').trim();
   if (m.apiFormat === 'anthropic') {
     h['x-api-key'] = key;

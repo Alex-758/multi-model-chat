@@ -1,4 +1,4 @@
-# Multi-Model Chat
+# Jury
 
 同时调用多个大模型、并行对比回答、互审仲裁、一键合并综合的本地桌面应用（Electron）。
 
@@ -52,10 +52,10 @@
 
 ## 获取与运行
 
-- **下载**：前往 [GitHub Releases](https://github.com/Alex-758/multi-model-chat/releases) 页获取安装版 / 便携版（如该页还没有发布产物，请从源码构建）；应用内「检查更新」也会指向这里
+- **下载**：前往 [GitHub Releases](https://github.com/Alex-758/jury/releases) 页获取安装版 / 便携版（如该页还没有发布产物，请从源码构建）；应用内「检查更新」也会指向这里
 - **从源码构建**：见下方「自己构建」，产物在 `dist/`：
-  - `Multi-Model-Chat-Portable-x.x.x.exe`：免安装便携版，双击即用
-  - `Multi-Model Chat Setup x.x.x.exe`：安装版
+  - `Jury-Portable-x.x.x.exe`：免安装便携版，双击即用
+  - `Jury Setup x.x.x.exe`：安装版
 
 首次使用：左下角「设置 → 模型配置」填写各服务商的 API Key（密钥仅保存在本机用户目录，不上传任何服务器）。
 
@@ -88,7 +88,8 @@ scripts/         分层测试（单元 / 冒烟 / 端到端 / 性能 / 猴子测
 
 ## 安全与隐私
 
-- API 密钥与全部会话数据仅保存在本机（`%APPDATA%\Multi-Model Chat\`），不上传任何服务器
+- API 密钥与全部会话数据仅保存在本机（`%APPDATA%\Jury\`），不上传任何服务器
+- 应用由 Multi-Model Chat 更名而来：以 Jury 之名首次启动时，会自动把旧数据目录的一次性迁移过来（store.json / catalog.json / window-state.json / images/，复制不删除，旧目录原样保留）
 - 磁盘上的 API Key 使用系统凭据保护（Windows DPAPI / Electron safeStorage）加密存储；渲染层永远拿不到明文密钥（只有 hasKey 标记）
 - 渲染层全程沙箱 + CSP（`connect-src 'self'`，渲染层不能直连任意网络），IPC API 面经白名单约束并有端到端回归；发请求的连接参数一律以主进程存量为准，防止被注入的页面把密钥引流到任意地址
 - Markdown 渲染先转义后解析，链接仅放行 http/https 且经系统浏览器打开，应用内不发生页面导航
